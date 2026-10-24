@@ -104,10 +104,10 @@ class CodexReserveFrontendTests(unittest.TestCase):
 
     def test_policy_presentation_uses_lowest_window_and_allows_equality(self) -> None:
         script = "\n".join([
-            "const snapshot={primary:{remainingPercent:20},secondary:{remainingPercent:10},limitReached:false};",
+            "const snapshot={status:'ready',checkedAt:'2026-10-23T00:00:00Z',primary:{remainingPercent:20},secondary:{remainingPercent:10},limitReached:false};",
             "const equal=codexRateReservePresentation(snapshot,10);",
             "const below=codexRateReservePresentation(snapshot,11);",
-            "const zero=codexRateReservePresentation({primary:{remainingPercent:0},limitReached:false},0);",
+            "const zero=codexRateReservePresentation({...snapshot,primary:{remainingPercent:0},secondary:null,limitReached:false},0);",
             "const official=codexRateReservePresentation({...snapshot,limitReached:true},0);",
             "const malformed=codexRateReservePresentation({primary:{remainingPercent:20},secondary:{remainingPercent:'bad'},limitReached:false},0);",
             "const booleanValue=codexRateReservePresentation({primary:{remainingPercent:true},limitReached:false},0);",
@@ -123,6 +123,48 @@ class CodexReserveFrontendTests(unittest.TestCase):
         self.assertEqual(payload["booleanValue"]["tone"], "neutral")
         self.assertEqual(payload["outOfRange"]["tone"], "neutral")
         self.assertIn("ต่ำสุด 10%", payload["equal"]["text"])
+
+    def test_stale_and_unknown_quota_never_advertise_ready_or_invent_check_time(self):
+        payload = self.run_node("""
+const window={usedPercent:10,remainingPercent:90};
+const inputs=[
+ {status:'stale',capturedAt:'2026-10-22T00:00:00Z',primary:window},
+ {status:'ready',primary:window},
+ {status:'unavailable',capturedAt:'2026-10-22T00:00:00Z',primary:window},
+ {status:'unknown',capturedAt:'2026-10-22T00:00:00Z',primary:window},
+ {status:'ready',capturedAt:'invalid',primary:window},
+];
+const values=inputs.map(input=>{const snapshot=normalizeCodexRatePayload(input);return {
+ snapshot,display:getCodexRateDisplayState(snapshot),reserve:codexRateReservePresentation(snapshot,15)};});
+const fresh=normalizeCodexRatePayload({status:'ready',capturedAt:'2026-10-23T00:00:00Z',primary:window});
+process.stdout.write(JSON.stringify({values,fresh,ready:codexRateReservePresentation(fresh,15)}));
+""")
+        for value in payload["values"]:
+            self.assertNotEqual(value["reserve"]["tone"], "ready")
+            self.assertNotIn("พร้อมเริ่มงาน", value["reserve"]["text"])
+            self.assertEqual(value["snapshot"]["primary"]["remainingPercent"], 90)
+        self.assertEqual(payload["values"][0]["display"], "stale")
+        self.assertIsNone(payload["values"][1]["snapshot"]["checkedAt"])
+        self.assertIsNone(payload["values"][4]["snapshot"]["checkedAt"])
+        self.assertEqual(payload["fresh"]["checkedAt"], "2026-10-23T00:00:00.000Z")
+        self.assertEqual(payload["ready"]["tone"], "ready")
+
+    def test_connection_card_uses_same_uncertain_quota_state(self):
+        helpers = "\n".join(function_block(self.main, name) for name in (
+            "formatCodexRateReset", "formatCodexRateCheckedAt", "codexQuotaConnectionItem",
+        ))
+        payload = self.run_node(helpers + """
+const state={codexRate:{snapshot:null}};
+const values=['stale','unavailable','ready'].map(status=>{
+ state.codexRate.snapshot={status,checkedAt:'2026-10-23T00:00:00Z',primary:{remainingPercent:90,usedPercent:10}};
+ return codexQuotaConnectionItem();
+});
+process.stdout.write(JSON.stringify(values));
+""")
+        self.assertEqual([value["status"] for value in payload], ["needs_attention", "needs_attention", "connected"])
+        self.assertIn("ข้อมูลโควตาเดิม", payload[0]["detailTh"])
+        self.assertIn("ยังยืนยันโควตาล่าสุดไม่ได้", payload[1]["detailTh"])
+        self.assertIn("90%", payload[0]["detailTh"])
 
     def test_reserve_normalizer_rejects_coerced_non_numeric_values(self) -> None:
         script = "\n".join([

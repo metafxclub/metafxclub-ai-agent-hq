@@ -1,0 +1,26 @@
+PackageVersion: 1.04
+CandidateStatus: COMPILE_VERIFIED_SOURCE_ONLY
+Source: integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5
+SourceSHA256: 21BD0EAE671740B67590BE0CD188FBF6649EA154CCE2E1E8E46A27A21F2FC946
+SourceBytes: 249057
+CompileResult: PASS
+CompileMode: VISIBLE_METAEDITOR64_EXACT_SOURCE
+MetaEditorVersion: 5.0.0.6230
+CompileErrors: 0
+CompileWarnings: 0
+CompileElapsedMilliseconds: 11137
+CompileCpuTarget: AVX2+FMA3
+CompiledAtUTC: 2026-10-21T08:35:18.461765+00:00
+CompiledSourceSHA256: 21BD0EAE671740B67590BE0CD188FBF6649EA154CCE2E1E8E46A27A21F2FC946
+CurrentSourceMatchesCompiledSource: true
+LocalCompileBinaryBytes: 295868
+LocalCompileBinarySHA256: AF91B5788D6B3C84848EF71C78D9B2B3967F44192C60CC06D2C2B6FE30DBC54E
+CompileProof: COMPILE_PROOF.png
+CompileProofSHA256: 2F7964E5299019C3F2D6AFD2F7424A0777B569513F509D96C70F486662EAA793
+ReleasePolicy: SOURCE_ONLY
+CompiledBinaryIncluded: false
+CompiledBinaryEligibleForDistribution: false
+FocusedStaticAndContractTests: PASS (59 tests, 0 failures, 0 errors, 0 skipped)
+DemoExecutionValidated: false
+LiveExecutionValidated: false
+Safety: Compile phase only: Gateway EA intentionally removed from the chart before compilation and remained detached. Terminal stayed open; Algo Trading unchanged; no order or trade command sent. Demo and Live execution were not validated.

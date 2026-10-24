@@ -598,6 +598,7 @@ void OnTick() {{
                         12000,
                         result_profile=self.runner.EA_FACTORY_SOURCE_RESULT_PROFILE,
                         scoped_workspace_write_root=source_root,
+                        validated_strategy_context=self.runner._ea_factory_source_repair_context_from_binding(binding),
                     )
                 self.assertIn(
                     "current Factory accepts only Strategy Spec v3 compact A-J",

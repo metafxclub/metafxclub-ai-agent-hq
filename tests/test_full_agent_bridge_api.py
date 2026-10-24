@@ -59,6 +59,10 @@ class FakeGateway:
             "ok": True,
             "status": "ready",
             "process": {"status": "ready"},
+            "approvalBrokerReady": True,
+            "approvalHandler": "explicit_one_shot",
+            "approvalReplayDurable": True,
+            "deferredServerRequestsSupported": True,
             "authentication": {
                 "authenticated": True,
                 "requiresOpenaiAuth": True,
@@ -164,17 +168,17 @@ class FakeGateway:
                 },
             }
         mode = str((turn.get("policy") or {}).get("mode") or "chat")
-        if mode == "workspace" and self.workspace_root and self.generated_output:
+        if mode in {"workspace", "full_agent"} and self.workspace_root and self.generated_output:
             match = re.search(r"below `([^`]+)`", str(turn.get("prompt") or ""))
             if match:
-                output_root = self.workspace_root.joinpath(*Path(match.group(1)).parts)
+                output_root = Path(turn["policy"]["workspaceRoots"][0]).joinpath(*Path(match.group(1)).parts)
                 output_root.mkdir(parents=True, exist_ok=True)
                 output_root.joinpath(self.generated_output[0]).write_bytes(
                     self.generated_output[1]
                 )
         items = (
             [{"type": "commandExecution", "status": "completed"}]
-            if mode == "workspace"
+            if mode in {"workspace", "full_agent"}
             else [dict(item) for item in self.chat_items]
         )
         return {
@@ -266,6 +270,7 @@ class FullAgentBridgeApiTests(unittest.TestCase):
         "model",
         "reasoning",
         "mode",
+        "accessGrant",
         "status",
         "lifecycle",
         "archived",
@@ -304,6 +309,7 @@ class FullAgentBridgeApiTests(unittest.TestCase):
         self.gateway = FakeGateway()
         self.gateway.workspace_root = self.workspace_dir
         self.stack = contextlib.ExitStack()
+        self.stack.enter_context(mock.patch.object(self.bridge, "FULL_AGENT_WORKSPACE_ROOTS", (self.workspace_dir,)))
         path_values = {
             "RUNTIME_DIR": self.runtime_dir,
             "MISSIONS_PATH": self.runtime_dir / "missions.json",
@@ -560,26 +566,21 @@ class FullAgentBridgeApiTests(unittest.TestCase):
         )
         projected = {item["id"]: item for item in modes}
         self.assertTrue(projected["chat"]["ready"])
-        self.assertFalse(projected["workspace"]["ready"])
-        self.assertFalse(projected["workspace"]["toolExecutionEnabled"])
+        self.assertTrue(projected["workspace"]["ready"])
+        self.assertTrue(projected["workspace"]["toolExecutionEnabled"])
         self.assertFalse(projected["computer"]["ready"])
-        self.assertFalse(projected["full"]["ready"])
-        self.assertFalse(runtime["approvalBrokerReady"])
+        self.assertTrue(projected["full"]["ready"])
+        self.assertTrue(runtime["approvalBrokerReady"])
         self.assertFalse(runtime["automaticExternalEffects"])
         self.assertTrue(runtime["chatReady"])
-        self.assertFalse(runtime["fullAgentReady"])
-        self.assertFalse(runtime["toolExecutionEnabled"])
-        self.assertEqual(runtime["toolExecutionState"], "unavailable")
-        self.assertIn("Chat พร้อมใช้งานแบบไม่เรียก Tool", runtime["messageTh"])
-        self.assertIn("Workspace, Computer Use และ Full Access", runtime["messageTh"])
-        self.assertIn("ถูกล็อกโดย Backend", runtime["messageTh"])
-        self.assertEqual(runtime["workspaceSentinelStatus"], "failed_unapproved_write")
+        self.assertTrue(runtime["fullAgentReady"])
+        self.assertTrue(runtime["toolExecutionEnabled"])
+        self.assertEqual(runtime["toolExecutionState"], "ready")
+        self.assertIn("Full Access", runtime["messageTh"])
+        self.assertEqual(runtime["workspaceSentinelStatus"], "replaced_by_explicit_thread_grant_policy")
         self.assertFalse(runtime["workspaceSentinelVerified"])
         self.assertEqual(runtime["responseStringLimitChars"], 32768)
-        self.assertIn(
-            "live_write_sentinel_failed_unapproved_write",
-            runtime["workspaceActivationBlockers"],
-        )
+        self.assertEqual(runtime["workspaceActivationBlockers"], [])
         self.assertFalse(runtime["capabilities"]["computerUse"]["ready"])
         self.assertFalse(runtime["capabilities"]["mcp"]["ready"])
         self.assertFalse(runtime["capabilities"]["plugins"]["ready"])
@@ -1219,7 +1220,7 @@ class FullAgentBridgeApiTests(unittest.TestCase):
         self.assertEqual(mission["errorCode"], "unexpected_tool_activity")
 
     def test_workspace_fails_closed_until_interactive_approval_broker_exists(self) -> None:
-        with self.assertRaises(self.bridge.RequestError) as caught:
+        with mock.patch.object(self.bridge, "FULL_AGENT_INTERACTIVE_APPROVAL_BROKER_ENABLED", False), self.assertRaises(self.bridge.RequestError) as caught:
             self._create_thread(agent_id="ea_developer", mode="workspace")
         self.assertEqual(caught.exception.status, 409)
         self.assertEqual(
@@ -1335,7 +1336,7 @@ class FullAgentBridgeApiTests(unittest.TestCase):
             self.assertNotIn("sourcePath", external_json)
 
         prompt = self.gateway.calls_for("turn_start")[0]["prompt"]
-        self.assertIn("Files outside that exact per-turn directory will not be published", prompt)
+        self.assertIn("other files outside that exact per-turn directory will not be published", prompt)
         self.assertNotIn(thread["id"], prompt)
         self.assertNotIn(queued["turn"]["id"], prompt)
         output_match = re.search(r"below `([^`]+)`", prompt)
@@ -1350,7 +1351,7 @@ class FullAgentBridgeApiTests(unittest.TestCase):
             (self.workspace_dir,),
         ):
             turn_root, relative = self.bridge._full_agent_workspace_output_directory(
-                "fat_output_scan_thread",
+                "fat_11111111111111111111111111111111",
                 "turn_output_scan_0001",
             )
         self.assertTrue(relative.startswith(".full-agent-outputs/"))
@@ -1427,14 +1428,14 @@ class FullAgentBridgeApiTests(unittest.TestCase):
             self.bridge, "FULL_AGENT_WORKSPACE_ROOTS", (self.workspace_dir,)
         ):
             turn_root, _relative = self.bridge._full_agent_workspace_output_directory(
-                "fat_output_batch_thread", "turn_output_batch_0001"
+                "fat_22222222222222222222222222222222", "turn_output_batch_0001"
             )
         (turn_root / "first.txt").write_text("safe\n", encoding="utf-8")
         (turn_root / "second.pdf").write_bytes(b"not a pdf")
 
         with self.assertRaises(self.bridge.FullAgentArtifactError) as failed:
             self.bridge._full_agent_publish_turn_outputs(
-                "fat_output_batch_thread", "turn_output_batch_0001", turn_root
+                "fat_22222222222222222222222222222222", "turn_output_batch_0001", turn_root
             )
 
         self.assertIn(
@@ -1615,8 +1616,8 @@ class FullAgentBridgeApiTests(unittest.TestCase):
         )
         self.bridge.FULL_AGENT_ACTIVE_TURNS.pop(local_turn_id, None)
 
-    def test_non_chat_modes_are_rejected_at_create_and_turn_boundaries(self) -> None:
-        for mode in ("workspace", "computer", "full"):
+    def test_unimplemented_computer_mode_is_rejected_at_create_and_turn_boundaries(self) -> None:
+        for mode in ("computer",):
             with self.subTest(mode=mode):
                 with self.assertRaises(self.bridge.RequestError) as caught:
                     self._create_thread(agent_id="manager", mode=mode)
@@ -2337,7 +2338,51 @@ class FullAgentBridgeApiTests(unittest.TestCase):
         )
         self.assertEqual(len(self.gateway.calls), 0)
 
-    def test_legacy_workspace_policy_is_read_only_and_requires_explicit_approval(self) -> None:
+    def test_full_permission_is_independent_of_optional_tools_and_works_for_ceo(self) -> None:
+        thread = self._create_thread(agent_id="ceo", mode="full")
+        self.assertEqual(thread["accessGrant"]["authorization"], "user_selected_mode")
+        policy = self.bridge._full_agent_policy(thread)
+        self.assertEqual(policy["sandbox"], "danger-full-access")
+        self.assertEqual(policy["mode"], "full_agent")
+        self.assertTrue(policy["fullAccessAuthorized"])
+        self.assertNotIn("mcp", policy["requestedCapabilities"])
+        self.assertIn("web_search", policy["requestedCapabilities"])
+        queued, finished = self._request_and_wait(thread["id"], message="Analyze this source and explain its structure.", key="full-ceo-001")
+        self.assertEqual(finished["events"][-1]["role"], "assistant")
+        self.assertEqual(len(self.gateway.calls_for("turn_start")), 1)
+        self.assertEqual(len(self.bridge.load_missions()), 1)
+        self.assertFalse(self.bridge.full_agent_runtime_status()["runtime"]["capabilities"]["computerUse"]["ready"])
+
+    def test_source_analysis_does_not_require_terminal_but_execution_does(self) -> None:
+        for prompt in ("วิเคราะห์ไฟล์ MQ4 นี้ให้หน่อย", "Create an MT5 EA source file", "Review MT4 code and describe risk"):
+            self.assertFalse(self.bridge._full_agent_metatrader_scope(prompt, "full")["required"], prompt)
+        for prompt in ("Run backtest in MT5", "เปิด MT4 แล้วติดตั้ง EA", "Compile this code in MetaTrader"):
+            self.assertTrue(self.bridge._full_agent_metatrader_scope(prompt, "full")["required"], prompt)
+
+    def test_every_roster_agent_can_run_an_explicit_full_access_source_review(self) -> None:
+        for agent_id in self.bridge.EXPECTED_AGENT_IDS:
+            with self.subTest(agent_id=agent_id):
+                thread = self._create_thread(agent_id=agent_id, mode="full")
+                queued, finished = self._request_and_wait(
+                    thread["id"], message="วิเคราะห์โครงสร้างไฟล์ MQ4 นี้และอธิบายเป็นภาษาไทย",
+                    key=f"all-agents-full-{agent_id}",
+                )
+                self.assertEqual(finished["events"][-1]["role"], "assistant")
+        self.assertEqual(len(self.gateway.calls_for("turn_start")), len(self.bridge.EXPECTED_AGENT_IDS))
+        self.assertEqual({m["owner"] for m in self.bridge.load_missions()}, set(self.bridge.EXPECTED_AGENT_IDS))
+
+    def test_per_thread_workspace_never_reuses_other_conversation_output(self) -> None:
+        first = self._create_thread(mode="workspace")
+        second = self._create_thread(mode="workspace")
+        a = Path(self.bridge._full_agent_policy(first)["workspaceRoots"][0])
+        b = Path(self.bridge._full_agent_policy(second)["workspaceRoots"][0])
+        self.assertNotEqual(a, b)
+        (a / "first-only.txt").write_text("one", encoding="utf-8")
+        self.assertFalse((b / "first-only.txt").exists())
+        out, relative = self.bridge._full_agent_workspace_output_directory(first["id"], "turn-fixture")
+        self.assertEqual(a / relative, out)
+
+    def test_legacy_workspace_needs_explicit_grant_and_new_scope_is_isolated(self) -> None:
         thread = self.bridge._full_agent_runtime().create_thread(
             "ea_developer",
             title="legacy workspace",
@@ -2345,33 +2390,22 @@ class FullAgentBridgeApiTests(unittest.TestCase):
             reasoning="medium",
             mode="workspace",
         )["thread"]
+        legacy = dict(thread)
+        legacy.pop("accessGrant")
+        with self.assertRaises(self.bridge.RequestError):
+            self.bridge._full_agent_policy(legacy)
         policy = self.bridge._full_agent_policy(thread)
-        self.assertEqual(
-            set(policy),
-            {
-                "agentId",
-                "mode",
-                "model",
-                "reasoningEffort",
-                "workspaceRoots",
-                "sandbox",
-                "approvalMode",
-                "externalEffects",
-                "autoExternalEffects",
-            },
-        )
-        self.assertEqual(policy["sandbox"], "read-only")
+        self.assertEqual(policy["sandbox"], "workspace-write")
         self.assertEqual(policy["approvalMode"], "explicit")
         self.assertEqual(policy["externalEffects"], "approval-required")
         self.assertFalse(policy["autoExternalEffects"])
         self.assertTrue(policy["workspaceRoots"])
-        allowed_top_level = {"workspace", "frontend", "docs", "assets-source"}
         project_root = self.bridge.PROJECT_ROOT.resolve()
         for value in policy["workspaceRoots"]:
             root = Path(value).resolve()
             self.assertNotEqual(root, project_root)
-            self.assertTrue(root.is_relative_to(project_root))
-            self.assertIn(root.relative_to(project_root).parts[0], allowed_top_level)
+            self.assertFalse(root.is_relative_to(project_root))
+            self.assertEqual(root.parent, self.workspace_dir.resolve())
         encoded = json.dumps(policy, sort_keys=True).casefold()
         self.assertNotIn("danger-full-access", encoded)
         self.assertNotIn("networkallowed", encoded.replace("_", ""))

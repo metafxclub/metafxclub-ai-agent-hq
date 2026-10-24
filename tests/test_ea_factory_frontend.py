@@ -317,6 +317,67 @@ class EaFactoryFrontendTests(unittest.TestCase):
             {"awaiting": "progress", "retryable": "progress", "completed": "source"},
         )
 
+    def test_explicit_factory_tabs_survive_polling_and_modal_reopen_restores_default(self):
+        script = "\n".join([
+            "const assert=require('node:assert/strict');",
+            "const EA_FACTORY_PROP_ID='right_server_racks',EA_OPTIMIZATION_LAB_PROP_ID='right_tool_console',AI_TRADE_COUNCIL_PROP_ID='left_analytics_console';",
+            "const heartbeatController=new AbortController(),cancelledTimers=[];",
+            "const state={modal:{open:true,id:EA_FACTORY_PROP_ID,type:'prop',workflowTabs:{},workflowVoice:{},eaFactory:{explicitPageId:''}},propReports:{},aiTradeCouncilHeartbeat:{timer:7,controller:heartbeatController,data:{stale:true},status:'ready',nextPollAt:100}};",
+            "const tabs=[{id:'source'},{id:'progress'},{id:'result'}];",
+            "const domain={activeBuild:{id:'ea-build-elder'},backendBusy:null,oneClick:{run:{runId:'run-existing',status:'awaiting_visible_terminal',canResume:false}},stages:[]};",
+            "const dashboard={tabs,domainData:{eaFactory:domain}};let renders=[],saves=0,gameModalReturnFocus;",
+            "const els={};const document={activeElement:null,body:{classList:{add(){}}},createElement:()=>({events:{},addEventListener(name,handler){this.events[name]=handler;}})};",
+            "const window={requestAnimationFrame(){},clearInterval(timer){cancelledTimers.push(timer);}};const focusGameModalInitialControl=()=>{};",
+            "const isWorkflowDashboardPropId=()=>true,getModalSubject=()=>({id:EA_FACTORY_PROP_ID}),getPropertyRole=()=>({}),normalizeWorkflowDashboard=()=>dashboard,getModalSurface=()=> 'dashboard';",
+            "const saveSessionSnapshot=()=>{saves++;};",
+            self.block("function eaFactoryCertifiedDeliveryCompleted", "function createEaFactoryPageHeader"),
+            self.block("function getWorkflowSelectedTab", "function renderWorkflowTabs"),
+            "const renderWorkflowDashboard=()=>{const tab=getWorkflowSelectedTab(EA_FACTORY_PROP_ID,dashboard);state.modal.workflowTabs[EA_FACTORY_PROP_ID]=tab.id;renders.push(tab.id);};",
+            "const renderGameModal=()=>renderWorkflowDashboard();",
+            self.block("function setWorkflowDashboardTab", "function workflowActionFormPayload"),
+            self.block("function createEaFactoryPageNavigation", "function renderEaFactoryExistingBuildPicker"),
+            self.block("function stopAiTradeHeartbeatPolling", "function startAiTradeHeartbeatPolling"),
+            self.block("function openGameModal", "function closeGameModal"),
+            "for(const status of ['queued','running','waiting_ai','cancelling','failed','blocked','awaiting_visible_terminal']){",
+            "  domain.oneClick.run.status=status;state.modal.eaFactory.explicitPageId='';state.modal.workflowTabs[EA_FACTORY_PROP_ID]='source';",
+            "  assert.equal(getWorkflowSelectedTab(EA_FACTORY_PROP_ID,dashboard).id,'progress');",
+            "  for(const page of ['result','source','progress']){setWorkflowDashboardTab(EA_FACTORY_PROP_ID,page);assert.equal(renders.at(-1),page);renderWorkflowDashboard();assert.equal(renders.at(-1),page);}",
+            "}",
+            "const before=JSON.stringify(domain);const back=createEaFactoryPageNavigation('กลับไปตั้งค่างานหน้า 1','source');back.events.click();",
+            "assert.equal(renders.at(-1),'source');renderWorkflowDashboard();assert.equal(renders.at(-1),'source');assert.equal(JSON.stringify(domain),before);",
+            "openGameModal('prop',EA_FACTORY_PROP_ID);assert.equal(state.modal.eaFactory.explicitPageId,'');assert.equal(renders.at(-1),'progress');",
+            "assert.equal(heartbeatController.signal.aborted,true);assert.deepEqual(cancelledTimers,[7]);assert.equal(state.aiTradeCouncilHeartbeat.timer,null);assert.equal(state.aiTradeCouncilHeartbeat.data,null);assert.equal(state.aiTradeCouncilHeartbeat.status,'idle');assert.equal(state.aiTradeCouncilHeartbeat.nextPollAt,0);",
+            "state.modal.eaFactory.explicitPageId='not-a-page';assert.equal(getWorkflowSelectedTab(EA_FACTORY_PROP_ID,dashboard).id,'progress');",
+            "process.stdout.write(JSON.stringify({passed:true,historyUnchanged:JSON.stringify(domain)===before,saves}));",
+        ])
+        completed = subprocess.run([self.node_binary(), "-"], input=script, cwd=ROOT,
+                                   capture_output=True, check=False, text=True, encoding="utf-8")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["historyUnchanged"])
+        self.assertEqual(result["saves"], 23)
+
+    def test_selected_build_retains_sanitized_system_name_without_changing_identity(self):
+        start = self.main.index("  const activeBuild = ", self.main.index("function normalizeEaFactoryDomain"))
+        mapping = self.main[start:self.main.index("  const oneClickOwnsBuild =", start)]
+        script = "\n".join([
+            "const assert=require('node:assert/strict');",
+            self.block("function safeDashboardDisplayText", "function safeAgentChatReplyText"),
+            "const normalizeEaFactoryArtifactKind=v=>v,normalizeEaFactoryPlatform=v=>v,normalizeEaFactoryTextList=()=>[],normalizeEaFactoryArtifact=v=>v,normalizeEaFactoryAudit=()=>[],normalizeEaFactoryOneClickRun=v=>v;",
+            "const workflowDomainObject=v=>v||{},eaFactoryFirstArray=(...values)=>values.find(Array.isArray)||[];",
+            "function normalize(activeBuildRaw){const buildId=activeBuildRaw.id,latestBuildVersion=0,root={};",
+            mapping,
+            "return activeBuild;}",
+            "const raw={id:'ea-build-existing-ema',sourceDisplayName:'EMA 10/60 Closed-Bar Smoke EA',oneClickRun:{runId:'ea-run-original',status:'completed'}};const before=JSON.stringify(raw);",
+            "const result=normalize(raw);assert.equal(result.sourceDisplayName,'EMA 10/60 Closed-Bar Smoke EA');assert.equal(result.id,raw.id);assert.equal(result.raw,raw);assert.equal(JSON.stringify(raw),before);",
+            "assert.equal(normalize({id:raw.id}).sourceDisplayName,'Strategy Build');",
+            "assert.ok(!normalize({id:raw.id,sourceDisplayName:'token=private-value'}).sourceDisplayName.includes('private-value'));",
+            "assert.equal(normalize({id:raw.id,sourceDisplayName:'x'.repeat(500)}).sourceDisplayName.length,180);",
+        ])
+        subprocess.run([self.node_binary(), "-"], input=script, cwd=ROOT,
+                       capture_output=True, check=True, text=True, encoding="utf-8")
+
     def test_factory_run_normalization_rejects_optimization_resume_and_bounds_progress(self):
         normalizers = self.block(
             "function normalizeEaFactoryOneClickRun",
@@ -535,7 +596,7 @@ class EaFactoryFrontendTests(unittest.TestCase):
             "function renderEaFactoryDiscoveryPreview",
         )
         import_action = self.block(
-            "async function importEaFactorySourceRecord",
+            "function eaFactoryGoogleSheetSyncReceipt",
             "async function createEaFactoryBuild",
         )
         self.assertIn("sheetRecordId", intake)
@@ -596,10 +657,12 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("async function createEaFactoryCustomSourceAndStart", custom)
         self.assertIn("EA_FACTORY_CUSTOM_SOURCE_ENDPOINT", custom)
         self.assertIn("runEaFactoryRequest(\"custom_source\"", custom)
-        self.assertIn("await loadEaFactoryReadModel({ forceFresh: true })", custom)
+        self.assertIn("await waitForEaFactoryAuthoritativeReceipt", custom)
+        self.assertIn("{ refreshReadModel: false, isCurrent }", custom)
         self.assertIn("createAndRunEaFactoryBuild(sourceRecordId, artifactKind, platform", custom)
         self.assertIn("createEaFactoryBuild(sourceRecordId, artifactKind, platform", custom)
-        self.assertIn("start.disabled = !canStart", custom)
+        self.assertIn("const updateStartAvailability = () =>", custom)
+        self.assertIn("start.disabled = !Boolean(", custom)
         self.assertIn("ใช้ชุดทดสอบ EMA 10/60", custom)
         self.assertNotIn("ต้องสร้าง Strategy Source ก่อนเริ่มเขียน", custom)
 
@@ -826,7 +889,8 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("historicalRunLooksActive: !backendBusyActive && oneClickOwnsBuild", normalizer)
         self.assertNotIn("const canStartNewBuild = !backendBusyActive && !oneClickOwnsBuild", normalizer)
         self.assertIn("backendBusyActive ? matchingBusyRootBuild : requestedBuild", normalizer)
-        self.assertIn("backendBusyActive ? null : builds[0]", normalizer)
+        self.assertIn("backendBusyActive || requestedBuildId ? null : rootActiveBuild", normalizer)
+        self.assertIn("backendBusyActive || requestedBuildId ? null : builds[0]", normalizer)
         source = self.block("function renderEaFactoryLegacySourceStage", "function renderEaFactoryChoiceSection")
         spec = self.block("function renderEaFactorySpecStage", "function renderEaFactoryTerminalPicker")
         self.assertIn("if (domain.canStartNewBuild)", source)
@@ -919,7 +983,7 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("EA_FACTORY_VISUAL_STAGE_IDS.forEach", result)
         self.assertIn("attentionRequired === true", result)
         self.assertIn(
-            "appendDashboardArtifactLinks(artifacts, domain.activeBuild.artifacts, { limit: 12 })",
+            "appendDashboardArtifactLinks(artifacts, domain.activeBuild.artifacts, { limit: 200 })",
             result,
         )
         self.assertIn("ยังไม่มีไฟล์ที่ Backend อนุญาตให้ดาวน์โหลด", result)
@@ -1071,7 +1135,7 @@ class EaFactoryFrontendTests(unittest.TestCase):
         request = self.block("async function runEaFactoryRequest", "async function syncEaFactoryGoogleSheet")
         self.assertNotIn("loadPropReport(EA_FACTORY_PROP_ID)", request)
         self.assertIn("mergeEaFactoryResponseReport(response)", request)
-        self.assertIn("if (!mergeEaFactoryReadModel(response))", request)
+        self.assertIn("if (!mergeEaFactoryReadModel(response) && refreshReadModel)", request)
 
         global_apply = self.block("async function applyGlobalMetatraderTarget", "function renderAiTradeTerminalSummary")
         self.assertIn(".filter((target) => target.propId !== EA_FACTORY_PROP_ID)", global_apply)
@@ -1139,12 +1203,12 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("const refreshed = await loadEaFactoryReadModel({ forceFresh: true })", request)
         self.assertIn("state.eaFactoryReadModel.busy", request)
         self.assertIn("eaFactoryBusyPresentation(state.eaFactoryReadModel.busy)", request)
-        self.assertIn("const busyClearedByFreshRead = Boolean(refreshed)", request)
+        self.assertIn("const busyClearedByFreshRead = refreshedAuthoritative", request)
         self.assertIn('failedRequestPresentation.kind === "busy"', request)
         self.assertIn('kind: "busy_reconciled"', request)
         self.assertIn("Backend ยืนยัน busy=null", request)
         self.assertIn('stageId: busyClearedByFreshRead ? "" : stageId', request)
-        self.assertIn("if (refreshed)", request)
+        self.assertIn("if (refreshedAuthoritative)", request)
         self.assertIn("state.eaFactoryReadModel.lastError = null", request)
         self.assertIn("state.eaFactoryReadModel.stale = false", request)
         self.assertIn("if (state.modal.eaFactory.inFlight", request)
@@ -1216,8 +1280,8 @@ class EaFactoryFrontendTests(unittest.TestCase):
             "function renderEaFactoryReadModelNotice",
         )
         message_th = (
-            "ตรวจพบว่าไฟล์หลักฐานของ EA Factory สูญหายหรือถูกเปลี่ยนแปลง "
-            "หากเพิ่งสั่งงานผ่านหน้าต่าง MT4 ให้ถือว่าผลลัพธ์ยังไม่แน่นอน"
+            "Build รุ่นเดิมยังไม่ผ่านการตรวจความเข้ากันได้ของ Source profile "
+            "ระบบปิดคำสั่งใหม่ไว้จนกว่าจะตรวจหลักฐานรุ่นเดิมครบ"
         )
         script = "\n".join([
             "const workflowDomainObject = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {};",
@@ -1246,19 +1310,43 @@ class EaFactoryFrontendTests(unittest.TestCase):
             encoding="utf-8",
         )
         result = json.loads(completed.stdout)
-        self.assertEqual(result["kind"], "request_rejected")
+        self.assertEqual(result["kind"], "integrity_blocked")
         self.assertEqual(result["tone"], "error")
         self.assertEqual(result["message"], message_th)
         self.assertNotIn("ติดต่อ EA Factory Backend ไม่สำเร็จ", result["message"])
+
+    def test_current_integrity_reason_wins_over_stale_action_and_run_copy(self):
+        failure = self.block("function eaFactoryReadModelFailurePresentation", "function renderEaFactoryReadModelNotice")
+        action = self.block("function eaFactoryActionPresentation", "function renderEaFactoryOperationalStage")
+        script = "\n".join([
+            "const assert = require('node:assert/strict');",
+            "const workflowDomainObject = value => value && typeof value === 'object' ? value : {};",
+            "const safeDashboardDisplayText = (value, fallback='') => String(value || fallback);",
+            "const eaFactoryBusyContext = () => null;",
+            "const PROP_REPORT_FETCH_TIMEOUT_MS = 1000;",
+            "const state = {eaFactoryReadModel:{stale:true,lastError:null}};",
+            failure, action,
+            "const backendMessage = 'หลักฐาน Build รุ่นเดิมยังไม่ผ่านการตรวจความเข้ากันได้ จึงยังปิดคำสั่งใหม่ไว้';",
+            "state.eaFactoryReadModel.lastError = eaFactoryReadModelFailurePresentation({status:409,kind:'ea_factory_integrity_blocked',body:{kind:'ea_factory_integrity_blocked',messageTh:backendMessage}});",
+            "const before = JSON.stringify(state);",
+            "const result = eaFactoryActionPresentation({authoritative:false,oneClick:{run:{status:'failed',message:'ไฟล์สูญหายหรือเปลี่ยนแปลง'}}},{stageId:'one_click_run',tone:'error',message:'ไฟล์สูญหายหรือเปลี่ยนแปลง'});",
+            "assert.equal(result.message, backendMessage);",
+            "assert.equal(result.tone, 'error');",
+            "assert.equal(JSON.stringify(state), before);",
+        ])
+        completed = subprocess.run([self.node_binary(), "-e", script], cwd=ROOT,
+                                   capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_busy_post_runtime_reconciles_to_fresh_busy_null(self):
         request = self.block("async function runEaFactoryRequest", "async function syncEaFactoryGoogleSheet")
         script = "\n".join([
             "const state = { modal:{eaFactory:{inFlight:false,stageId:'',message:'',tone:'neutral'}}, eaFactoryReadModel:{payload:{schemaVersion:'ea-factory-v1'},busy:null,lastError:{kind:'busy'},stale:true} };",
             "let refreshCalls = 0;",
+            "const EA_FACTORY_SUPPORTED_MODES = new Set(['one_click_with_manual_stage_recovery']);",
             "function setEaFactoryActionState(next) { Object.assign(state.modal.eaFactory, next); }",
             "function eaFactoryReadModelFailurePresentation() { return {kind:'busy',tone:'warning',title:'งานเดิม',message:'งานเดิมกำลังทำ',busy:{buildId:'old-build'}}; }",
-            "async function loadEaFactoryReadModel() { refreshCalls += 1; state.eaFactoryReadModel.busy = null; return {eaFactory:{schemaVersion:'ea-factory-v1',busy:null}}; }",
+            "async function loadEaFactoryReadModel() { refreshCalls += 1; state.eaFactoryReadModel.busy = null; return {eaFactory:{schemaVersion:'ea-factory-v1',busy:null,mode:'one_click_with_manual_stage_recovery',scheduled:false}}; }",
             "function eaFactoryBusyPresentation(busy) { return {kind:'busy',tone:'warning',title:'busy',message:String(busy.buildId),busy}; }",
             request,
             "(async () => {",
@@ -1898,6 +1986,7 @@ assert.equal(canRetry({{
         self.assertIn("saveSessionSnapshot()", navigation)
 
     def test_successful_create_immediately_invokes_progress_navigation(self):
+        receipt_wait = self.block("async function waitForEaFactoryAuthoritativeReceipt", "async function createEaFactoryCustomSourceAndStart")
         create_identity = self.block(
             "function eaFactoryCreateBuildFormSignature",
             "async function createEaFactoryBuild",
@@ -1905,23 +1994,32 @@ assert.equal(canRetry({{
         create = self.block("async function createEaFactoryBuild", "function eaFactoryOneClickRequestKey")
         script = "\n".join([
             "const EA_FACTORY_PROP_ID = 'right_server_racks';",
-            "const state = { propReports:{right_server_racks:{}}, modal:{eaFactory:{selectedBuildId:'',selectedArtifactKind:'',selectedPlatform:'',createIdempotencyKey:'',createFormSignature:''}} };",
+            "const EA_FACTORY_SUPPORTED_MODES=new Set(['one_click_with_manual_stage_recovery']); let eaFactoryActiveActionAbortController=null; const window={setTimeout,clearTimeout};",
+            "const state = {eaFactoryReadModel:{payload:{},stale:false},propReports:{right_server_racks:{}},modal:{open:true,id:EA_FACTORY_PROP_ID,eaFactory:{selectedBuildId:'',selectedArtifactKind:'',selectedPlatform:'',createIdempotencyKey:'',createFormSignature:''}}};",
             "const normalizeEaFactoryArtifactKind = (value) => value;",
             "const normalizeEaFactoryPlatform = (value) => value;",
             "const eaFactoryCreateSourceBinding = () => ({required:false,ready:true,fields:{}});",
             "const getModalSubject = () => ({id:EA_FACTORY_PROP_ID});",
             "const getPropertyRole = () => ({});",
-            "const normalizeWorkflowDashboard = () => ({domainData:{eaFactory:{authoritative:true,backendBusy:null,canStartNewBuild:true,sourceCatalog:{records:[{sourceRecordId:'source-1',buildReady:true,compatiblePlatforms:['mt4']}]}}}});",
+            "const normalizeWorkflowDashboard = () => ({domainData:{eaFactory:{authoritative:true,backendBusy:null,canStartNewBuild:true,sourceCatalog:{records:[{sourceRecordId:'source-1',recordDigest:'a'.repeat(64),buildReady:true,compatiblePlatforms:['mt4']}]}}}});",
             "const createWorkflowIdempotencyKey = () => 'workflow-test-key';",
-            "const postEaFactoryJson = async () => ({});",
-            "const runEaFactoryRequest = async () => ({build:{id:'ea-build-new'}});",
-            "let navigation = null;",
-            "function setWorkflowDashboardTab(propId, pageId) { navigation = {propId,pageId}; }",
+            "const postEaFactoryJson = async (_path,payload) => ({ok:true,kind:'ea_factory_build_created',requestIdempotencyKey:payload.idempotencyKey,createRequestDigest:'d'.repeat(64),build:{id:'ea-build-new',sourceRecordId:payload.sourceRecordId,sourceRecordDigest:'a'.repeat(64),platform:payload.platform,artifactKind:payload.artifactKind,brief:payload.brief,createRequestDigest:'d'.repeat(64)},eaFactoryReadResult:{status:'deferred',readinessConfirmed:false}});",
+            "const runEaFactoryRequest = async (_stage,request) => request();",
+            "function setEaFactoryActionState(next) { Object.assign(state.modal.eaFactory,next); }",
+            "let navigation = null, refreshStarted = false, finishRefresh;",
+            "const refresh = new Promise((resolve) => { finishRefresh = resolve; });",
+            "const loadEaFactoryReadModel = async () => { refreshStarted = true; await refresh; const model={schemaVersion:'ea-factory-v1',mode:'one_click_with_manual_stage_recovery',scheduled:false,snapshotStale:false,builds:[{id:'ea-build-new',sourceRecordId:'source-1',sourceRecordDigest:'a'.repeat(64),platform:'mt4',artifactKind:'expert_advisor'}]};state.eaFactoryReadModel.payload=model;state.eaFactoryReadModel.stale=false;return {eaFactory:model}; };",
+            "function setWorkflowDashboardTab(propId,pageId) { navigation = {propId,pageId}; }",
+            receipt_wait,
             create_identity,
             create,
             "(async () => {",
-            "  const response = await createEaFactoryBuild('source-1','expert_advisor','mt4','');",
-            "  process.stdout.write(JSON.stringify({response,selectedBuildId:state.modal.eaFactory.selectedBuildId,navigation}));",
+            "  const pending = createEaFactoryBuild('source-1','expert_advisor','mt4','');",
+            "  await new Promise((resolve) => setImmediate(resolve));",
+            "  const beforeRefresh = {navigation,selectedBuildId:state.modal.eaFactory.selectedBuildId,stale:state.eaFactoryReadModel.stale,refreshStarted};",
+            "  finishRefresh();",
+            "  const response = await pending;",
+            "  process.stdout.write(JSON.stringify({response,beforeRefresh,selectedBuildId:state.modal.eaFactory.selectedBuildId,navigation,pendingKey:state.modal.eaFactory.createIdempotencyKey}));",
             "})().catch((error) => { console.error(error); process.exit(1); });",
         ])
         completed = subprocess.run(
@@ -1934,13 +2032,20 @@ assert.equal(canRetry({{
         )
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["response"]["build"]["id"], "ea-build-new")
+        self.assertNotIn("eaFactory", payload["response"])
         self.assertEqual(payload["selectedBuildId"], "ea-build-new")
+        self.assertEqual(payload["beforeRefresh"], {
+            "navigation": {"propId": "right_server_racks", "pageId": "progress"},
+            "selectedBuildId": "ea-build-new", "stale": True, "refreshStarted": True,
+        })
+        self.assertEqual(payload["pendingKey"], "")
         self.assertEqual(
             payload["navigation"],
             {"propId": "right_server_racks", "pageId": "progress"},
         )
 
     def test_lost_create_response_retries_with_same_key_then_rotates_after_success(self):
+        receipt_wait = self.block("async function waitForEaFactoryAuthoritativeReceipt", "async function createEaFactoryCustomSourceAndStart")
         create_identity = self.block(
             "function eaFactoryCreateBuildFormSignature",
             "async function createEaFactoryBuild",
@@ -1948,27 +2053,32 @@ assert.equal(canRetry({{
         create = self.block("async function createEaFactoryBuild", "function eaFactoryOneClickRequestKey")
         script = "\n".join([
             "const EA_FACTORY_PROP_ID = 'right_server_racks';",
-            "const state = { propReports:{right_server_racks:{}}, modal:{eaFactory:{selectedBuildId:'',selectedArtifactKind:'',selectedPlatform:'',createIdempotencyKey:'',createFormSignature:'',googleSheetCatalog:{}}} };",
+            "const EA_FACTORY_SUPPORTED_MODES=new Set(['one_click_with_manual_stage_recovery']); let eaFactoryActiveActionAbortController=null; const window={setTimeout,clearTimeout};",
+            "const state = {eaFactoryReadModel:{payload:{},stale:false},propReports:{right_server_racks:{}},modal:{open:true,id:EA_FACTORY_PROP_ID,eaFactory:{selectedBuildId:'',selectedArtifactKind:'',selectedPlatform:'',createIdempotencyKey:'',createFormSignature:'',googleSheetCatalog:{}}}};",
             "const normalizeEaFactoryArtifactKind = (value) => value;",
             "const normalizeEaFactoryPlatform = (value) => value;",
-            "const eaFactoryCreateSourceBinding = () => ({required:true,ready:true,fields:{recordId:'deep-a',recordDigest:'a'.repeat(64),catalogDigest:'b'.repeat(64),snapshotDigest:'c'.repeat(64),configRevision:7}});",
+            "const binding = {sourceRecordId:'source-1',recordId:'deep-a',recordDigest:'a'.repeat(64),catalogDigest:'b'.repeat(64),snapshotDigest:'c'.repeat(64),configRevision:7};",
+            "const eaFactoryCreateSourceBinding = () => ({required:true,ready:true,fields:binding});",
             "const getModalSubject = () => ({id:EA_FACTORY_PROP_ID});",
             "const getPropertyRole = () => ({});",
-            "const normalizeWorkflowDashboard = () => ({domainData:{eaFactory:{authoritative:true,backendBusy:null,canStartNewBuild:true,sourceCatalog:{records:[{sourceRecordId:'source-1',buildReady:true,compatiblePlatforms:['mt5']}]}}}});",
+            "const normalizeWorkflowDashboard = () => ({domainData:{eaFactory:{authoritative:true,backendBusy:null,canStartNewBuild:true,sourceCatalog:{records:[{sourceRecordId:'source-1',recordDigest:'a'.repeat(64),buildReady:true,compatiblePlatforms:['mt5']}]}}}});",
             "let keyCounter = 0;",
             "const createWorkflowIdempotencyKey = () => `workflow-create-${++keyCounter}`;",
-            "const posted = [];",
-            "const postEaFactoryJson = async (_path, payload) => { posted.push({...payload}); return {build:{id:`ea-build-${posted.length}`}}; };",
+            "const posted = [], builds = new Map();",
+            "const postEaFactoryJson = async (_path,payload) => { posted.push({...payload}); const replayed = builds.has(payload.idempotencyKey); if (!replayed) builds.set(payload.idempotencyKey,{id:`ea-build-${builds.size+1}`,sourceRecordId:payload.sourceRecordId,sourceRecordDigest:'a'.repeat(64),platform:payload.platform,artifactKind:payload.artifactKind,brief:payload.brief,createRequestDigest:'d'.repeat(64),createSheetBinding:binding}); return {ok:true,kind:replayed?'ea_factory_build_replayed':'ea_factory_build_created',requestIdempotencyKey:payload.idempotencyKey,createRequestDigest:'d'.repeat(64),build:builds.get(payload.idempotencyKey)}; };",
             "let attempt = 0;",
-            "const runEaFactoryRequest = async (_stage, request) => { const response = await request(); attempt += 1; return attempt === 1 ? null : response; };",
+            "const runEaFactoryRequest = async (_stage,request) => { const response = await request(); attempt += 1; return attempt === 1 ? null : response; };",
+            "function setEaFactoryActionState(next) { Object.assign(state.modal.eaFactory,next); }",
+            "const loadEaFactoryReadModel = async () => { const model={schemaVersion:'ea-factory-v1',mode:'one_click_with_manual_stage_recovery',scheduled:false,snapshotStale:false,builds:[...builds.values()]};state.eaFactoryReadModel.payload=model;state.eaFactoryReadModel.stale=false;return {eaFactory:model}; };",
             "function setWorkflowDashboardTab() {}",
+            receipt_wait,
             create_identity,
             create,
             "(async () => {",
             "  const lost = await createEaFactoryBuild('source-1','expert_advisor','mt5','same   brief');",
             "  const replayed = await createEaFactoryBuild('source-1','expert_advisor','mt5','same brief');",
             "  const fresh = await createEaFactoryBuild('source-1','expert_advisor','mt5','same brief');",
-            "  process.stdout.write(JSON.stringify({lost,replayed,fresh,keys:posted.map((item)=>item.idempotencyKey),keyCounter,pendingKey:state.modal.eaFactory.createIdempotencyKey}));",
+            "  process.stdout.write(JSON.stringify({lost,replayed,fresh,keys:posted.map((item)=>item.idempotencyKey),keyCounter,buildCount:builds.size,pendingKey:state.modal.eaFactory.createIdempotencyKey}));",
             "})().catch((error) => { console.error(error); process.exit(1); });",
         ])
         completed = subprocess.run(
@@ -1981,15 +2091,18 @@ assert.equal(canRetry({{
         )
         payload = json.loads(completed.stdout)
         self.assertIsNone(payload["lost"])
-        self.assertEqual(payload["replayed"]["build"]["id"], "ea-build-2")
-        self.assertEqual(payload["fresh"]["build"]["id"], "ea-build-3")
+        self.assertEqual(payload["replayed"]["build"]["id"], "ea-build-1")
+        self.assertEqual(payload["replayed"]["kind"], "ea_factory_build_replayed")
+        self.assertEqual(payload["fresh"]["build"]["id"], "ea-build-2")
         self.assertEqual(payload["keys"][0], payload["keys"][1])
         self.assertNotEqual(payload["keys"][1], payload["keys"][2])
         self.assertEqual(payload["keyCounter"], 2)
+        self.assertEqual(payload["buildCount"], 2)
         self.assertEqual(payload["pendingKey"], "")
 
     def test_create_and_run_preflight_never_leaves_phantom_working_status(self):
         create = self.block("async function createEaFactoryBuild", "function eaFactoryOneClickRequestKey")
+        create_context = self.block("function eaFactoryCreateContextSignature", "function eaFactoryCreateCommitReceipt")
         flow = self.block("async function createAndRunEaFactoryBuild", "async function advanceEaFactoryStage")
         state_key = self.block("function eaFactoryReadModelStateKey", "function mergeEaFactoryReadModel")
         script = "\n".join([
@@ -2013,10 +2126,11 @@ assert.equal(canRetry({{
             "const runEaFactoryOneClick = async () => { oneClickCount += 1; return {}; };",
             "function setEaFactoryActionState(next={}) { Object.assign(state.modal.eaFactory,next); }",
             state_key,
+            create_context,
             create,
             flow,
             "(async () => {",
-            "  const result = await createAndRunEaFactoryBuild('source-1','mt4','');",
+            "  const result = await createAndRunEaFactoryBuild('source-1','expert_advisor','mt4','');",
             "  process.stdout.write(JSON.stringify({result,action:state.modal.eaFactory,postCount,oneClickCount}));",
             "})().catch((error) => { console.error(error); process.exit(1); });",
         ])
@@ -2217,7 +2331,11 @@ assert.equal(canRetry({{
         self.assertIn("capability.terminalRunning !== true", request)
         self.assertIn("capability.visibleAdapterConnected !== true", request)
         self.assertIn("capability.terminalProcessLaunchAllowed === true", request)
-        self.assertIn("{ allowFreshBuild: true }", request)
+        self.assertIn("state.eaFactoryReadModel.stale === true || model?.snapshotStale === true", request)
+        self.assertIn("!current.authoritative || current.activeBuild?.id !== buildId", request)
+        self.assertIn("confirmed.sourceRecordDigest !== created.build.sourceRecordDigest", request)
+        self.assertIn("return runEaFactoryOneClick(buildId)", request)
+        self.assertNotIn("{ allowFreshBuild: true }", request)
 
         poller = self.block("async function pollOpenPropReport", "function startMissionPolling")
         self.assertIn("factoryOneClickActive", poller)
@@ -2339,15 +2457,66 @@ assert.equal(nextBuild, "wf-restart-3");
         self.assertIn("ต้องเห็น Strategy Tester", constants)
 
     def test_backtest_attention_distinguishes_zero_trade_and_history_quality(self):
+        attention = self.block(
+            "function eaFactoryBacktestAttentionPresentation",
+            "function eaFactoryActionPresentation",
+        )
         operational = self.block(
             "function renderEaFactoryOperationalStage",
             "function renderEaFactoryPanel",
         )
-        self.assertIn("backtest_zero_trades_and_history_quality_errors", operational)
-        self.assertIn("backtest_history_quality_errors", operational)
-        self.assertIn("Mismatched chart errors", operational)
-        self.assertIn("backtestAttention", operational)
-        self.assertIn("งดการประเมินประสิทธิภาพ", operational)
+        self.assertIn("eaFactoryBacktestAttentionPresentation(stage, domain.oneClick?.run", operational)
+        self.assertNotIn("เก็บงานเป็นสำเร็จแบบต้องตรวจสอบ", operational)
+        self.assertNotIn("ไปเริ่ม Session ใหม่ด้วยตนเองใน Optimization Lab", operational)
+        action = self.block("function eaFactoryActionPresentation", "function renderEaFactoryOperationalStage")
+        script = "\n".join([
+            "const assert = require('node:assert/strict');",
+            "const state = {eaFactoryReadModel:{lastError:null}};",
+            "const safeDashboardDisplayText = (value, fallback='') => String(value || fallback);",
+            "const EA_FACTORY_STAGE_IDS = ['backtest_recheck'];",
+            attention, action,
+            "for (const code of ['backtest_acceptance_zero_trades','backtest_acceptance_history_quality_issue']) {",
+            "  const stage = {id:'backtest_recheck',status:'completed',reportId:'verified-report'};",
+            "  const result = eaFactoryActionPresentation({authoritative:true,stages:[stage],oneClick:{run:{status:'failed',failureCode:code}}},{stageId:'backtest_recheck',tone:'success',message:'ขั้นนี้ผ่าน Gate แล้ว'});",
+            "  assert.equal(result.tone,'error');",
+            "  assert.match(result.message,/หยุดก่อน Final Report/);",
+            "  assert.match(result.message,/ยังไม่ถือว่างานสำเร็จ/);",
+            "  assert.doesNotMatch(result.message,/Optimization Lab|สำเร็จแบบต้องตรวจสอบ/);",
+            "}",
+            "const historic = eaFactoryBacktestAttentionPresentation({status:'completed',attentionRequired:true,attentionReasonCode:'backtest_zero_trades_and_history_quality_errors'});",
+            "assert.equal(historic.tone,'warning');",
+            "assert.match(historic.title,/0 ออเดอร์.*คุณภาพข้อมูล/);",
+            "assert.match(historic.message,/Mismatched chart errors/);",
+            "assert.doesNotMatch(historic.message,/Backend หยุดก่อน Final Report/);",
+            "assert.equal(eaFactoryBacktestAttentionPresentation({status:'completed'}),null);",
+        ])
+        completed = subprocess.run([self.node_binary(), "-e", script], cwd=ROOT,
+                                   capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_collapsed_tester_has_actionable_guidance_without_admission_changes(self):
+        attention = self.block("function eaFactoryBacktestAttentionPresentation", "function eaFactoryActionPresentation")
+        action = self.block("function eaFactoryActionPresentation", "function renderEaFactoryOperationalStage")
+        script = "\n".join([
+            "const assert = require('node:assert/strict');",
+            "const state = {eaFactoryReadModel:{lastError:null}};",
+            "const safeDashboardDisplayText = (value, fallback='') => String(value || fallback);",
+            "const eaFactoryPlatformLabel = () => 'MT5';",
+            attention, action,
+            "const stage = eaFactoryBacktestAttentionPresentation({failureCode:'mt5_tester_pane_collapsed'});",
+            "assert.equal(stage.tone,'warning'); assert.match(stage.message,/ลากขอบบน.*Settings.*ไม่กด Start/);",
+            "assert.match(stage.message,/ทำขั้นนี้ต่อ/);",
+            "for (const status of ['awaiting_visible_terminal','failed','blocked']) {",
+            " const domain = {authoritative:true,oneClick:{run:{status,failureCode:'mt5_tester_pane_collapsed'}}};",
+            " const before = JSON.stringify(domain);",
+            " const result = eaFactoryActionPresentation(domain,{stageId:'one_click_run'});",
+            " assert.equal(result.message,stage.message); assert.equal(JSON.stringify(domain),before);",
+            "}",
+            "assert.equal(eaFactoryBacktestAttentionPresentation({failureCode:'unknown_native_error'}),null);",
+        ])
+        completed = subprocess.run([self.node_binary(), "-e", script], cwd=ROOT,
+                                   capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_artifacts_are_backend_downloads_and_factory_layout_is_responsive(self):
         operational = self.block("function renderEaFactoryOperationalStage", "function renderEaFactoryPanel")

@@ -273,7 +273,7 @@
         "failurePolicy": "fail_closed_no_trade"
       },
       "actionableFields": ["direction", "stopLossPrice", "takeProfitPrice"],
-      "forbiddenAiFields": ["lot", "lots", "fixedLot", "moneyManagementMode", "volume", "positionSize", "riskPercent", "riskCapitalBase", "estimatedCommissionPerLot", "commissionFreeAccountConfirmed", "mode"],
+      "forbiddenAiFields": ["lot", "lots", "fixedLot", "moneyManagementMode", "volume", "positionSize", "riskPercent", "riskCapitalBase", "riskCostBasis", "estimatedCommissionPerLot", "commissionFreeAccountConfirmed", "mode"],
       "lotSource": "mt4_mt5_ea_money_management_inputs"
     },
     "decisionHorizonPolicy": {
@@ -296,19 +296,21 @@
       "eaInputChanged": false,
       "eaFinalGuardRequired": true
     },
-    "backlogPolicy": "durable_fifo_exact_snapshot_audit_only_when_stale",
+    "backlogPolicy": "new_closed_bar_only_no_backfill",
     "coveragePolicy": {
       "storeVersion": "ai-trade-council-automation-store-v2",
-      "futureObservedBars": "capture_immutable_snapshot_and_enqueue_once",
+      "futureObservedBars": "admit_at_new_closed_bar_only_when_gates_ready",
       "sameBarPolicy": "idempotent_once",
-      "restartAndJumpWithoutSnapshot": "explicit_skipped_record",
+      "restartAndJumpWithoutSnapshot": "record_skipped_wait_next_closed_bar",
       "staleSnapshotTradePolicy": "never_dispatch_trade_command",
-      "pendingQueueOrder": "oldest_closed_bar_first",
-      "maximumRunnablePending": 512,
-      "pendingCapacityPolicy": "terminal_skip_pending_queue_capacity_exceeded",
+      "pendingQueueOrder": "new_closed_bar_only",
+      "maximumRunnablePending": 1,
+      "pendingCapacityPolicy": "no_backfill",
       "missingDurableSnapshotPolicy": "terminal_skip_before_transient_runtime_gates",
-      "bangkokDayRolloverPolicy": "terminal_skip_prior_day_pending_and_publish_terminal_state_when_queue_empties",
-      "retentionPolicy": "preserve_all_runnable_pending_then_newest_terminal_evidence",
+      "bangkokDayRolloverPolicy": "reset_daily_count_no_backfill",
+      "analysisStartPolicy": "expired_or_missed_capture_skipped_without_ai",
+      "quotaResumePolicy": "wait_for_next_closed_bar",
+      "retentionPolicy": "preserve_skipped_history_without_requeue",
       "historyInvariant": "expected_equals_analyzed_plus_skipped_plus_pending_plus_queued"
     },
     "dailyRoundLimitMode": "unlimited",
@@ -487,6 +489,23 @@
     "autoApprovalTtlMinutes": 1440,
     "semaphoreBusyConsumesHourlyRate": false,
     "codexLimitReachedSource": "official_sanitized_backend_quota_read_model_only",
+    "existingCreditPolicy": {
+      "default": "disabled_without_explicit_operator_consent",
+      "endpoint": "/api/automation/existing-credit-policy",
+      "requestFields": ["buildId", "allowed"],
+      "scope": "exact_immutable_ea_factory_build_with_active_one_click_coordinator",
+      "stages": ["generate_source", "source_review"],
+      "consentMaximumHours": 24,
+      "replayExtendsConsent": false,
+      "requires": ["verified_build_identity_and_mission_lineage", "fresh_canonical_codex_meter", "normal_rate_limit_reached_only", "finite_positive_existing_balance", "explicit_has_credits_true", "spend_control_false", "no_unknown_individual_limit"],
+      "quotaException": "included_quota_depletion_only_for_explicitly_bound_build",
+      "reservePreservedForOrdinaryUsage": true,
+      "repairSubprocessRechecksQuotaAndPersistedConsent": true,
+      "purchasesAllowed": false,
+      "automaticReloadAllowed": false,
+      "newMissionsCreatedByConsent": false,
+      "accountBalanceExposedToFrontend": false
+    },
     "unavailableOrStaleQuotaIsNeverTreatedAsZero": true,
     "logFields": ["missionId", "ownerAgentId", "toolId", "modelTier", "timeoutSeconds", "outputLimitChars", "durationMs", "status"]
   },

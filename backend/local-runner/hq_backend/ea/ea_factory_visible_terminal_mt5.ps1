@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)][string]$RequestPath,
     [Parameter(Mandatory = $true)][string]$ResponsePath
 )
@@ -7,6 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $script:TerminalRootHandle = [IntPtr]::Zero
 $script:FailureCheckpoint = "initializing"
+$script:TesterPaneFailureDiagnostic = $null
 $script:StrategyExecutionProof = $null
 
 Add-Type -AssemblyName UIAutomationClient
@@ -97,6 +98,8 @@ public static class MetafxMt5VisibleNative {
   [DllImport("user32.dll", SetLastError=true)] public static extern bool AttachThreadInput(uint sourceThreadId, uint targetThreadId, bool attach);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
   [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr GetParent(IntPtr hWnd);
   [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr GetWindow(IntPtr hWnd, uint command);
   [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
@@ -106,6 +109,8 @@ public static class MetafxMt5VisibleNative {
   [DllImport("user32.dll", SetLastError=true)] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll", SetLastError=true)] public static extern bool IsWindowEnabled(IntPtr hWnd);
   [DllImport("user32.dll", SetLastError=true)] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint threadId);
+  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr hWnd);
   [DllImport("user32.dll", SetLastError=true)] static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO info);
   [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int maximum);
   delegate bool EnumWindowProc(IntPtr hWnd, IntPtr lParam);
@@ -154,6 +159,7 @@ public static class MetafxMt5VisibleNative {
     public IntPtr item; public IntPtr parent;
   }
   public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  public struct POINT { public int X; public int Y; }
   [StructLayout(LayoutKind.Sequential)] struct GUITHREADINFO {
     public uint cbSize; public uint flags;
     public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture;
@@ -207,6 +213,22 @@ public static class MetafxMt5VisibleNative {
   public static string GetWindowTextExact(IntPtr window) {
     if (window == IntPtr.Zero || !IsWindow(window)) throw new InvalidOperationException("window_unavailable");
     return ReadWindowTextExact(window);
+  }
+  public static IntPtr FindTerminalMainWindowExact(uint expectedProcessId) {
+    if (expectedProcessId == 0) throw new InvalidOperationException("mt5_terminal_process_changed");
+    List<IntPtr> matches = new List<IntPtr>();
+    bool enumerated = EnumWindows(delegate(IntPtr window, IntPtr ignored) {
+      uint processId; GetWindowThreadProcessId(window, out processId);
+      if (processId != expectedProcessId || !IsWindow(window) ||
+          !IsWindowVisible(window) || !IsWindowEnabled(window) ||
+          GetWindow(window, GW_OWNER) != IntPtr.Zero || GetAncestor(window, GA_ROOT) != window) return true;
+      if (String.Equals(ReadWindowClassExact(window), "MetaQuotes::MetaTrader::5.00", StringComparison.Ordinal))
+        matches.Add(window);
+      return true;
+    }, IntPtr.Zero);
+    if (!enumerated) throw new InvalidOperationException("mt5_terminal_root_enumeration_failed");
+    if (matches.Count > 1) throw new InvalidOperationException("mt5_terminal_root_ambiguous");
+    return matches.Count == 1 ? matches[0] : IntPtr.Zero;
   }
   public static void PostButtonClickIfTextExact(IntPtr button, uint expectedProcessId, IntPtr expectedRoot, int expectedControlId, string expectedText) {
     if (expectedControlId <= 0 || String.IsNullOrEmpty(expectedText)) throw new InvalidOperationException("button_identity_invalid");
@@ -586,6 +608,218 @@ public static class MetafxMt5VisibleNative {
     if (!IsMenu(menu) || GetMenuItemCount(menu) != count)
       throw new InvalidOperationException("mt5_popup_menu_changed");
     return items;
+  }
+  // Diagnostic only: unlabeled native MDI/icon items are data, never command matches.
+  public sealed class TESTERMENUDIAGNOSTICITEM {
+    public uint Type; public MENUITEMSNAPSHOT Item;
+  }
+  static TESTERMENUDIAGNOSTICITEM ReadTesterMenuDiagnosticItem(IntPtr menu, int position) {
+    const uint MIIM_STATE = 0x00000001;
+    const uint MIIM_ID = 0x00000002;
+    const uint MIIM_SUBMENU = 0x00000004;
+    const uint MIIM_DATA = 0x00000020;
+    const uint MIIM_STRING = 0x00000040;
+    const uint MIIM_FTYPE = 0x00000100;
+    const uint MFT_SEPARATOR = 0x00000800;
+    const uint MFS_DISABLED = 0x00000003;
+    uint mask = MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_DATA | MIIM_STRING | MIIM_FTYPE;
+    MENUITEMINFO first = new MENUITEMINFO { cbSize=(uint)Marshal.SizeOf(typeof(MENUITEMINFO)), fMask=mask };
+    if (!GetMenuItemInfo(menu, (uint)position, true, ref first) || first.cch > 511)
+      throw new InvalidOperationException("mt5_tester_diagnostic_menu_item_invalid");
+    bool separator = (first.fType & MFT_SEPARATOR) != 0;
+    IntPtr textBuffer = IntPtr.Zero;
+    try {
+      const uint capacity = 512;
+      int bufferBytes = checked((int)(capacity + 1) * 2);
+      int sentinelOffset = checked((int)capacity * 2);
+      textBuffer = Marshal.AllocHGlobal(bufferBytes);
+      for (int offset = 0; offset < bufferBytes; offset++) Marshal.WriteByte(textBuffer, offset, 0);
+      Marshal.WriteByte(textBuffer, sentinelOffset, 0xA5);
+      Marshal.WriteByte(textBuffer, sentinelOffset + 1, 0x5A);
+      MENUITEMINFO second = new MENUITEMINFO {
+        cbSize=(uint)Marshal.SizeOf(typeof(MENUITEMINFO)), fMask=mask,
+        dwTypeData=textBuffer, cch=capacity
+      };
+      if (!GetMenuItemInfo(menu, (uint)position, true, ref second) || second.cch > 511 ||
+          second.cch != first.cch || Marshal.ReadByte(textBuffer, sentinelOffset) != 0xA5 ||
+          Marshal.ReadByte(textBuffer, sentinelOffset + 1) != 0x5A ||
+          first.fType != second.fType || first.fState != second.fState || first.wID != second.wID ||
+          first.hSubMenu != second.hSubMenu || first.dwItemData != second.dwItemData)
+        throw new InvalidOperationException("mt5_tester_diagnostic_menu_item_invalid");
+      MENUITEMINFO third = new MENUITEMINFO { cbSize=(uint)Marshal.SizeOf(typeof(MENUITEMINFO)), fMask=mask };
+      if (!GetMenuItemInfo(menu, (uint)position, true, ref third) || third.cch > 511 ||
+          third.cch != second.cch || third.fType != second.fType || third.fState != second.fState ||
+          third.wID != second.wID || third.hSubMenu != second.hSubMenu ||
+          third.dwItemData != second.dwItemData)
+        throw new InvalidOperationException("mt5_tester_diagnostic_menu_item_invalid");
+      if (second.hSubMenu != IntPtr.Zero && !IsMenu(second.hSubMenu))
+        throw new InvalidOperationException("mt5_tester_diagnostic_menu_item_invalid");
+      string text = second.cch == 0 ? String.Empty : Marshal.PtrToStringUni(textBuffer, checked((int)second.cch));
+      if (text == null)
+        throw new InvalidOperationException("mt5_tester_diagnostic_menu_text_invalid");
+      return new TESTERMENUDIAGNOSTICITEM { Type=second.fType, Item=new MENUITEMSNAPSHOT {
+        Position=position, CommandId=second.wID, Text=text, State=second.fState,
+        IsEnabled=(second.fState & MFS_DISABLED) == 0,
+        IsSeparator=separator, HasSubmenu=second.hSubMenu != IntPtr.Zero,
+        SubmenuHandle=second.hSubMenu, ItemData=second.dwItemData, TextLength=second.cch
+      }};
+    } finally {
+      if (textBuffer != IntPtr.Zero) Marshal.FreeHGlobal(textBuffer);
+    }
+  }
+  static TESTERMENUDIAGNOSTICITEM[] ListTesterMenuDiagnosticItems(IntPtr menu) {
+    if (menu == IntPtr.Zero || !IsMenu(menu))
+      throw new InvalidOperationException("mt5_tester_diagnostic_menu_invalid");
+    int count = GetMenuItemCount(menu);
+    if (count <= 0 || count > MAX_POPUP_MENU_ITEMS)
+      throw new InvalidOperationException("mt5_tester_diagnostic_menu_count_invalid");
+    TESTERMENUDIAGNOSTICITEM[] items = new TESTERMENUDIAGNOSTICITEM[count];
+    for (int position=0; position<count; position++) items[position]=ReadTesterMenuDiagnosticItem(menu, position);
+    if (!IsMenu(menu) || GetMenuItemCount(menu) != count)
+      throw new InvalidOperationException("mt5_tester_diagnostic_menu_changed");
+    return items;
+  }
+  public static void InvokeTesterRevealMenuExact(uint expectedProcessId, IntPtr signedRoot) {
+    // Normal View > Strategy Tester command only. No tester Start is sent.
+    if (GetForegroundWindow()!=signedRoot)
+      throw new InvalidOperationException("mt5_tester_reveal_menu_foreground_changed");
+    uint firstPid; uint firstThread=GetWindowThreadProcessId(signedRoot,out firstPid);
+    TESTERVIEWMENUSNAPSHOT before=ReadTesterViewMenuExact(expectedProcessId,signedRoot);
+    TESTERVIEWMENUSNAPSHOT current=ReadTesterViewMenuExact(expectedProcessId,signedRoot);
+    int matchingIds=0;
+    foreach (TESTERMENUDIAGNOSTICITEM row in current.ViewItems)
+      if (row.Item.CommandId==32846) matchingIds++;
+    if (current.TesterItem.CommandId!=32846 || matchingIds!=1 ||
+        !current.ViewItem.IsEnabled || !current.TesterItem.IsEnabled ||
+        before.MainMenu!=current.MainMenu || before.ViewMenu!=current.ViewMenu ||
+        !SamePopupMenuItem(before.ViewItem,current.ViewItem) ||
+        !SamePopupMenuItem(before.TesterItem,current.TesterItem))
+      throw new InvalidOperationException("mt5_tester_reveal_menu_changed");
+    uint lastPid; uint lastThread=GetWindowThreadProcessId(signedRoot,out lastPid);
+    if (firstThread==0 || firstThread!=lastThread || firstPid!=expectedProcessId || lastPid!=expectedProcessId ||
+        !IsWindow(signedRoot) || !IsWindowVisible(signedRoot) || !IsWindowEnabled(signedRoot) ||
+        GetAncestor(signedRoot,GA_ROOT)!=signedRoot || GetWindow(signedRoot,GW_OWNER)!=IntPtr.Zero ||
+        ReadWindowClassExact(signedRoot)!="MetaQuotes::MetaTrader::5.00" ||
+        GetForegroundWindow()!=signedRoot || GetMenu(signedRoot)!=current.MainMenu)
+      throw new InvalidOperationException("mt5_tester_reveal_menu_root_changed");
+    if (!PostMessage(signedRoot,WM_COMMAND,(IntPtr)32846,IntPtr.Zero))
+      throw new InvalidOperationException("mt5_tester_reveal_menu_dispatch_failed");
+  }
+  public sealed class TESTERWINDOWDIAGNOSTIC {
+    public long handle, ownerHandle, rootHandle, topLevelHandle;
+    public int controlId; public string nativeClass, titleCategory;
+    public bool visible, enabled; public RECT nativeRect;
+  }
+  public sealed class TESTERWINDOWINVENTORY {
+    public TESTERWINDOWDIAGNOSTIC[] topLevelWindows, testerControls;
+    public bool truncated;
+  }
+  static TESTERWINDOWDIAGNOSTIC ReadTesterWindowDiagnostic(IntPtr window, uint expectedPid, IntPtr top) {
+    uint pid; GetWindowThreadProcessId(window, out pid);
+    if (pid != expectedPid || !IsWindow(window) || GetAncestor(window, GA_ROOT) != top)
+      throw new InvalidOperationException("mt5_tester_window_diagnostic_changed");
+    RECT rect; if (!GetWindowRect(window, out rect))
+      throw new InvalidOperationException("mt5_tester_window_diagnostic_unreadable");
+    string nativeClass=ReadWindowClassExact(window);
+    if (nativeClass.Length>96) nativeClass=nativeClass.Substring(0,96);
+    nativeClass=System.Text.RegularExpressions.Regex.Replace(nativeClass,"[^A-Za-z0-9_.#:-]","?");
+    string category="unavailable";
+    try {
+      string title=ReadWindowTextExact(window);
+      category=title.IndexOf("Strategy Tester",StringComparison.OrdinalIgnoreCase)>=0?"strategy_tester":
+        title.IndexOf("MetaTrader",StringComparison.OrdinalIgnoreCase)>=0?"metatrader":title.Length==0?"empty":"other";
+    } catch { }
+    TESTERWINDOWDIAGNOSTIC result=new TESTERWINDOWDIAGNOSTIC {
+      handle=window.ToInt64(),ownerHandle=GetWindow(window,GW_OWNER).ToInt64(),
+      rootHandle=GetAncestor(window,GA_ROOT).ToInt64(),topLevelHandle=top.ToInt64(),
+      controlId=GetDlgCtrlID(window),nativeClass=nativeClass,titleCategory=category,
+      visible=IsWindowVisible(window),enabled=IsWindowEnabled(window),nativeRect=rect
+    };
+    GetWindowThreadProcessId(window,out pid);
+    if (pid!=expectedPid || !IsWindow(window) || GetAncestor(window,GA_ROOT)!=top)
+      throw new InvalidOperationException("mt5_tester_window_diagnostic_changed");
+    return result;
+  }
+  public static TESTERWINDOWINVENTORY ReadTesterWindowsDiagnostic(uint expectedPid, IntPtr signedRoot) {
+    uint pid; GetWindowThreadProcessId(signedRoot,out pid);
+    if (expectedPid==0 || pid!=expectedPid || !IsWindow(signedRoot) ||
+        GetAncestor(signedRoot,GA_ROOT)!=signedRoot || GetWindow(signedRoot,GW_OWNER)!=IntPtr.Zero ||
+        ReadWindowClassExact(signedRoot)!="MetaQuotes::MetaTrader::5.00")
+      throw new InvalidOperationException("mt5_tester_window_diagnostic_root_unverified");
+    List<TESTERWINDOWDIAGNOSTIC> tops=new List<TESTERWINDOWDIAGNOSTIC>();
+    List<TESTERWINDOWDIAGNOSTIC> controls=new List<TESTERWINDOWDIAGNOSTIC>();
+    bool truncated=false; int visited=0,children=0;
+    var timer=System.Diagnostics.Stopwatch.StartNew();
+    bool enumerated=EnumWindows(delegate(IntPtr window,IntPtr ignored) {
+      if (++visited>2048 || timer.ElapsedMilliseconds>2500) {truncated=true;return false;}
+      uint owner; GetWindowThreadProcessId(window,out owner);
+      if (owner!=expectedPid) return true;
+      int controlsBefore=controls.Count;
+      EnumChildWindows(window,delegate(IntPtr child,IntPtr unused) {
+        if (++children>4096 || controls.Count>=32 || timer.ElapsedMilliseconds>2500) {truncated=true;return false;}
+        uint childPid;GetWindowThreadProcessId(child,out childPid);
+        if (childPid!=expectedPid) return true;
+        int id=GetDlgCtrlID(child);
+        if (id==32846 || id==16790 || id==10002 || id==10490)
+          controls.Add(ReadTesterWindowDiagnostic(child,expectedPid,window));
+        return true;
+      },IntPtr.Zero);
+      if (IsWindowVisible(window) || window==signedRoot || controls.Count>controlsBefore) {
+        if (tops.Count>=16) {truncated=true;return false;}
+        tops.Add(ReadTesterWindowDiagnostic(window,expectedPid,window));
+      }
+      return !truncated;
+    },IntPtr.Zero);
+    GetWindowThreadProcessId(signedRoot,out pid);
+    if ((!enumerated&&!truncated) || pid!=expectedPid || !IsWindow(signedRoot) ||
+        GetAncestor(signedRoot,GA_ROOT)!=signedRoot || GetWindow(signedRoot,GW_OWNER)!=IntPtr.Zero ||
+        ReadWindowClassExact(signedRoot)!="MetaQuotes::MetaTrader::5.00")
+      throw new InvalidOperationException("mt5_tester_window_diagnostic_changed");
+    return new TESTERWINDOWINVENTORY {topLevelWindows=tops.ToArray(),testerControls=controls.ToArray(),truncated=truncated};
+  }
+  public sealed class TESTERVIEWMENUSNAPSHOT {
+    public IntPtr MainMenu; public IntPtr ViewMenu;
+    public MENUITEMSNAPSHOT ViewItem; public MENUITEMSNAPSHOT TesterItem;
+    public TESTERMENUDIAGNOSTICITEM[] TopItems; public TESTERMENUDIAGNOSTICITEM[] ViewItems;
+  }
+  static string TesterMenuLabel(string text) {
+    return (text ?? String.Empty).Split('\t')[0].Replace("&", "").Trim();
+  }
+  public static TESTERVIEWMENUSNAPSHOT ReadTesterViewMenuExact(uint expectedProcessId, IntPtr expectedRoot) {
+    uint owner; GetWindowThreadProcessId(expectedRoot, out owner);
+    if (expectedProcessId == 0 || owner != expectedProcessId || !IsWindow(expectedRoot) ||
+        !IsWindowVisible(expectedRoot) || !IsWindowEnabled(expectedRoot) ||
+        GetAncestor(expectedRoot, GA_ROOT) != expectedRoot || GetWindow(expectedRoot, GW_OWNER) != IntPtr.Zero ||
+        ReadWindowClassExact(expectedRoot) != "MetaQuotes::MetaTrader::5.00")
+      throw new InvalidOperationException("mt5_tester_menu_root_unverified");
+    IntPtr mainMenu = GetMenu(expectedRoot);
+    if (mainMenu == IntPtr.Zero || !IsMenu(mainMenu)) throw new InvalidOperationException("mt5_tester_native_menu_unavailable");
+    MENUITEMSNAPSHOT view = null, tester = null;
+    TESTERMENUDIAGNOSTICITEM[] topItems = ListTesterMenuDiagnosticItems(mainMenu);
+    foreach (TESTERMENUDIAGNOSTICITEM observed in topItems) {
+      MENUITEMSNAPSHOT item=observed.Item;
+      if (TesterMenuLabel(item.Text) != "View" || item.IsSeparator || !item.HasSubmenu) continue;
+      if (view != null) throw new InvalidOperationException("mt5_tester_view_menu_ambiguous");
+      view = item;
+    }
+    if (view == null || view.Text.Length > 128) throw new InvalidOperationException("mt5_tester_view_menu_unavailable");
+    TESTERMENUDIAGNOSTICITEM[] viewItems = ListTesterMenuDiagnosticItems(view.SubmenuHandle);
+    foreach (TESTERMENUDIAGNOSTICITEM observed in viewItems) {
+      MENUITEMSNAPSHOT item=observed.Item;
+      if (TesterMenuLabel(item.Text) != "Strategy Tester" || item.IsSeparator || item.HasSubmenu) continue;
+      if (tester != null) throw new InvalidOperationException("mt5_tester_menu_command_ambiguous");
+      tester = item;
+    }
+    if (tester == null || tester.CommandId == 0 || tester.CommandId == UInt32.MaxValue || tester.Text.Length > 128)
+      throw new InvalidOperationException("mt5_tester_menu_command_unavailable");
+    TESTERMENUDIAGNOSTICITEM viewAfter=ReadTesterMenuDiagnosticItem(mainMenu, view.Position);
+    TESTERMENUDIAGNOSTICITEM testerAfter=ReadTesterMenuDiagnosticItem(view.SubmenuHandle, tester.Position);
+    GetWindowThreadProcessId(expectedRoot, out owner);
+    if (owner != expectedProcessId || !IsWindow(expectedRoot) || GetMenu(expectedRoot) != mainMenu ||
+        topItems[view.Position].Type != viewAfter.Type || viewItems[tester.Position].Type != testerAfter.Type ||
+        !SamePopupMenuItem(view, viewAfter.Item) || !SamePopupMenuItem(tester, testerAfter.Item))
+      throw new InvalidOperationException("mt5_tester_menu_changed");
+    return new TESTERVIEWMENUSNAPSHOT { MainMenu=mainMenu, ViewMenu=view.SubmenuHandle, ViewItem=view, TesterItem=tester, TopItems=topItems, ViewItems=viewItems };
   }
   static MENUITEMSNAPSHOT FindPopupSubmenuExact(MENUITEMSNAPSHOT[] items, string expectedText) {
     if (items == null || String.IsNullOrWhiteSpace(expectedText) || expectedText.Length > 128)
@@ -1382,6 +1616,26 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 public static class MetafxMetaEditorCompileNative {
+  [ThreadStatic] static long captureTimestamp;
+  [ThreadStatic] static IDictionary<string,string> clipboardRestoreMismatchMetadata;
+  public static void ResetCaptureTimestamp() { captureTimestamp = 0; }
+  public static long ConsumeCaptureTimestamp() { long value = captureTimestamp; captureTimestamp = 0; return value; }
+  public static IDictionary<string,string> ConsumeClipboardRestoreMismatchMetadata() {
+    IDictionary<string,string> value = clipboardRestoreMismatchMetadata;
+    clipboardRestoreMismatchMetadata = null;
+    return value;
+  }
+  [ThreadStatic] static IDictionary<string,long> diagnosticTimings;
+  [ThreadStatic] static System.Diagnostics.Stopwatch diagnosticClock;
+  [ThreadStatic] static long diagnosticCheckpoint;
+  static void DiagnosticMark(string checkpoint) {
+    if (diagnosticTimings == null || diagnosticClock == null) return;
+    long elapsed = diagnosticClock.ElapsedMilliseconds;
+    long previous;
+    diagnosticTimings.TryGetValue(checkpoint, out previous);
+    diagnosticTimings[checkpoint] = previous + Math.Max(0, elapsed - diagnosticCheckpoint);
+    diagnosticCheckpoint = elapsed;
+  }
   const int WM_COMMAND = 0x0111;
   const int ID_EDIT_COPY = 57634;
   const int LVM_FIRST = 0x1000;
@@ -1450,7 +1704,26 @@ public static class MetafxMetaEditorCompileNative {
     UIntPtr written;
     if (!WriteProcessMemory(process, remote, bytes, (UIntPtr)bytes.Length, out written) || written.ToUInt64() != (ulong)bytes.Length)
       throw new InvalidOperationException("metaeditor_list_state_write_failed");
-    Message(list, LVM_SETITEMSTATE, index, remote);
+    if (Message(list, LVM_SETITEMSTATE, index, remote) == 0)
+      throw new InvalidOperationException("metaeditor_list_state_write_failed");
+  }
+  static void RestoreSelectionAndFocus(IntPtr list, IntPtr process, IntPtr remote, uint[] priorStates, IntPtr previousFocus) {
+    try {
+      if (priorStates != null) {
+        SetItemState(list, process, remote, -1, 0);
+        for (int index = 0; index < priorStates.Length; index++) if (priorStates[index] != 0) SetItemState(list, process, remote, index, priorStates[index]);
+      }
+      if (previousFocus != IntPtr.Zero) {
+        if (!IsWindow(previousFocus)) throw new InvalidOperationException();
+        SetFocus(previousFocus);
+        if (GetFocus() != previousFocus) throw new InvalidOperationException();
+      }
+    } catch {
+      // Cleanup errors must never be retried as a transient compiler read.
+      // Do not nest the generic native error: diagnostic unwrapping must retain
+      // this fatal restoration classification.
+      throw new InvalidOperationException("metaeditor_selection_focus_restore_failed");
+    }
   }
   static string ReadClipboardText(uint priorSequence) {
     for (int attempt = 0; attempt < 100; attempt++) {
@@ -1518,7 +1791,10 @@ public static class MetafxMetaEditorCompileNative {
     if (value is Stream) {
       Stream source = (Stream)value; long position = 0;
       if (source.CanSeek) { position = source.Position; source.Position = 0; }
-      try { using (MemoryStream copy = new MemoryStream()) { source.CopyTo(copy); return copy.ToArray(); } }
+      // OLE may return the same format's binary payload in a stream instead
+      // of a byte array. Keep the binary tag and every byte identical across
+      // those wrappers; other value families retain their own representation.
+      try { using (MemoryStream copy = new MemoryStream()) { source.CopyTo(copy); return ClipboardValueBytes(copy.ToArray()); } }
       finally { if (source.CanSeek) source.Position = position; }
     }
     throw new InvalidOperationException("metaeditor_clipboard_format_unsupported");
@@ -1530,6 +1806,22 @@ public static class MetafxMetaEditorCompileNative {
       foreach (byte item in digest) text.Append(item.ToString("x2"));
       return text.ToString();
     }
+  }
+  static InvalidOperationException ClipboardRestoreMismatch(string format, object expected, object actual) {
+    InvalidOperationException error = new InvalidOperationException("metaeditor_clipboard_restore_mismatch");
+    // Diagnostic metadata only: never put clipboard text, bytes, or image
+    // contents in an exception. The canonical failure code stays unchanged.
+    Dictionary<string,string> metadata = new Dictionary<string,string>(StringComparer.Ordinal);
+    metadata["clipboardFormat"] = format ?? "";
+    metadata["expectedType"] = expected == null ? "null" : expected.GetType().FullName;
+    metadata["actualType"] = actual == null ? "null" : actual.GetType().FullName;
+    foreach (string key in new string[] { "clipboardFormat", "expectedType", "actualType" }) {
+      string value = metadata[key] ?? "";
+      metadata[key] = value.Substring(0, Math.Min(256, value.Length));
+      error.Data[key] = metadata[key];
+    }
+    clipboardRestoreMismatchMetadata = metadata;
+    return error;
   }
   static ClipboardSnapshot SnapshotClipboard() {
     if (Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
@@ -1560,15 +1852,21 @@ public static class MetafxMetaEditorCompileNative {
     for (int attempt = 0; attempt < 100; attempt++) {
       try {
         if (snapshot.IsEmpty) Clipboard.Clear(); else Clipboard.SetDataObject(snapshot.Data, true);
+        DiagnosticMark("clipboard_restore_publish");
         System.Windows.Forms.IDataObject restored = Clipboard.GetDataObject();
+        DiagnosticMark("clipboard_restore_readback_object");
         string[] restoredFormats = restored == null ? new string[0] : restored.GetFormats(false);
         Array.Sort(restoredFormats, StringComparer.Ordinal);
+        DiagnosticMark("clipboard_restore_formats");
         if (restoredFormats.Length != snapshot.Formats.Length) throw new InvalidOperationException("metaeditor_clipboard_restore_incomplete");
         for (int index = 0; index < snapshot.Formats.Length; index++) {
           string expected = snapshot.Formats[index];
           if (!String.Equals(expected, restoredFormats[index], StringComparison.Ordinal)) throw new InvalidOperationException("metaeditor_clipboard_restore_incomplete");
-          string actualFingerprint = FingerprintClipboardValue(restored.GetData(expected, false));
-          if (!String.Equals(actualFingerprint, snapshot.Fingerprints[expected], StringComparison.Ordinal)) throw new InvalidOperationException("metaeditor_clipboard_restore_mismatch");
+          object actualValue = restored.GetData(expected, false);
+          string actualFingerprint = FingerprintClipboardValue(actualValue);
+          DiagnosticMark("clipboard_restore_verify_formats");
+          if (!String.Equals(actualFingerprint, snapshot.Fingerprints[expected], StringComparison.Ordinal))
+            throw ClipboardRestoreMismatch(expected, snapshot.Data.GetData(expected, false), actualValue);
         }
         return;
       } catch (ExternalException) { Thread.Sleep(20); }
@@ -1576,15 +1874,41 @@ public static class MetafxMetaEditorCompileNative {
     throw new InvalidOperationException("metaeditor_clipboard_restore_failed");
   }
   public static int GetItemCount(IntPtr list) {
+    ResetCaptureTimestamp();
     if (list == IntPtr.Zero || !IsWindow(list)) throw new InvalidOperationException("metaeditor_compile_controls_invalid");
     int count = checked((int)Message(list, LVM_GETITEMCOUNT, 0, IntPtr.Zero));
     if (count < 0 || count > 100000) throw new InvalidOperationException("metaeditor_compile_rows_invalid");
+    captureTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
     return count;
   }
+  public static string CopyDiagnosticRow(IntPtr root, IntPtr list) {
+    IntPtr foreground = GetForegroundWindow();
+    try { return CopyLastVisibleRow(root, list); }
+    finally {
+      if (foreground != IntPtr.Zero && IsWindow(foreground) && GetForegroundWindow() != foreground) {
+        if (!SetForegroundWindow(foreground) || GetForegroundWindow() != foreground)
+          throw new InvalidOperationException("metaeditor_diagnostic_foreground_restore_failed");
+      }
+    }
+  }
+  public static string CopyDiagnosticRowTimed(IntPtr root, IntPtr list, IDictionary<string,long> timings) {
+    if (timings == null || diagnosticTimings != null) throw new InvalidOperationException("metaeditor_diagnostic_timing_invalid");
+    diagnosticTimings = timings;
+    diagnosticClock = System.Diagnostics.Stopwatch.StartNew();
+    diagnosticCheckpoint = 0;
+    try { return CopyDiagnosticRow(root, list); }
+    finally {
+      DiagnosticMark("foreground_restore");
+      diagnosticTimings = null; diagnosticClock = null; diagnosticCheckpoint = 0;
+    }
+  }
   public static string CopyLastVisibleRow(IntPtr root, IntPtr list) {
+    ResetCaptureTimestamp();
+    clipboardRestoreMismatchMetadata = null;
     if (root == IntPtr.Zero || list == IntPtr.Zero || !IsWindow(root) || !IsWindow(list))
       throw new InvalidOperationException("metaeditor_compile_controls_invalid");
     ClipboardSnapshot original = SnapshotClipboard();
+    DiagnosticMark("clipboard_snapshot");
     uint listProcessId; uint listThread = GetWindowThreadProcessId(list, out listProcessId);
     uint rootProcessId; GetWindowThreadProcessId(root, out rootProcessId);
     if (listProcessId == 0 || listProcessId != rootProcessId || listThread == 0) throw new InvalidOperationException("metaeditor_compile_controls_mismatch");
@@ -1606,6 +1930,7 @@ public static class MetafxMetaEditorCompileNative {
       SetItemState(list, process, remote, -1, 0);
       SetItemState(list, process, remote, count - 1, LVIS_FOCUSED | LVIS_SELECTED);
       Message(list, LVM_ENSUREVISIBLE, count - 1, IntPtr.Zero);
+      DiagnosticMark("list_state_setup");
       if (currentThread != listThread) {
         attached = AttachThreadInput(currentThread, listThread, true);
         if (!attached) throw new InvalidOperationException("metaeditor_compile_focus_attach_failed");
@@ -1614,22 +1939,25 @@ public static class MetafxMetaEditorCompileNative {
       previousFocus = GetFocus();
       SetFocus(list);
       if (GetFocus() != list) throw new InvalidOperationException("metaeditor_compile_focus_failed");
+      DiagnosticMark("focus_binding");
       uint sequence = GetClipboardSequenceNumber();
       clipboardMutated = true;
       Message(root, WM_COMMAND, ID_EDIT_COPY, IntPtr.Zero);
-      return ReadClipboardText(sequence);
+      DiagnosticMark("copy_dispatch");
+      string copied = ReadClipboardText(sequence);
+      captureTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+      DiagnosticMark("read_copied_text");
+      return copied;
     } finally {
       try {
-        if (priorStates != null) {
-          SetItemState(list, process, remote, -1, 0);
-          for (int index = 0; index < priorStates.Length; index++) if (priorStates[index] != 0) SetItemState(list, process, remote, index, priorStates[index]);
-        }
-        if (previousFocus != IntPtr.Zero && IsWindow(previousFocus)) SetFocus(previousFocus);
+        RestoreSelectionAndFocus(list, process, remote, priorStates, previousFocus);
+        DiagnosticMark("selection_focus_restore");
       } finally {
         if (attached) AttachThreadInput(currentThread, listThread, false);
         VirtualFreeEx(process, remote, UIntPtr.Zero, MEM_RELEASE);
         CloseHandle(process);
         if (clipboardMutated) RestoreClipboard(original);
+        DiagnosticMark("clipboard_restore");
       }
     }
   }
@@ -1871,6 +2199,17 @@ function Get-Sha256([string]$Path) {
     return ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.IO.File]::ReadAllBytes($Path))).Replace("-", "").ToLowerInvariant())
 }
 
+function Get-TerminalMainWindowExact([object]$Process) {
+    try { return [MetafxMt5VisibleNative]::FindTerminalMainWindowExact([uint32]$Process.Id) } catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        if ($failure.Message -cin @("mt5_terminal_root_ambiguous", "mt5_terminal_root_enumeration_failed", "mt5_terminal_process_changed")) {
+            Fail $failure.Message
+        }
+        Fail "mt5_terminal_root_unverified"
+    }
+}
+
 function Get-ExactTerminal([string]$TerminalPath, [int]$ExpectedPid, [long]$ExpectedWindow) {
     $pathMatches = @()
     foreach ($process in @(Get-Process -Name "terminal64" -ErrorAction SilentlyContinue)) {
@@ -1884,7 +2223,7 @@ function Get-ExactTerminal([string]$TerminalPath, [int]$ExpectedPid, [long]$Expe
     } else {
         # An unsigned capability probe may self-bind only when exactly one
         # visible terminal exists at the Backend-resolved executable path.
-        $visibleMatches = @($pathMatches | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
+        $visibleMatches = @($pathMatches | Where-Object { (Get-TerminalMainWindowExact $_) -ne [IntPtr]::Zero })
         if ($visibleMatches.Count -ne 1) { Fail "mt5_selected_terminal_not_ready" }
         $selected = $visibleMatches[0]
     }
@@ -2466,6 +2805,44 @@ function Get-TesterResultTabs([System.Windows.Automation.AutomationElement]$Root
     return $tabs
 }
 
+function Test-TesterControlViewport(
+    [object]$Control,
+    [System.Windows.Automation.AutomationElement]$Root
+) {
+    $code = "mt5_tester_pane_geometry_unverified"
+    [IntPtr]$rootHandle = [IntPtr]$Root.Current.NativeWindowHandle
+    [IntPtr]$handle = [IntPtr]$Control.Current.NativeWindowHandle
+    if ($rootHandle -eq [IntPtr]::Zero -or $rootHandle -ne $script:TerminalRootHandle -or
+        $handle -eq [IntPtr]::Zero -or -not [MetafxMt5VisibleNative]::IsWindow($handle) -or
+        (Get-NativeOwner $handle) -ne $TerminalProcess.Id -or
+        [MetafxMt5VisibleNative]::GetAncestor($handle, [MetafxMt5VisibleNative]::GA_ROOT) -ne $rootHandle) { Fail $code }
+    if (-not [MetafxMt5VisibleNative]::IsWindowVisible($handle) -or $Control.Current.IsOffscreen) { return $false }
+    $rect = [MetafxMt5VisibleNative+RECT]::new()
+    if (-not [MetafxMt5VisibleNative]::GetWindowRect($handle, [ref]$rect)) { Fail $code }
+    if ($rect.Right -le $rect.Left -or $rect.Bottom -le $rect.Top) { return $false }
+    [IntPtr]$ancestor = $handle
+    for ($depth = 0; $depth -lt 16; $depth++) {
+        if ($ancestor -eq $rootHandle) { return $true }
+        $ancestor = [MetafxMt5VisibleNative]::GetParent($ancestor)
+        if ($ancestor -eq [IntPtr]::Zero -or -not [MetafxMt5VisibleNative]::IsWindow($ancestor) -or
+            (Get-NativeOwner $ancestor) -ne $TerminalProcess.Id -or
+            [MetafxMt5VisibleNative]::GetAncestor($ancestor, [MetafxMt5VisibleNative]::GA_ROOT) -ne $rootHandle) { Fail $code }
+        if (-not [MetafxMt5VisibleNative]::IsWindowVisible($ancestor)) { return $false }
+        $client = Read-TesterDiagnosticClientRect $ancestor $code
+        # Native WS_VISIBLE/UIA IsOffscreen alone remain true for collapsed
+        # docked panels. Every ancestor's actual client clip must contain the
+        # whole control. A read failure or partial clip is not toggle authority.
+        if ($client.right -le $client.left -or $client.bottom -le $client.top -or
+            $rect.Right -le $client.left -or $rect.Left -ge $client.right -or
+            $rect.Bottom -le $client.top -or $rect.Top -ge $client.bottom) { return $false }
+        if ($rect.Left -lt $client.left -or $rect.Right -gt $client.right -or
+            $rect.Top -lt $client.top -or $rect.Bottom -gt $client.bottom) {
+            Fail "mt5_tester_pane_partially_clipped"
+        }
+    }
+    Fail $code
+}
+
 function Test-TesterPaneContentVisible(
     [object]$Required,
     [System.Windows.Automation.AutomationElement]$Root
@@ -2475,17 +2852,104 @@ function Test-TesterPaneContentVisible(
     # Settings workspace or the complete Single-mode launcher is visible.
     $pane = Find-ControlByIdPresent $Root ([string]$Required.testerPane)
     if ($null -eq $pane) { return $false }
-    if ($null -ne (Find-ControlByIdPresent $pane ([string]$Required.start))) { return $true }
+    if (-not (Test-TesterControlViewport $pane $Root)) { return $false }
+    $start = Find-ControlByIdPresent $pane ([string]$Required.start)
+    if ($null -ne $start) { return (Test-TesterControlViewport $start $Root) }
 
     $launcher = Find-ControlByIdPresent $pane "10887"
     if ($null -eq $launcher) { return $false }
-    return (
-        $null -ne (Find-ControlByIdPresent $launcher "3734") -and
-        $null -ne (Find-ControlByIdPresent $launcher "10888")
-    )
+    $button = Find-ControlByIdPresent $launcher "3734"
+    $label = Find-ControlByIdPresent $launcher "10888"
+    if ($null -eq $button -or $null -eq $label) { return $false }
+    return ((Test-TesterControlViewport $launcher $Root) -and
+            (Test-TesterControlViewport $button $Root) -and (Test-TesterControlViewport $label $Root))
+}
+
+function Test-TesterPaneCollapsed([object]$Required, [object]$Root) {
+    $code = "mt5_tester_pane_geometry_unverified"
+    [IntPtr]$rootHandle = [IntPtr]$Root.Current.NativeWindowHandle
+    if ($rootHandle -ne $script:TerminalRootHandle -or [string]$Required.testerPane -cne "32846") { Fail $code }
+    $condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, "32846")
+    $panes = @(Get-All $Root $condition)
+    if ($panes.Count -eq 0) { return $false }
+    if ($panes.Count -ne 1) { Fail $code }
+    [IntPtr]$pane = [IntPtr]$panes[0].Current.NativeWindowHandle
+    if ($pane -eq [IntPtr]::Zero -or -not [MetafxMt5VisibleNative]::IsWindow($pane) -or
+        (Get-NativeOwner $pane) -ne $TerminalProcess.Id -or (Get-NativeOwner $rootHandle) -ne $TerminalProcess.Id -or
+        [MetafxMt5VisibleNative]::GetDlgCtrlID($pane) -ne 32846 -or
+        [MetafxMt5VisibleNative]::GetParent($pane) -ne $rootHandle -or
+        [MetafxMt5VisibleNative]::GetAncestor($pane, [MetafxMt5VisibleNative]::GA_ROOT) -ne $rootHandle -or
+        -not ([string](Get-NativeClass $pane)).StartsWith("Afx:ControlBar:", [StringComparison]::Ordinal)) { Fail $code }
+    if (-not [MetafxMt5VisibleNative]::IsWindowVisible($pane)) { return $false }
+    $rect = [MetafxMt5VisibleNative+RECT]::new()
+    if (-not [MetafxMt5VisibleNative]::GetWindowRect($pane, [ref]$rect)) { Fail $code }
+    $client = Read-TesterDiagnosticClientRect $pane $code
+    if ((Get-NativeOwner $pane) -ne $TerminalProcess.Id -or
+        [MetafxMt5VisibleNative]::GetParent($pane) -ne $rootHandle -or
+        [MetafxMt5VisibleNative]::GetAncestor($pane, [MetafxMt5VisibleNative]::GA_ROOT) -ne $rootHandle -or
+        [MetafxMt5VisibleNative]::GetDlgCtrlID($pane) -ne 32846) { Fail $code }
+    return ([MetafxMt5VisibleNative]::IsWindowVisible($pane) -and $rect.Right -gt $rect.Left -and
+        $rect.Bottom -ge $rect.Top -and ($rect.Bottom - $rect.Top) -le 1 -and
+        $client.right -gt $client.left -and $client.bottom -eq $client.top)
+}
+
+function Read-TesterPaneFailureDiagnostic([object]$Request, [string]$Code) {
+    [IntPtr]$signedRoot = [IntPtr][long]$Request.expectedTerminalWindowHandle
+    if ($signedRoot -eq [IntPtr]::Zero -or $signedRoot -ne $script:TerminalRootHandle -or
+        -not [MetafxMt5VisibleNative]::IsWindow($signedRoot) -or
+        (Get-NativeOwner $signedRoot) -ne $TerminalProcess.Id -or
+        [MetafxMt5VisibleNative]::GetAncestor($signedRoot, [MetafxMt5VisibleNative]::GA_ROOT) -ne $signedRoot) {
+        Fail "mt5_tester_pane_failure_observation_unavailable"
+    }
+    # Observe only the foreground present at this failure boundary. Never
+    # enumerate windows or return unrelated captions/account information.
+    [IntPtr]$foreground = [MetafxMt5VisibleNative]::GetForegroundWindow()
+    $foregroundInfo = [ordered]@{
+        handle = [long]$foreground.ToInt64(); exists = $false; processId = 0
+        nativeClass = ""; rootHandle = 0; ownerHandle = 0; titleCategory = "unavailable"
+    }
+    if ($foreground -ne [IntPtr]::Zero -and [MetafxMt5VisibleNative]::IsWindow($foreground)) {
+        $foregroundInfo.exists = $true
+        $foregroundInfo.processId = [int](Get-NativeOwner $foreground)
+        $className = [string](Get-NativeClass $foreground)
+        $foregroundInfo.nativeClass = ([regex]::Replace($className, "[^A-Za-z0-9_.#:-]", "?")).Substring(0, [Math]::Min(96, $className.Length))
+        $foregroundInfo.rootHandle = [long][MetafxMt5VisibleNative]::GetAncestor($foreground, [MetafxMt5VisibleNative]::GA_ROOT).ToInt64()
+        $foregroundInfo.ownerHandle = [long][MetafxMt5VisibleNative]::GetWindow($foreground, [MetafxMt5VisibleNative]::GW_OWNER).ToInt64()
+        # Category only: even the signed terminal caption may contain an
+        # account identifier. Do not forward any original caption characters.
+        try {
+            $caption = [MetafxMt5VisibleNative]::GetWindowTextExact($foreground)
+            $foregroundInfo.titleCategory = if ($caption -match "(?i)strategy tester") { "strategy_tester" }
+                elseif ($caption -match "(?i)metatrader") { "metatrader" } else { "other" }
+        } catch { $foregroundInfo.titleCategory = "unavailable" }
+    }
+    $rootRect = [MetafxMt5VisibleNative+RECT]::new()
+    if (-not [MetafxMt5VisibleNative]::GetWindowRect($signedRoot, [ref]$rootRect)) { Fail "mt5_tester_pane_failure_observation_unavailable" }
+    return [ordered]@{
+        schemaVersion = "mt5-tester-pane-failure-diagnostic-v1"
+        diagnosticOnly = $true; startInvoked = $false; testerVerified = $false
+        reasonCode = $Code; checkpoint = [string]$script:FailureCheckpoint
+        signedRoot = [ordered]@{
+            handle = [long]$signedRoot.ToInt64(); processId = [int]$TerminalProcess.Id
+            nativeRect = [ordered]@{ left = $rootRect.Left; top = $rootRect.Top; right = $rootRect.Right; bottom = $rootRect.Bottom }
+            clientRect = Read-TesterDiagnosticClientRect $signedRoot
+        }
+        foreground = $foregroundInfo
+        foregroundStable = [bool]([MetafxMt5VisibleNative]::GetForegroundWindow() -eq $foreground)
+    }
+}
+
+function Fail-TesterPaneReadiness([object]$Request, [string]$Code) {
+    if ($Request.PSObject.Properties.Name -contains "diagnosticFailureObservation" -and
+        $Request.diagnosticFailureObservation -ceq $true -and [string]$Request.action -ceq "probe") {
+        try { $script:TesterPaneFailureDiagnostic = Read-TesterPaneFailureDiagnostic $Request $Code }
+        catch { $script:TesterPaneFailureDiagnostic = $null }
+    }
+    Fail $Code
 }
 
 function Ensure-TesterPaneVisible([object]$Request, [System.Windows.Automation.AutomationElement]$Root = $null) {
+    $script:TesterPaneFailureDiagnostic = $null
     $Required = $Request.requiredAutomationIds
     [IntPtr]$signedRoot = [IntPtr][long]$Request.expectedTerminalWindowHandle
     if ($signedRoot -eq [IntPtr]::Zero -or $signedRoot -ne [IntPtr]$script:TerminalRootHandle) {
@@ -2496,25 +2960,51 @@ function Ensure-TesterPaneVisible([object]$Request, [System.Windows.Automation.A
         Fail "mt5_terminal_window_changed"
     }
     if (Test-TesterPaneContentVisible $Required $activeRoot) { return }
-    # SendKeys targets the foreground thread, not a supplied HWND.  Bind both
-    # focus and readback to the immutable signed terminal root; never trust the
+    # Bind menu dispatch, focus and readback to the signed terminal root; never trust the
     # process convenience MainWindowHandle, which can drift to an owned popup.
+    $script:FailureCheckpoint = "tester_pane_focus_before_reveal"
     $activeRoot = Get-BoundTerminalRoot $Request $signedRoot
-    Set-Foreground $TerminalProcess $activeRoot
-    if ([MetafxMt5VisibleNative]::GetForegroundWindow() -ne $signedRoot) {
-        Fail "mt5_tester_pane_not_available"
+    try { Set-Foreground $TerminalProcess $activeRoot } catch {
+        if ($_.Exception.Message -ceq "visible_window_foreground_failed") { Fail-TesterPaneReadiness $Request "mt5_tester_pane_focus_before_reveal_failed" }
+        throw
     }
-    [System.Windows.Forms.SendKeys]::SendWait("^r")
+    if ([MetafxMt5VisibleNative]::GetForegroundWindow() -ne $signedRoot) {
+        Fail-TesterPaneReadiness $Request "mt5_tester_pane_focus_before_reveal_failed"
+    }
+    # Restoring a minimized terminal can itself reveal an already-open Tester.
+    # Wait for actual client geometry, then rebind and recheck before toggling.
+    $script:FailureCheckpoint = "tester_pane_restore_readback"
+    $restoreDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $activeRoot = Get-BoundTerminalRoot $Request $signedRoot
+        if ([MetafxMt5VisibleNative]::GetForegroundWindow() -ne $signedRoot) { Fail-TesterPaneReadiness $Request "mt5_tester_pane_restore_focus_lost" }
+        $rootClient = Read-TesterDiagnosticClientRect $signedRoot "mt5_tester_pane_geometry_unverified"
+        if ($rootClient.right -gt $rootClient.left -and $rootClient.bottom -gt $rootClient.top) { break }
+        if ([DateTime]::UtcNow -ge $restoreDeadline) { Fail-TesterPaneReadiness $Request "mt5_tester_pane_restore_timeout" }
+        Start-Sleep -Milliseconds 50
+    } while ($true)
+    if (Test-TesterPaneContentVisible $Required $activeRoot) { return }
+    # An open but collapsed dock cannot be fixed by toggling its View command.
+    if (Test-TesterPaneCollapsed $Required $activeRoot) { Fail "mt5_tester_pane_collapsed" }
+    $script:FailureCheckpoint = "tester_pane_reveal_menu"
+    try { [MetafxMt5VisibleNative]::InvokeTesterRevealMenuExact([uint32]$TerminalProcess.Id, $signedRoot) } catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        if ($failure.Message -match "^mt5_[a-z0-9_]{3,90}$") { Fail $failure.Message }
+        Fail "mt5_tester_reveal_menu_unverified"
+    }
+    $script:FailureCheckpoint = "tester_pane_reveal_readback"
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
     while ([DateTime]::UtcNow -lt $deadline) {
         $activeRoot = Get-BoundTerminalRoot $Request $signedRoot
         if ([MetafxMt5VisibleNative]::GetForegroundWindow() -ne $signedRoot) {
-            Fail "mt5_tester_pane_not_available"
+            Fail-TesterPaneReadiness $Request "mt5_tester_pane_reveal_focus_lost"
         }
         if (Test-TesterPaneContentVisible $Required $activeRoot) { return }
         Start-Sleep -Milliseconds 100
     }
-    Fail "mt5_tester_pane_not_available"
+    if (Test-TesterPaneCollapsed $Required $activeRoot) { Fail "mt5_tester_pane_collapsed" }
+    Fail-TesterPaneReadiness $Request "mt5_tester_pane_reveal_timeout"
 }
 
 function Ensure-TesterSingleModeReady(
@@ -2886,16 +3376,10 @@ function Get-AlgoTradingState([System.Windows.Automation.AutomationElement]$Root
     return (($state -band 1) -eq 1)
 }
 
-function New-Probe([System.Diagnostics.Process]$Process) {
-    return [ordered]@{
-        observedAt = [DateTime]::UtcNow.ToString("o")
-        processId = $Process.Id
-        executablePath = [System.IO.Path]::GetFullPath($Process.Path)
-        windowHandle = $Process.MainWindowHandle.ToInt64()
-        windowOwnerProcessId = $Process.Id
-        windowTitle = $Process.MainWindowTitle
-        windowClass = (Get-Root $Process).Current.ClassName
-    }
+function New-Probe([System.Diagnostics.Process]$Process, [System.Windows.Automation.AutomationElement]$Root) {
+    # The initial probe and its response must name the same proven MT5 main
+    # root. Process.MainWindowHandle/Title can drift to a docked or owned pane.
+    return New-BoundProbe $Process $Root
 }
 
 function New-BoundProbe(
@@ -3202,11 +3686,31 @@ function Get-TrustedCompileSuccessRow([string]$CopiedRow) {
     }
 }
 
-function Find-CompileResult([System.Windows.Automation.AutomationElement]$Root, [System.Diagnostics.Process]$Editor, [bool]$RequireSuccess) {
+function Set-CompileDiagnosticCheckpoint([hashtable]$State, [string]$Checkpoint) {
+    if ($null -eq $State) { return }
+    if (-not $State.ContainsKey("clock")) {
+        $State["clock"] = [System.Diagnostics.Stopwatch]::StartNew()
+        $State["timings"] = [ordered]@{}
+        $State["checkpointAtMs"] = [long]0
+    }
+    [long]$elapsed = $State["clock"].ElapsedMilliseconds
+    if ($State.ContainsKey("checkpoint")) {
+        $State["timings"][[string]$State["checkpoint"]] = [Math]::Max(0, $elapsed - [long]$State["checkpointAtMs"])
+    }
+    $State["checkpoint"] = $Checkpoint
+    $State["checkpointAtMs"] = $elapsed
+}
+
+function Find-CompileResult([System.Windows.Automation.AutomationElement]$Root, [System.Diagnostics.Process]$Editor, [bool]$RequireSuccess, [hashtable]$DiagnosticState = $null) {
     # MetaEditor exposes the current compiler rows through one owner-data native
     # list.  Generic UIA Text nodes are cached/stale on several builds and are
     # deliberately never accepted as compile evidence.
+    [MetafxMetaEditorCompileNative]::ResetCaptureTimestamp()
+    Set-CompileDiagnosticCheckpoint $DiagnosticState "root_binding"
     [IntPtr]$rootHandle = [IntPtr]$Root.Current.NativeWindowHandle
+    if ($null -ne $DiagnosticState) {
+        $DiagnosticState["nativeRootClass"] = Get-NativeClass $rootHandle
+    }
     if ($rootHandle -eq [IntPtr]::Zero -or
         (Get-NativeOwner $rootHandle) -ne $Editor.Id -or
         (Get-NativeClass $rootHandle) -cne "MetaQuotes::MetaEditor::5.00") { Fail "mt5_metaeditor_compile_result_unverified" }
@@ -3216,7 +3720,10 @@ function Find-CompileResult([System.Windows.Automation.AutomationElement]$Root, 
     # succeed when another Toolbox tab was selected at startup.
     $tabsCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, "10047")
     $toolboxTabs = @()
-    foreach ($candidate in @(Get-All $Root $tabsCondition | Where-Object {
+    Set-CompileDiagnosticCheckpoint $DiagnosticState "uia_tabs_find_all"
+    $tabCandidates = @(Get-All $Root $tabsCondition)
+    Set-CompileDiagnosticCheckpoint $DiagnosticState "uia_tabs_properties_and_toolbox_binding"
+    foreach ($candidate in @($tabCandidates | Where-Object {
         -not $_.Current.IsOffscreen -and $_.Current.IsEnabled -and [string]$_.Current.ClassName -ceq "SysTabControl32"
     })) {
         [IntPtr]$candidateHandle = [IntPtr]$candidate.Current.NativeWindowHandle
@@ -3241,6 +3748,7 @@ function Find-CompileResult([System.Windows.Automation.AutomationElement]$Root, 
     [IntPtr]$tabsHandle = [IntPtr]$toolboxTabs[0].TabHandle
     [IntPtr]$toolboxHandle = [IntPtr]$toolboxTabs[0].ToolboxHandle
     try {
+        Set-CompileDiagnosticCheckpoint $DiagnosticState "errors_tab_binding"
         $tabNames = @([MetafxMt5TabNative]::GetNames($tabsHandle))
         $errorIndexes = @()
         for ($index = 0; $index -lt $tabNames.Count; $index++) {
@@ -3248,6 +3756,7 @@ function Find-CompileResult([System.Windows.Automation.AutomationElement]$Root, 
         }
         if ($errorIndexes.Count -ne 1) { Fail "mt5_metaeditor_compile_result_unverified" }
         if ([MetafxMt5TabNative]::GetSelectedIndex($tabsHandle) -ne [int]$errorIndexes[0]) {
+            if ($null -ne $DiagnosticState) { Fail "compile_diagnostic_errors_tab_not_selected" }
             if (-not [MetafxMt5TabNative]::SelectExact($tabsHandle, "Errors") -or
                 [MetafxMt5TabNative]::GetSelectedIndex($tabsHandle) -ne [int]$errorIndexes[0]) { Fail "mt5_metaeditor_compile_result_unverified" }
         }
@@ -3255,7 +3764,10 @@ function Find-CompileResult([System.Windows.Automation.AutomationElement]$Root, 
         # selected tab may control 10065 be accepted, and it must be the sole
         # visible/enabled SysListView32 directly owned by this exact Toolbox.
         $listCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, "10065")
-        $lists = @(Get-All $Root $listCondition | Where-Object {
+        Set-CompileDiagnosticCheckpoint $DiagnosticState "uia_list_find_all"
+        $listCandidates = @(Get-All $Root $listCondition)
+        Set-CompileDiagnosticCheckpoint $DiagnosticState "uia_list_properties_and_binding"
+        $lists = @($listCandidates | Where-Object {
             -not $_.Current.IsOffscreen -and $_.Current.IsEnabled -and
             [string]$_.Current.ClassName -ceq "SysListView32" -and
             [MetafxMt5VisibleNative]::GetParent([IntPtr]$_.Current.NativeWindowHandle) -eq $toolboxHandle
@@ -3266,9 +3778,30 @@ function Find-CompileResult([System.Windows.Automation.AutomationElement]$Root, 
             (Get-NativeOwner $listHandle) -ne $Editor.Id -or
             [MetafxMt5VisibleNative]::GetAncestor($listHandle, [MetafxMt5VisibleNative]::GA_ROOT) -ne $rootHandle -or
             [MetafxMt5VisibleNative]::GetParent($listHandle) -ne $toolboxHandle) { Fail "mt5_metaeditor_compile_result_unverified" }
+        Set-CompileDiagnosticCheckpoint $DiagnosticState "native_row_count"
         $rowCount = [MetafxMetaEditorCompileNative]::GetItemCount($listHandle)
-        $copied = if ($rowCount -gt 0) { [MetafxMetaEditorCompileNative]::CopyLastVisibleRow($rootHandle, $listHandle) } else { "" }
-    } catch { Fail "mt5_metaeditor_compile_result_unverified" }
+        Set-CompileDiagnosticCheckpoint $DiagnosticState "native_row_copy"
+        $copied = if ($rowCount -gt 0) {
+            if ($null -ne $DiagnosticState) {
+                $DiagnosticState["nativeCopyTimings"] = [System.Collections.Generic.Dictionary[string,long]]::new()
+                [MetafxMetaEditorCompileNative]::CopyDiagnosticRowTimed($rootHandle, $listHandle, $DiagnosticState["nativeCopyTimings"])
+            }
+            else { [MetafxMetaEditorCompileNative]::CopyLastVisibleRow($rootHandle, $listHandle) }
+        } else { "" }
+        # Consume exactly once, only after CopyLastVisibleRow's complete cleanup
+        # succeeded. For an empty list this is the native count observation.
+        [long]$captureTicks = [MetafxMetaEditorCompileNative]::ConsumeCaptureTimestamp()
+        if ($captureTicks -le 0) { Fail "mt5_metaeditor_compile_capture_unverified" }
+    } catch {
+        $underlyingCode = Get-CompileDiagnosticErrorCode $_
+        if ($null -ne $DiagnosticState) {
+            $DiagnosticState["underlyingErrorCode"] = $underlyingCode
+        }
+        # Never retry an observation after incomplete restoration of user state.
+        if ($underlyingCode -match '(clipboard_restore|foreground_restore|focus_restore)' -or
+            $underlyingCode -ceq "mt5_metaeditor_compile_capture_unverified") { Fail $underlyingCode }
+        Fail "mt5_metaeditor_compile_result_unverified"
+    }
     # Copy from MetaEditor's owner-data Errors list is native TSV, not only
     # the visible Description cell.  A successful summary row on current MT5
     # builds is copied as:
@@ -3277,15 +3810,141 @@ function Find-CompileResult([System.Windows.Automation.AutomationElement]$Root, 
     # RequireSuccess=true requires and accepts the exact success-summary shape;
     # a pre-F7 diagnostic row is allowed solely as the before-snapshot.
     $rawCopied = ([string]$copied).TrimEnd([char[]]@("`r", "`n"))
+    Set-CompileDiagnosticCheckpoint $DiagnosticState "native_row_shape"
     $trustedSuccess = Get-TrustedCompileSuccessRow $rawCopied
     if ($RequireSuccess -and $null -eq $trustedSuccess) { Fail "mt5_metaeditor_compile_result_unverified" }
     $snapshotBytes = [System.Text.UTF8Encoding]::new($false).GetBytes("$rowCount`n$rawCopied")
     $snapshotDigest = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($snapshotBytes)).Replace("-", "").ToLowerInvariant()
+    Set-CompileDiagnosticCheckpoint $DiagnosticState "complete"
     return [ordered]@{
         rowCount = [int]$rowCount
+        captureTimestampTicks = $captureTicks
         rawLastRow = $rawCopied
         snapshotSha256 = $snapshotDigest
         resultLine = if ($null -ne $trustedSuccess) { [string]$trustedSuccess.ResultLine } else { $null }
+    }
+}
+
+function Get-CompileDiagnosticErrorCode([object]$ErrorRecord) {
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
+    $code = [string]$exception.Message
+    if ($code -cmatch '^[a-z0-9_]{3,100}$') { return $code }
+    return "compile_diagnostic_observation_failed"
+}
+
+function Read-CompileDiagnostic([object]$Request) {
+    # Diagnostic-only observation of an already-open, exact source window.
+    # Never start/open MetaEditor, select tabs, press F7, touch artifacts or mint
+    # compile evidence. Native copying restores clipboard/selection/focus, and
+    # CopyDiagnosticRow also restores the original foreground window on failure.
+    if ([string]$Request.stageId -cne "compile_validate") { Fail "visible_stage_unsupported" }
+    $source = Get-FullExistingFile $Request.sourcePath ".mq5" "mt5_source_invalid"
+    if ((Get-Sha256 $source) -cne [string]$Request.expectedSourceDigest) { Fail "mt5_source_digest_mismatch" }
+    $binding = Find-MetaEditorSourceBinding ([string]$Request.compilerPath) $source
+    if ($null -eq $binding) { Fail "mt5_metaeditor_source_window_not_ready" }
+    $editor = $binding.Process
+    $root = $binding.Window
+    [IntPtr]$rootHandle = [IntPtr]$root.Current.NativeWindowHandle
+    $observation = [ordered]@{
+        tabs = @(); lists = @(); qualifiedTabCount = 0; selectedTab = $null
+        nativeTabNames = @(); qualifiedListCount = 0; rowCount = $null
+        rawLastRow = $null; rawRowTruncated = $false; rawRowFieldCount = $null
+        rawRowSha256 = $null; nativeSuccessShape = $false; reasonCode = $null
+        nativeRootClass = Get-NativeClass $rootHandle; productionReader = $null
+    }
+    try {
+        $qualifiedTabs = @()
+        $qualifiedLists = @()
+        foreach ($id in @("10047", "10065")) {
+            $condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $id)
+            $items = @(Get-All $root $condition)
+            if ($items.Count -gt 16) { Fail "compile_diagnostic_control_count_exceeded" }
+            foreach ($item in $items) {
+                [IntPtr]$handle = [IntPtr]$item.Current.NativeWindowHandle
+                [IntPtr]$parent = if ($handle -ne [IntPtr]::Zero) { [MetafxMt5VisibleNative]::GetParent($handle) } else { [IntPtr]::Zero }
+                $owned = $handle -ne [IntPtr]::Zero -and (Get-NativeOwner $handle) -eq $editor.Id
+                $rootBound = $handle -ne [IntPtr]::Zero -and [MetafxMt5VisibleNative]::GetAncestor($handle, [MetafxMt5VisibleNative]::GA_ROOT) -eq $rootHandle
+                $parentId = if ($parent -ne [IntPtr]::Zero) { [MetafxMt5VisibleNative]::GetDlgCtrlID($parent) } else { 0 }
+                $row = [ordered]@{
+                    automationId = $id; className = ([string]$item.Current.ClassName).Substring(0, [Math]::Min(80, ([string]$item.Current.ClassName).Length))
+                    offscreen = [bool]$item.Current.IsOffscreen; enabled = [bool]$item.Current.IsEnabled
+                    ownedByEditor = [bool]$owned; rootBound = [bool]$rootBound; parentControlId = [int]$parentId
+                    parentRootBound = [bool]($parent -ne [IntPtr]::Zero -and [MetafxMt5VisibleNative]::GetAncestor($parent, [MetafxMt5VisibleNative]::GA_ROOT) -eq $rootHandle)
+                }
+                if ($id -ceq "10047") {
+                    $observation.tabs += $row
+                    if ($owned -and $rootBound -and -not $row.offscreen -and $row.enabled -and
+                        $row.className -ceq "SysTabControl32" -and $parentId -eq 32907 -and
+                        (Get-NativeOwner $parent) -eq $editor.Id -and
+                        (Read-NativeText $parent "compile_diagnostic_toolbox_unverified") -ceq "Toolbox") {
+                        $qualifiedTabs += [pscustomobject]@{ Handle = $handle; Parent = $parent }
+                    }
+                } else {
+                    $observation.lists += $row
+                    if ($owned -and $rootBound -and -not $row.offscreen -and $row.enabled -and $row.className -ceq "SysListView32") {
+                        $qualifiedLists += [pscustomobject]@{ Handle = $handle; Parent = $parent }
+                    }
+                }
+            }
+        }
+        $observation.qualifiedTabCount = $qualifiedTabs.Count
+        if ($qualifiedTabs.Count -ne 1) { Fail "compile_diagnostic_toolbox_not_unique" }
+        $tabNames = @([MetafxMt5TabNative]::GetNames($qualifiedTabs[0].Handle))
+        if ($tabNames.Count -gt 32 -or @($tabNames | Where-Object { ([string]$_).Length -gt 80 }).Count -gt 0) { Fail "compile_diagnostic_tabs_unbounded" }
+        $observation.nativeTabNames = $tabNames
+        $selectedIndex = [MetafxMt5TabNative]::GetSelectedIndex($qualifiedTabs[0].Handle)
+        if ($selectedIndex -lt 0 -or $selectedIndex -ge $tabNames.Count) { Fail "compile_diagnostic_selected_tab_invalid" }
+        $observation.selectedTab = [string]$tabNames[$selectedIndex]
+        if ($observation.selectedTab -cne "Errors") { Fail "compile_diagnostic_errors_tab_not_selected" }
+        $boundLists = @($qualifiedLists | Where-Object { $_.Parent -eq $qualifiedTabs[0].Parent })
+        $observation.qualifiedListCount = $boundLists.Count
+        if ($boundLists.Count -ne 1) { Fail "compile_diagnostic_errors_list_not_unique" }
+        $count = [MetafxMetaEditorCompileNative]::GetItemCount($boundLists[0].Handle)
+        $observation.rowCount = $count
+        $copied = if ($count -gt 0) { [MetafxMetaEditorCompileNative]::CopyDiagnosticRow($rootHandle, $boundLists[0].Handle) } else { "" }
+        $raw = ([string]$copied).TrimEnd([char[]]@("`r", "`n"))
+        $observation.rawLastRow = $raw.Substring(0, [Math]::Min(1024, $raw.Length))
+        $observation.rawRowTruncated = $raw.Length -gt 1024
+        $observation.rawRowFieldCount = @($raw.Split([char]"`t")).Count
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($raw)
+        $observation.rawRowSha256 = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace("-", "").ToLowerInvariant()
+        $observation.nativeSuccessShape = $null -ne (Get-TrustedCompileSuccessRow $raw)
+        $readerState = @{}
+        $readerStarted = [DateTime]::UtcNow
+        $readerStartedTicks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+        $readerResult = $null
+        $readerError = $null
+        try { $readerResult = Find-CompileResult $root $editor $true $readerState }
+        catch {
+            $readerError = Get-CompileDiagnosticErrorCode $_
+            if ($readerError -match '(clipboard_restore|foreground_restore|focus_restore)') { Fail $readerError }
+        }
+        Set-CompileDiagnosticCheckpoint $readerState ([string]$readerState["checkpoint"])
+        $observation.productionReader = [ordered]@{
+            accepted = $null -ne $readerResult; reasonCode = $readerError
+            elapsedMs = [int]([DateTime]::UtcNow - $readerStarted).TotalMilliseconds
+            checkpoint = $readerState["checkpoint"]; underlyingErrorCode = $readerState["underlyingErrorCode"]
+            rowCount = if ($null -ne $readerResult) { $readerResult.rowCount } else { $null }
+            snapshotSha256 = if ($null -ne $readerResult) { $readerResult.snapshotSha256 } else { $null }
+            timingsMs = $readerState["timings"]; nativeCopyTimingsMs = $readerState["nativeCopyTimings"]
+            captureAfterStartMs = if ($null -ne $readerResult) {
+                [Math]::Round(1000.0 * ([long]$readerResult.captureTimestampTicks - $readerStartedTicks) / [System.Diagnostics.Stopwatch]::Frequency, 3)
+            } else { $null }
+            restorationCompleted = $null -ne $readerResult
+        }
+    } catch {
+        $observation.reasonCode = Get-CompileDiagnosticErrorCode $_
+        if ([string]$observation.reasonCode -match '(clipboard_restore|foreground_restore|focus_restore)') { Fail ([string]$observation.reasonCode) }
+    }
+    [void](Assert-MetaEditorSourceBindingUnchanged $binding ([string]$Request.compilerPath) $source)
+    if ((Get-Sha256 $source) -cne [string]$Request.expectedSourceDigest) { Fail "mt5_source_digest_mismatch" }
+    return [ordered]@{
+        schemaVersion = $ResultSchema; ok = $true; action = "diagnose_compile"; operationId = [string]$Request.operationId
+        diagnosticOnly = $true; compileInvoked = $false; compileVerified = $false
+        workingSourceSha256 = [string]$Request.expectedSourceDigest; sourceWindowBound = $true
+        editorProcessId = [int]$editor.Id; editorWindowHandle = [long]$rootHandle.ToInt64()
+        observation = $observation
     }
 }
 
@@ -3308,20 +3967,57 @@ function Wait-CompileResult(
         $TimeoutCode -cnotmatch '^[a-z0-9_]{3,100}$') { Fail "mt5_metaeditor_compile_wait_contract_invalid" }
     if (-not [string]::IsNullOrEmpty($DifferentFromSha256) -and
         $DifferentFromSha256 -cnotmatch '^[a-f0-9]{64}$') { Fail "mt5_metaeditor_compile_wait_contract_invalid" }
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    [long]$startedTicks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+    [long]$deadlineTicks = $startedTicks + [long]($TimeoutSeconds * [System.Diagnostics.Stopwatch]::Frequency)
     do {
         try {
+            [long]$attemptStartedTicks = [System.Diagnostics.Stopwatch]::GetTimestamp()
             $observed = Find-CompileResult $Root $Editor $RequireSuccess
+            [long]$returnedTicks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+            # Capture time belongs to the trusted native row/count operation.
+            # Clipboard publication may finish later, but complete restoration
+            # still must succeed before Find-CompileResult returns anything.
+            if ($observed -isnot [System.Collections.IDictionary] -or
+                -not $observed.Contains("captureTimestampTicks") -or
+                $observed.captureTimestampTicks -isnot [long] -or
+                [long]$observed.captureTimestampTicks -lt $attemptStartedTicks -or
+                [long]$observed.captureTimestampTicks -gt $returnedTicks) {
+                Fail "mt5_metaeditor_compile_capture_unverified"
+            }
             if ([string]::IsNullOrEmpty($DifferentFromSha256) -or
                 [string]$observed.snapshotSha256 -cne $DifferentFromSha256) {
-                if ([DateTime]::UtcNow -lt $deadline) { return $observed }
+                if ([long]$observed.captureTimestampTicks -lt $deadlineTicks) { return $observed }
             }
         } catch [System.InvalidOperationException] {
             if ([string]$_.Exception.Message -cne "mt5_metaeditor_compile_result_unverified") { throw }
         }
         Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $deadline)
+    } while ([System.Diagnostics.Stopwatch]::GetTimestamp() -lt $deadlineTicks)
     Fail $TimeoutCode
+}
+
+function Get-CompileArtifactIdentity([string]$Source, [string]$Binary) {
+    $identity = [ordered]@{}
+    foreach ($entry in @(@("source", $Source), @("binary", $Binary))) {
+        $path = [string]$entry[1]
+        if (-not [System.IO.File]::Exists($path)) { Fail "mt5_compile_artifacts_changed_during_observation" }
+        $before = [System.IO.FileInfo]::new($path)
+        [long]$length = $before.Length
+        [long]$modified = $before.LastWriteTimeUtc.Ticks
+        $digest = Get-Sha256 $path
+        $after = [System.IO.FileInfo]::new($path)
+        if (-not $after.Exists -or $after.Length -ne $length -or $after.LastWriteTimeUtc.Ticks -ne $modified) {
+            Fail "mt5_compile_artifacts_changed_during_observation"
+        }
+        $identity[[string]$entry[0]] = "$length|$modified|$digest"
+    }
+    return $identity
+}
+
+function Assert-CompileArtifactIdentity([object]$Before, [object]$After) {
+    if ($Before.source -cne $After.source -or $Before.binary -cne $After.binary) {
+        Fail "mt5_compile_artifacts_changed_during_observation"
+    }
 }
 
 function Invoke-Compile([object]$Request, [bool]$RecoverOnly) {
@@ -3335,6 +4031,7 @@ function Invoke-Compile([object]$Request, [bool]$RecoverOnly) {
     Set-Foreground $editor $editorWindow
     $autoBefore = Get-AlgoTradingState $TerminalRoot
     $compileBefore = Wait-CompileResult $editorWindow $editor $false $null 10 "mt5_metaeditor_compile_result_not_ready"
+    if ((Get-Sha256 $source) -cne [string]$Request.expectedSourceDigest) { Fail "mt5_source_digest_mismatch" }
     if ([System.IO.File]::Exists($binary)) {
         try { [System.IO.File]::Delete($binary) } catch { Fail "mt5_compile_stale_binary_remove_failed" }
         if ([System.IO.File]::Exists($binary)) { Fail "mt5_compile_stale_binary_remove_failed" }
@@ -3351,7 +4048,9 @@ function Invoke-Compile([object]$Request, [bool]$RecoverOnly) {
     }
     if (-not [System.IO.File]::Exists($binary) -or ([System.IO.FileInfo]$binary).Length -le 0 -or
         ([System.IO.FileInfo]$binary).LastWriteTimeUtc -lt $started.AddSeconds(-1)) { Fail "mt5_compile_binary_not_fresh" }
+    $artifactBeforeRead = Get-CompileArtifactIdentity $source $binary
     $compileAfter = Wait-CompileResult $editorWindow $editor $true ([string]$compileBefore.snapshotSha256) 10 "mt5_metaeditor_compile_result_not_fresh"
+    Assert-CompileArtifactIdentity $artifactBeforeRead (Get-CompileArtifactIdentity $source $binary)
     $editorBinding = Assert-MetaEditorSourceBindingUnchanged $editorBinding ([string]$Request.compilerPath) $source
     $editor = $editorBinding.Process
     $editorWindow = $editorBinding.Window
@@ -3361,6 +4060,7 @@ function Invoke-Compile([object]$Request, [bool]$RecoverOnly) {
     $autoAfter = Get-AlgoTradingState $TerminalRoot
     if ($autoBefore -ne $autoAfter) { Fail "mt5_algo_trading_state_changed" }
     $post = New-Binding $editor "metaeditor" $autoAfter $editorWindow
+    Assert-CompileArtifactIdentity $artifactBeforeRead (Get-CompileArtifactIdentity $source $binary)
     return [ordered]@{
         schemaVersion = $ResultSchema; ok = $true; action = [string]$Request.action; operationId = [string]$Request.operationId
         compileInvoked = $true; recoveryRecompile = $RecoverOnly; exactSourceWindowVerified = $true; compileWorkingCopyVerified = $true
@@ -3508,7 +4208,7 @@ function Invoke-TesterResultsReportCommandExact(
     [uint32]$expectedCommandId = if ($ExpectedTabName -ceq "Optimization Results") { 33543 } else { 33420 }
     $expectedParentText = if ($ExpectedTabName -ceq "Optimization Results") { $null } else { "Report" }
     $binding = Focus-UniqueResultsTable $Request $ExpectedTabName
-    if ([IntPtr]$binding.listHandle -ne $ExpectedListHandle) { Fail $Code }
+    if ([IntPtr]$binding.listHandle -ne $ExpectedListHandle) { Fail "$($Code)_initial_list_changed" }
     [IntPtr]$rootHandle = [IntPtr]$binding.root.Current.NativeWindowHandle
     try {
         [IntPtr]$preexistingDialog = [MetafxMt5VisibleNative]::FindOwnedDialogExact(
@@ -3530,9 +4230,9 @@ function Invoke-TesterResultsReportCommandExact(
                 $rootHandle,
                 [int]$binding.controlId
             )
-        } catch { Fail $Code }
+        } catch { Fail "$($Code)_context_open_failed" }
         $script:FailureCheckpoint = "report_popup_bind"
-        $popup = Get-ExactNativePopupMenuHost 3000 $Code
+        $popup = Get-ExactNativePopupMenuHost 3000 "$($Code)_popup_host_unverified"
         [IntPtr]$popupHandle = [IntPtr]$popup.Current.NativeWindowHandle
         try {
             $popupToken = [MetafxMt5VisibleNative]::CapturePopupMenuTokenExact(
@@ -3559,11 +4259,11 @@ function Invoke-TesterResultsReportCommandExact(
             }
           }
         )
-        if ($commands.Count -ne 1) { Fail $Code }
+        if ($commands.Count -ne 1) { Fail "$($Code)_candidate_count_invalid" }
         if ($ExpectedTabName -ceq "Optimization Results") {
             $command = $commands[0]
             if ([string]$command.Text -cne $expectedCommandText -or
-                [uint32]$command.CommandId -ne $expectedCommandId) { Fail $Code }
+                [uint32]$command.CommandId -ne $expectedCommandId) { Fail "$($Code)_candidate_identity_changed" }
         } else {
             try {
                 $command = [MetafxMt5VisibleNative]::AssertPopupSubmenuCommandFromTokenExact(
@@ -3581,9 +4281,14 @@ function Invoke-TesterResultsReportCommandExact(
         # dispatch.  This prevents a stale or neighbouring context menu from
         # being accepted as report export.
         $script:FailureCheckpoint = "report_pre_dispatch_rebind"
-        $immediate = Get-ExactTesterResultsList $Request $ExpectedTabName $Code ([int]$binding.controlId)
+        try {
+            $immediate = Get-ExactTesterResultsList $Request $ExpectedTabName $Code ([int]$binding.controlId)
+        } catch {
+            if ([string]$_.Exception.Message -ceq $Code) { Fail "$($Code)_results_rebind_unverified" }
+            throw
+        }
         if ([IntPtr]$immediate.listHandle -ne $ExpectedListHandle -or
-            [IntPtr]$immediate.root.Current.NativeWindowHandle -ne $rootHandle) { Fail $Code }
+            [IntPtr]$immediate.root.Current.NativeWindowHandle -ne $rootHandle) { Fail "$($Code)_results_binding_changed" }
         $script:FailureCheckpoint = "report_native_dispatch"
         try {
             [MetafxMt5VisibleNative]::AssertListFocusExact(
@@ -3592,9 +4297,9 @@ function Invoke-TesterResultsReportCommandExact(
                 $rootHandle,
                 [int]$immediate.controlId
             )
-        } catch { Fail $Code }
-        $immediatePopup = Get-ExactNativePopupMenuHost 0 $Code
-        if ([IntPtr]$immediatePopup.Current.NativeWindowHandle -ne $popupHandle) { Fail $Code }
+        } catch { Fail "$($Code)_results_focus_lost" }
+        $immediatePopup = Get-ExactNativePopupMenuHost 0 "$($Code)_popup_rebind_unverified"
+        if ([IntPtr]$immediatePopup.Current.NativeWindowHandle -ne $popupHandle) { Fail "$($Code)_popup_identity_changed" }
         try {
             [IntPtr]$immediateDialog = [MetafxMt5VisibleNative]::FindOwnedDialogExact(
                 [uint32]$TerminalProcess.Id,
@@ -4632,6 +5337,366 @@ function Select-BoundTesterComboMapped(
     Fail $Code
 }
 
+function Read-TesterPaneResizeDiagnostic([object]$Control) {
+    [IntPtr]$pane = [IntPtr]$Control.Current.NativeWindowHandle
+    [IntPtr]$root = $script:TerminalRootHandle
+    if ($pane -eq [IntPtr]::Zero -or -not [MetafxMt5VisibleNative]::IsWindow($pane) -or
+        -not [MetafxMt5VisibleNative]::IsWindow($root) -or
+        (Get-NativeOwner $root) -ne $TerminalProcess.Id -or (Get-NativeOwner $pane) -ne $TerminalProcess.Id -or
+        [MetafxMt5VisibleNative]::GetDlgCtrlID($pane) -ne 32846 -or
+        [MetafxMt5VisibleNative]::GetAncestor($pane, [MetafxMt5VisibleNative]::GA_ROOT) -ne $root -or
+        [MetafxMt5VisibleNative]::GetParent($pane) -ne $root) { Fail "mt5_tester_resize_diagnostic_binding_invalid" }
+    $result = [ordered]@{ supportedPatterns = @(); transformAvailable = $false; canResize = $null; canMove = $null; canRotate = $null; hitTests = @() }
+    try {
+        $patterns = @($Control.GetSupportedPatterns())
+        if ($patterns.Count -gt 32) { Fail "mt5_tester_resize_diagnostic_patterns_invalid" }
+        $names = @($patterns | ForEach-Object { [string]$_.ProgrammaticName })
+        if (@($names | Where-Object { $_.Length -gt 96 }).Count -gt 0) { Fail "mt5_tester_resize_diagnostic_patterns_invalid" }
+        $result.supportedPatterns = $names
+        $transform = $null
+        if ($Control.TryGetCurrentPattern([System.Windows.Automation.TransformPattern]::Pattern, [ref]$transform)) {
+            $result.transformAvailable = $true
+            $result.canResize = [bool]$transform.Current.CanResize
+            $result.canMove = [bool]$transform.Current.CanMove
+            $result.canRotate = [bool]$transform.Current.CanRotate
+        }
+    } catch { $result["patternReasonCode"] = "mt5_tester_resize_diagnostic_patterns_unavailable" }
+    $rect = [MetafxMt5VisibleNative+RECT]::new()
+    if (-not [MetafxMt5VisibleNative]::GetWindowRect($pane, [ref]$rect)) { Fail "mt5_tester_resize_diagnostic_geometry_unavailable" }
+    [int]$x = $rect.Left + [int](($rect.Right - $rect.Left) / 2)
+    foreach ($target in @($pane, $root)) {
+        foreach ($delta in @(-1, 0, 1)) {
+            [int]$y = $rect.Top + $delta
+            if ($x -lt -32768 -or $x -gt 32767 -or $y -lt -32768 -or $y -gt 32767) { continue }
+            [int]$packed = ($y -shl 16) -bor ($x -band 0xffff)
+            [IntPtr]$hit = [IntPtr]::Zero
+            # WM_NCHITTEST observes the non-client edge only; no mouse/resize message is sent.
+            $ok = [MetafxMt5VisibleNative]::SendMessageTimeout($target, 0x0084, [IntPtr]::Zero, [IntPtr]$packed,
+                ([MetafxMt5VisibleNative]::SMTO_ABORTIFHUNG -bor [MetafxMt5VisibleNative]::SMTO_BLOCK -bor [MetafxMt5VisibleNative]::SMTO_ERRORONEXIT), 250, [ref]$hit)
+            $result.hitTests += [ordered]@{ targetHandle = [long]$target.ToInt64(); x = $x; y = $y; available = $ok -ne [IntPtr]::Zero; hitCode = if ($ok -ne [IntPtr]::Zero) { [long]$hit.ToInt64() } else { $null } }
+        }
+    }
+    if ((Get-NativeOwner $pane) -ne $TerminalProcess.Id -or (Get-NativeOwner $root) -ne $TerminalProcess.Id -or
+        [MetafxMt5VisibleNative]::GetDlgCtrlID($pane) -ne 32846 -or
+        [MetafxMt5VisibleNative]::GetAncestor($pane, [MetafxMt5VisibleNative]::GA_ROOT) -ne $root -or
+        [MetafxMt5VisibleNative]::GetParent($pane) -ne $root) { Fail "mt5_tester_resize_diagnostic_binding_changed" }
+    return $result
+}
+
+function Read-TesterDiagnosticControl([object]$Root, [string]$Id, [string]$Kind) {
+    $condition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $Id)
+    $matches = @(Get-All $Root $condition)
+    if ($matches.Count -gt 8) { Fail "mt5_tester_diagnostic_controls_ambiguous" }
+    $rows = @()
+    foreach ($control in $matches) {
+        [IntPtr]$handle = [IntPtr]$control.Current.NativeWindowHandle
+        $exists = $handle -ne [IntPtr]::Zero -and [MetafxMt5VisibleNative]::IsWindow($handle)
+        $row = [ordered]@{
+            handle = [long]$handle.ToInt64(); offscreen = [bool]$control.Current.IsOffscreen
+            enabled = [bool]$control.Current.IsEnabled; exists = [bool]$exists
+            nativeClass = $null; nativeId = $null; ownerMatches = $false; rootMatches = $false
+            visible = $false; nativeEnabled = $false; selectedIndex = $null
+            selectedValue = $null; dropdownOpen = $null; reasonCode = $null
+        }
+        if ($exists) {
+            $row.nativeClass = Get-NativeClass $handle
+            $row.nativeId = [int][MetafxMt5VisibleNative]::GetDlgCtrlID($handle)
+            $row.ownerMatches = (Get-NativeOwner $handle) -eq $TerminalProcess.Id
+            $row.rootMatches = [MetafxMt5VisibleNative]::GetAncestor($handle, [MetafxMt5VisibleNative]::GA_ROOT) -eq $script:TerminalRootHandle
+            $row.visible = [bool][MetafxMt5VisibleNative]::IsWindowVisible($handle)
+            $row.nativeEnabled = [bool][MetafxMt5VisibleNative]::IsWindowEnabled($handle)
+            if ($row.ownerMatches -and $row.rootMatches -and $Kind -cin @("testerPane", "start")) {
+                try {
+                    $rect = [MetafxMt5VisibleNative+RECT]::new()
+                    if (-not [MetafxMt5VisibleNative]::GetWindowRect($handle, [ref]$rect)) { Fail "mt5_tester_diagnostic_geometry_unverified" }
+                    $row["nativeRect"] = [ordered]@{ left = $rect.Left; top = $rect.Top; right = $rect.Right; bottom = $rect.Bottom }
+                    $row["clientRect"] = Read-TesterDiagnosticClientRect $handle
+                } catch { $row.reasonCode = "mt5_tester_diagnostic_geometry_unverified" }
+                if ($Kind -ceq "testerPane" -and $row.nativeId -eq 32846) {
+                    try { $row["resizeCapabilities"] = Read-TesterPaneResizeDiagnostic $control }
+                    catch { $row["resizeReasonCode"] = "mt5_tester_resize_diagnostic_unavailable" }
+                }
+            }
+            if ($row.ownerMatches -and $row.rootMatches -and $row.nativeId -eq [int]$Id -and
+                $row.nativeClass -ceq "ComboBox" -and $row.visible -and $row.nativeEnabled -and
+                $Kind -cin @("optimization", "expert", "modelling")) {
+                try {
+                    $row.selectedIndex = (Invoke-NativeMessage $handle ([MetafxMt5VisibleNative]::CB_GETCURSEL) 0 0 "mt5_tester_diagnostic_combo_unreadable").ToInt32()
+                    $dropped = (Invoke-NativeMessage $handle ([MetafxMt5VisibleNative]::CB_GETDROPPEDSTATE) 0 0 "mt5_tester_diagnostic_combo_unreadable").ToInt32()
+                    if ($dropped -notin @(0, 1)) { Fail "mt5_tester_diagnostic_combo_unreadable" }
+                    $row.dropdownOpen = $dropped -eq 1
+                    # This diagnostic is local-only. Limit reads to the bound
+                    # Tester combo's committed value, never arbitrary UI text.
+                    $value = Read-NativeCombo $control "mt5_tester_diagnostic_combo_unreadable"
+                    $limit = if ($Kind -ceq "expert") { 512 } else { 128 }
+                    if ($value.Length -gt $limit) { Fail "mt5_tester_diagnostic_combo_unreadable" }
+                    $row.selectedValue = [string]$value
+                } catch { $row.reasonCode = "mt5_tester_diagnostic_combo_unreadable" }
+            }
+        }
+        $rows += $row
+    }
+    return [ordered]@{ automationId = $Id; matchCount = $matches.Count; controls = @($rows) }
+}
+
+function Read-TesterDiagnosticCheckboxes([object]$Root, [string]$OptimizationId) {
+    $optimization = Get-ControlByIdPresent $Root $OptimizationId "mt5_tester_diagnostic_parent_unverified"
+    [IntPtr]$optimizationHandle = Assert-NativeControl $optimization "ComboBox" "mt5_tester_diagnostic_parent_unverified"
+    [IntPtr]$parent = [MetafxMt5VisibleNative]::GetParent($optimizationHandle)
+    if ($parent -eq [IntPtr]::Zero -or -not [MetafxMt5VisibleNative]::IsWindow($parent) -or
+        (Get-NativeOwner $parent) -ne $TerminalProcess.Id -or
+        [MetafxMt5VisibleNative]::GetAncestor($parent, [MetafxMt5VisibleNative]::GA_ROOT) -ne $script:TerminalRootHandle) {
+        Fail "mt5_tester_diagnostic_parent_unverified"
+    }
+    $parentElement = [System.Windows.Automation.AutomationElement]::FromHandle($parent)
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)
+    $matches = @(Get-All $parentElement $condition)
+    if ($matches.Count -gt 16) { Fail "mt5_tester_diagnostic_controls_ambiguous" }
+    $rows = @()
+    foreach ($control in $matches) {
+        [IntPtr]$handle = [IntPtr]$control.Current.NativeWindowHandle
+        $name = [string]$control.Current.Name
+        $id = [string]$control.Current.AutomationId
+        if ($name.Length -gt 128 -or $id.Length -gt 32 -or $handle -eq [IntPtr]::Zero -or
+            -not [MetafxMt5VisibleNative]::IsWindow($handle) -or
+            (Get-NativeOwner $handle) -ne $TerminalProcess.Id -or
+            [MetafxMt5VisibleNative]::GetAncestor($handle, [MetafxMt5VisibleNative]::GA_ROOT) -ne $script:TerminalRootHandle) {
+            Fail "mt5_tester_diagnostic_checkbox_unverified"
+        }
+        $rows += [ordered]@{
+            name = $name; automationId = $id; controlType = "CheckBox"
+            nativeClass = Get-NativeClass $handle; nativeId = [int][MetafxMt5VisibleNative]::GetDlgCtrlID($handle)
+            directSettingsChild = [MetafxMt5VisibleNative]::GetParent($handle) -eq $parent
+            offscreen = [bool]$control.Current.IsOffscreen; enabled = [bool]$control.Current.IsEnabled
+            visible = [bool][MetafxMt5VisibleNative]::IsWindowVisible($handle)
+        }
+    }
+    return [ordered]@{ matchCount = $matches.Count; controls = @($rows) }
+}
+
+function Read-TesterDiagnosticClientRect([IntPtr]$Handle, [string]$Code = "mt5_tester_diagnostic_geometry_unverified") {
+    $client = [MetafxMt5VisibleNative+RECT]::new()
+    if (-not [MetafxMt5VisibleNative]::GetClientRect($Handle, [ref]$client)) { Fail $Code }
+    $topLeft = [MetafxMt5VisibleNative+POINT]::new(); $topLeft.X = $client.Left; $topLeft.Y = $client.Top
+    $bottomRight = [MetafxMt5VisibleNative+POINT]::new(); $bottomRight.X = $client.Right; $bottomRight.Y = $client.Bottom
+    if (-not [MetafxMt5VisibleNative]::ClientToScreen($Handle, [ref]$topLeft) -or
+        -not [MetafxMt5VisibleNative]::ClientToScreen($Handle, [ref]$bottomRight)) { Fail $Code }
+    return [ordered]@{ left = $topLeft.X; top = $topLeft.Y; right = $bottomRight.X; bottom = $bottomRight.Y }
+}
+
+function Read-TesterDiagnosticGeometry([object]$Bound, [object]$Request, [bool]$RootOnly = $false) {
+    [IntPtr]$rootHandle = [IntPtr]$Bound.root.Current.NativeWindowHandle
+    if ($rootHandle -ne $script:TerminalRootHandle) { Fail "mt5_tester_diagnostic_geometry_unverified" }
+    $result = [ordered]@{
+        rootClient = Read-TesterDiagnosticClientRect $rootHandle
+        controls = [ordered]@{}
+        startAncestors = @()
+    }
+    $controls = [ordered]@{ root = $Bound.root }
+    if (-not $RootOnly) {
+        $controls["testerPane"] = $Bound.controls.testerPane
+        $controls["start"] = $Bound.controls.start
+        $controls["tabs"] = $Bound.controls.tabs
+        $controls["optimization"] = Get-ControlByIdPresent $Bound.root ([string]$Request.requiredAutomationIds.optimization) "mt5_tester_diagnostic_geometry_unverified"
+    }
+    foreach ($name in $controls.Keys) {
+        $control = $controls[$name]
+        [IntPtr]$handle = [IntPtr]$control.Current.NativeWindowHandle
+        $rect = [MetafxMt5VisibleNative+RECT]::new()
+        if ($handle -eq [IntPtr]::Zero -or -not [MetafxMt5VisibleNative]::IsWindow($handle) -or
+            (Get-NativeOwner $handle) -ne $TerminalProcess.Id -or
+            [MetafxMt5VisibleNative]::GetAncestor($handle, [MetafxMt5VisibleNative]::GA_ROOT) -ne $rootHandle -or
+            -not [MetafxMt5VisibleNative]::GetWindowRect($handle, [ref]$rect)) { Fail "mt5_tester_diagnostic_geometry_unverified" }
+        $uiaRect = $control.Current.BoundingRectangle
+        $uiaAvailable = @($uiaRect.Left, $uiaRect.Top, $uiaRect.Right, $uiaRect.Bottom | Where-Object {
+            [double]::IsNaN([double]$_) -or [double]::IsInfinity([double]$_)
+        }).Count -eq 0
+        $result.controls[$name] = [ordered]@{
+            handle = [long]$handle.ToInt64()
+            nativeRect = [ordered]@{ left = $rect.Left; top = $rect.Top; right = $rect.Right; bottom = $rect.Bottom }
+            uiaRectAvailable = [bool]$uiaAvailable
+            uiaRect = if ($uiaAvailable) { [ordered]@{ left = $uiaRect.Left; top = $uiaRect.Top; right = $uiaRect.Right; bottom = $uiaRect.Bottom } } else { $null }
+            nativeVisible = [bool][MetafxMt5VisibleNative]::IsWindowVisible($handle)
+            offscreen = [bool]$control.Current.IsOffscreen
+        }
+    }
+    if ($RootOnly) { return $result }
+    [IntPtr]$ancestor = [MetafxMt5VisibleNative]::GetParent([IntPtr]$Bound.controls.start.Current.NativeWindowHandle)
+    for ($depth = 0; $depth -lt 16; $depth++) {
+        if ($ancestor -eq [IntPtr]::Zero -or -not [MetafxMt5VisibleNative]::IsWindow($ancestor) -or
+            (Get-NativeOwner $ancestor) -ne $TerminalProcess.Id -or
+            [MetafxMt5VisibleNative]::GetAncestor($ancestor, [MetafxMt5VisibleNative]::GA_ROOT) -ne $rootHandle) {
+            Fail "mt5_tester_diagnostic_geometry_unverified"
+        }
+        $result.startAncestors += [ordered]@{
+            handle = [long]$ancestor.ToInt64(); nativeClass = Get-NativeClass $ancestor
+            nativeId = [int][MetafxMt5VisibleNative]::GetDlgCtrlID($ancestor)
+            clientRect = Read-TesterDiagnosticClientRect $ancestor
+            nativeVisible = [bool][MetafxMt5VisibleNative]::IsWindowVisible($ancestor)
+        }
+        if ($ancestor -eq $rootHandle) { break }
+        $ancestor = [MetafxMt5VisibleNative]::GetParent($ancestor)
+    }
+    if ($ancestor -ne $rootHandle) { Fail "mt5_tester_diagnostic_geometry_unverified" }
+    return $result
+}
+
+function Read-TesterDiagnosticNavigation([object]$Root, [object]$Request) {
+    [IntPtr]$rootHandle = [IntPtr]$Root.Current.NativeWindowHandle
+    if ($rootHandle -ne $script:TerminalRootHandle -or (Get-NativeOwner $rootHandle) -ne $TerminalProcess.Id) {
+        Fail "mt5_tester_diagnostic_navigation_root_unverified"
+    }
+    $menu = [ordered]@{ available = $false; reasonCode = $null }
+    try {
+        $snapshot = [MetafxMt5VisibleNative]::ReadTesterViewMenuExact([uint32]$TerminalProcess.Id, $rootHandle)
+        $menu = [ordered]@{
+            available = $true; rootHandle = [long]$rootHandle.ToInt64()
+            mainMenuHandle = [long]$snapshot.MainMenu.ToInt64(); viewMenuHandle = [long]$snapshot.ViewMenu.ToInt64()
+            viewLabel = [string]$snapshot.ViewItem.Text; viewPosition = [int]$snapshot.ViewItem.Position
+            label = [string]$snapshot.TesterItem.Text; position = [int]$snapshot.TesterItem.Position
+            commandId = [long]$snapshot.TesterItem.CommandId
+            enabled = [bool]($snapshot.ViewItem.IsEnabled -and $snapshot.TesterItem.IsEnabled)
+            checked = [bool](($snapshot.TesterItem.State -band 8) -ne 0)
+            topItemCount = $snapshot.TopItems.Count; viewItemCount = $snapshot.ViewItems.Count
+            topItems = @(for ($index=0; $index -lt [Math]::Min(24, $snapshot.TopItems.Length); $index++) {
+                $entry = $snapshot.TopItems[$index]
+                [ordered]@{ position = $entry.Item.Position; type = $entry.Type; label = $entry.Item.Text.Substring(0, [Math]::Min(128, $entry.Item.Text.Length)); labelTruncated = $entry.Item.Text.Length -gt 128; commandId = [long]$entry.Item.CommandId; enabled = $entry.Item.IsEnabled; checked = ($entry.Item.State -band 8) -ne 0; separator = $entry.Item.IsSeparator; hasSubmenu = $entry.Item.HasSubmenu }
+            })
+            viewItems = @(for ($index=0; $index -lt [Math]::Min(24, $snapshot.ViewItems.Length); $index++) {
+                $entry = $snapshot.ViewItems[$index]
+                [ordered]@{ position = $entry.Item.Position; type = $entry.Type; label = $entry.Item.Text.Substring(0, [Math]::Min(128, $entry.Item.Text.Length)); labelTruncated = $entry.Item.Text.Length -gt 128; commandId = [long]$entry.Item.CommandId; enabled = $entry.Item.IsEnabled; checked = ($entry.Item.State -band 8) -ne 0; separator = $entry.Item.IsSeparator; hasSubmenu = $entry.Item.HasSubmenu }
+            })
+        }
+    } catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        $menu.reasonCode = if ($failure.Message -match "^mt5_[a-z0-9_]{3,90}$") { $failure.Message } else { "mt5_tester_menu_unreadable" }
+    }
+    [uint32]$rootPid = 0; [uint32]$foregroundPid = 0
+    [uint32]$rootThread = [MetafxMt5VisibleNative]::GetWindowThreadProcessId($rootHandle, [ref]$rootPid)
+    [IntPtr]$foreground = [MetafxMt5VisibleNative]::GetForegroundWindow()
+    [uint32]$foregroundThread = if ($foreground -ne [IntPtr]::Zero) {
+        [MetafxMt5VisibleNative]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+    } else { 0 }
+    if ($rootThread -eq 0 -or $rootPid -ne $TerminalProcess.Id) { Fail "mt5_tester_diagnostic_navigation_root_unverified" }
+    $keyboard = [ordered]@{
+        rootThreadId = $rootThread; rootLayout = [MetafxMt5VisibleNative]::GetKeyboardLayout($rootThread).ToInt64().ToString("X16")
+        foregroundHandle = [long]$foreground.ToInt64(); foregroundProcessId = $foregroundPid; foregroundThreadId = $foregroundThread
+        foregroundLayout = if ($foregroundThread -gt 0) { [MetafxMt5VisibleNative]::GetKeyboardLayout($foregroundThread).ToInt64().ToString("X16") } else { $null }
+    }
+    # Dynamic convenience HWND is diagnostic data only; it must never replace
+    # the signed root or become a source of execution/admission authority.
+    $TerminalProcess.Refresh()
+    [IntPtr]$dynamic = $TerminalProcess.MainWindowHandle
+    $dynamicInfo = [ordered]@{ handle = [long]$dynamic.ToInt64(); sameProcess = $false; available = $false }
+    if ($dynamic -ne [IntPtr]::Zero -and [MetafxMt5VisibleNative]::IsWindow($dynamic) -and
+        (Get-NativeOwner $dynamic) -eq $TerminalProcess.Id) {
+        $dynamicInfo.sameProcess = $true
+        $rect = [MetafxMt5VisibleNative+RECT]::new()
+        if ([MetafxMt5VisibleNative]::GetWindowRect($dynamic, [ref]$rect)) {
+            $dynamicInfo.available = $true
+            $dynamicInfo["nativeClass"] = Get-NativeClass $dynamic
+            $dynamicInfo["ownerHandle"] = [long][MetafxMt5VisibleNative]::GetWindow($dynamic, [MetafxMt5VisibleNative]::GW_OWNER).ToInt64()
+            $dynamicInfo["rootHandle"] = [long][MetafxMt5VisibleNative]::GetAncestor($dynamic, [MetafxMt5VisibleNative]::GA_ROOT).ToInt64()
+            $dynamicInfo["nativeRect"] = [ordered]@{ left = $rect.Left; top = $rect.Top; right = $rect.Right; bottom = $rect.Bottom }
+        }
+    }
+    $windowInventory = [ordered]@{ available = $false }
+    try {
+        $inventory = [MetafxMt5VisibleNative]::ReadTesterWindowsDiagnostic([uint32]$TerminalProcess.Id, $rootHandle)
+        $windowInventory = [ordered]@{ available = $true; truncated = $inventory.truncated
+            topLevelWindows = @($inventory.topLevelWindows); testerControls = @($inventory.testerControls) }
+    } catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        $windowInventory["reasonCode"] = if ($failure.Message -match "^mt5_[a-z0-9_]{3,90}$") { $failure.Message } else { "mt5_tester_window_diagnostic_unreadable" }
+    }
+    $null = Get-BoundTerminalRoot $Request $rootHandle
+    return [ordered]@{ viewMenu = $menu; keyboard = $keyboard; processConvenienceWindow = $dynamicInfo; selectedProcessWindows = $windowInventory }
+}
+
+function Read-TesterDiagnostic([object]$Request) {
+    if ([string]$Request.stageId -cne "backtest_recheck" -or
+        [string]$Request.expectedSourceDigest -cnotmatch "^[a-f0-9]{64}$" -or
+        [string]$Request.expectedBinaryDigest -cnotmatch "^[a-f0-9]{64}$") { Fail "mt5_tester_diagnostic_request_invalid" }
+    $script:FailureCheckpoint = "tester_diagnostic_read"
+    # False is essential: no reveal, mode normalization or tab selection.
+    $root = Get-BoundTerminalRoot $Request ([IntPtr]$script:TerminalRootHandle)
+    $bound = $null
+    try { $bound = Get-MinimalBoundTesterControlSet $Request ([IntPtr]$script:TerminalRootHandle) $false } catch {
+        # Missing Tester controls are diagnostic data, never execution proof.
+        # Root/process drift and all other failures remain fatal before capture.
+        if ($_.Exception.Message -cne "mt5_tester_controls_not_verified") { throw }
+    }
+    if ($null -eq $bound) {
+        $observation = [ordered]@{
+            available = $false; unavailableReason = "mt5_tester_controls_not_verified"
+            geometry = Read-TesterDiagnosticGeometry ([ordered]@{ root = $root }) $Request $true
+            testerPane = Read-TesterDiagnosticControl $root ([string]$Request.requiredAutomationIds.testerPane) "testerPane"
+            start = Read-TesterDiagnosticControl $root ([string]$Request.requiredAutomationIds.start) "start"
+        }
+    } else {
+    [IntPtr]$startHandle = Assert-NativeControl $bound.controls.start "Button" "mt5_tester_diagnostic_start_unreadable"
+    $startBefore = Read-TesterStartState $bound.controls.start "mt5_tester_diagnostic_start_unreadable" $startHandle
+    [IntPtr]$tabsHandle = [IntPtr]$bound.controls.tabs.Current.NativeWindowHandle
+    $names = @([MetafxMt5TabNative]::GetNames($tabsHandle))
+    $selected = [int][MetafxMt5TabNative]::GetSelectedIndex($tabsHandle)
+    if ($names.Count -gt 32 -or @($names | Where-Object { $_.Length -gt 128 }).Count -gt 0 -or
+        $selected -lt -1 -or $selected -ge $names.Count) { Fail "mt5_tester_diagnostic_tabs_unreadable" }
+    $observation = [ordered]@{
+        available = $true
+        testerPane = Read-TesterDiagnosticControl $bound.root ([string]$Request.requiredAutomationIds.testerPane) "testerPane"
+        startState = [string]$startBefore; tabNames = @($names); selectedTabIndex = $selected
+        selectedTab = if ($selected -ge 0) { [string]$names[$selected] } else { $null }
+        optimization = Read-TesterDiagnosticControl $bound.root ([string]$Request.requiredAutomationIds.optimization) "optimization"
+        visualMode = Read-TesterDiagnosticControl $bound.root ([string]$Request.requiredAutomationIds.visualMode) "visualMode"
+        expert = Read-TesterDiagnosticControl $bound.root ([string]$Request.requiredAutomationIds.expert) "expert"
+        modelling = Read-TesterDiagnosticControl $bound.root ([string]$Request.requiredAutomationIds.modelling) "modelling"
+        settingsCheckboxes = Read-TesterDiagnosticCheckboxes $bound.root ([string]$Request.requiredAutomationIds.optimization)
+        geometry = Read-TesterDiagnosticGeometry $bound $Request
+    }
+    }
+    $observation["navigation"] = Read-TesterDiagnosticNavigation $root $Request
+    $captureRequested = $Request.PSObject.Properties.Name -contains "diagnosticScreenshotPath"
+    if ($captureRequested) {
+        if ($Request.allowDiagnosticFocusChange -cne $true -or
+            [System.IO.File]::Exists([string]$Request.diagnosticScreenshotPath) -or
+            [System.IO.Path]::GetExtension([string]$Request.diagnosticScreenshotPath) -ine ".png") {
+            Fail "mt5_tester_diagnostic_screenshot_request_invalid"
+        }
+        # Explicit diagnostic-only capture may focus this exact signed terminal.
+        # No settings, tab selection, execution boundary or report is changed.
+        Capture-BoundTerminalWindow $Request ([string]$Request.diagnosticScreenshotPath)
+    }
+    if ($null -eq $bound) {
+        # A capture may focus/restore the exact terminal, so merely rebind its
+        # identity. The unavailable observation never becomes a ready result.
+        $null = Get-BoundTerminalRoot $Request ([IntPtr]$script:TerminalRootHandle)
+    } else {
+    $after = Get-MinimalBoundTesterControlSet $Request ([IntPtr]$script:TerminalRootHandle) $false
+    [IntPtr]$tabsAfter = [IntPtr]$after.controls.tabs.Current.NativeWindowHandle
+    if ($tabsAfter -ne $tabsHandle -or
+        (Read-TesterStartState $after.controls.start "mt5_tester_diagnostic_state_changed" $startHandle) -cne $startBefore -or
+        [MetafxMt5TabNative]::GetSelectedIndex($tabsAfter) -ne $selected -or
+        ((@([MetafxMt5TabNative]::GetNames($tabsAfter)) -join "`n") -cne ($names -join "`n"))) {
+        Fail "mt5_tester_diagnostic_state_changed"
+    }
+    }
+    $result = [ordered]@{
+        schemaVersion = $ResultSchema; ok = $true; action = "diagnose_tester"; operationId = [string]$Request.operationId
+        diagnosticOnly = $true; startInvoked = $false; testerVerified = $false
+        sourceDigest = [string]$Request.expectedSourceDigest; compiledBinarySha256 = [string]$Request.expectedBinaryDigest
+        terminalProcessId = [int]$TerminalProcess.Id; terminalWindowHandle = [long]$script:TerminalRootHandle.ToInt64()
+        observation = $observation
+    }
+    if ($captureRequested) {
+        $result["diagnosticScreenshotCaptured"] = $true
+        $result["focusMayHaveChanged"] = $true
+    }
+    return $result
+}
+
 function Normalize-TesterSettingsTabExact(
     [object]$Request,
     [IntPtr]$ExpectedRootHandle = [IntPtr]::Zero,
@@ -4717,6 +5782,10 @@ function Find-UiaRootTreeItemExact([System.Windows.Automation.AutomationElement]
 
 function Get-ExactNativePopupMenuHost([int]$TimeoutMilliseconds, [string]$Code) {
     if ($TimeoutMilliseconds -lt 0 -or $TimeoutMilliseconds -gt 5000) { Fail $Code }
+    # Only report-export callers receive finer failure categories. These do
+    # not admit a different ControlType or deduplicate ambiguous UIA nodes.
+    $reportDiagnostic = $Code -cmatch '^mt5_report_export_command_not_verified_popup_(host|rebind)_unverified$'
+    $controlTypeMismatch = $false
     $desktop = [System.Windows.Automation.AutomationElement]::RootElement
     $classCondition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::ClassNameProperty,
@@ -4725,19 +5794,44 @@ function Get-ExactNativePopupMenuHost([int]$TimeoutMilliseconds, [string]$Code) 
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     do {
         try {
-            $matches = @($desktop.FindAll([System.Windows.Automation.TreeScope]::Children, $classCondition) | Where-Object {
+            $candidates = @($desktop.FindAll([System.Windows.Automation.TreeScope]::Children, $classCondition))
+            $matches = @($candidates | Where-Object {
                 $_.Current.ProcessId -eq $TerminalProcess.Id -and
                 $_.Current.ControlType.Id -eq [System.Windows.Automation.ControlType]::Pane.Id -and
                 $_.Current.IsEnabled -and -not $_.Current.IsOffscreen -and
                 [string]$_.Current.ClassName -ceq "#32768" -and
                 [long]$_.Current.NativeWindowHandle -gt 0
             })
-        } catch { Fail $Code }
-        if ($matches.Count -gt 1) { Fail $Code }
+            if ($reportDiagnostic -and $matches.Count -eq 0 -and $candidates.Count -le 64) {
+                $controlTypeMismatch = @($candidates | Where-Object {
+                    $_.Current.ProcessId -eq $TerminalProcess.Id -and
+                    $_.Current.ControlType.Id -ne [System.Windows.Automation.ControlType]::Pane.Id -and
+                    $_.Current.IsEnabled -and -not $_.Current.IsOffscreen -and
+                    [string]$_.Current.ClassName -ceq '#32768' -and
+                    [long]$_.Current.NativeWindowHandle -gt 0
+                }).Count -gt 0
+            }
+        } catch {
+            if ($reportDiagnostic) { Fail "$($Code)_read_failed" }
+            Fail $Code
+        }
+        if ($matches.Count -gt 1) {
+            if ($reportDiagnostic) {
+                try { $handles = @($matches | ForEach-Object { [long]$_.Current.NativeWindowHandle } | Select-Object -Unique) }
+                catch { Fail "$($Code)_read_failed" }
+                if ($handles.Count -eq 1) { Fail "$($Code)_duplicate_handle" }
+                Fail "$($Code)_distinct_handles"
+            }
+            Fail $Code
+        }
         if ($matches.Count -eq 1) { return $matches[0] }
         if ([DateTime]::UtcNow -ge $deadline) { break }
         Start-Sleep -Milliseconds 25
     } while ($true)
+    if ($reportDiagnostic) {
+        if ($controlTypeMismatch) { Fail "$($Code)_control_type_mismatch" }
+        Fail "$($Code)_no_host"
+    }
     Fail $Code
 }
 
@@ -6541,7 +7635,8 @@ try {
     $expectedPid = if ($request.PSObject.Properties.Name -contains "expectedTerminalProcessId") { [int]$request.expectedTerminalProcessId } else { 0 }
     $expectedWindow = if ($request.PSObject.Properties.Name -contains "expectedTerminalWindowHandle") { [long]$request.expectedTerminalWindowHandle } else { 0 }
     $TerminalProcess = Get-ExactTerminal $terminalPath $expectedPid $expectedWindow
-    [IntPtr]$initialRootHandle = if ($expectedWindow -gt 0) { [IntPtr][long]$expectedWindow } else { [IntPtr]$TerminalProcess.MainWindowHandle }
+    [IntPtr]$initialRootHandle = if ($expectedWindow -gt 0) { [IntPtr][long]$expectedWindow } else { Get-TerminalMainWindowExact $TerminalProcess }
+    if ($initialRootHandle -eq [IntPtr]::Zero) { Fail "mt5_selected_terminal_not_ready" }
     $TerminalRoot = Get-Root $TerminalProcess $initialRootHandle
     $script:TerminalRootHandle = [IntPtr]$TerminalRoot.Current.NativeWindowHandle
     if ($script:TerminalRootHandle -eq [IntPtr]::Zero -or
@@ -6572,7 +7667,8 @@ try {
                 $boundProbe = Get-BoundTesterControlSet $request ([IntPtr]$script:TerminalRootHandle) $false
                 $testerStartState = Read-TesterStartState $boundProbe.controls.start "mt5_tester_start_state_unverified"
             }
-            $result = [ordered]@{ schemaVersion = $ResultSchema; ok = $true; action = "probe"; operationId = [string]$request.operationId; terminalProbe = New-Probe $TerminalProcess; automationControlsVerified = $verified; testerStartState = $testerStartState }
+            $probeRoot = Get-BoundTerminalRoot $request ([IntPtr]$script:TerminalRootHandle)
+            $result = [ordered]@{ schemaVersion = $ResultSchema; ok = $true; action = "probe"; operationId = [string]$request.operationId; terminalProbe = New-Probe $TerminalProcess $probeRoot; automationControlsVerified = $verified; testerStartState = $testerStartState }
         }
         "post_probe" {
             if ([string]$request.stageId -notin @("backtest_recheck", "optimize")) { Fail "visible_stage_unsupported" }
@@ -6602,6 +7698,8 @@ try {
                 processBinding = $processBinding
             }
         }
+        "diagnose_compile" { $result = Read-CompileDiagnostic $request }
+        "diagnose_tester" { $result = Read-TesterDiagnostic $request }
         "compile" { $result = Invoke-Compile $request $false }
         "recover_compile" { $result = Invoke-Compile $request $true }
         "backtest" { $result = Invoke-Tester $request $false "none" }
@@ -6641,7 +7739,19 @@ try {
     try {
         $operationId = if ($null -ne $request) { [string]$request.operationId } else { "unknown" }
         $action = if ($null -ne $request) { [string]$request.action } else { "unknown" }
-        Write-JsonExclusive ([System.IO.Path]::GetFullPath($ResponsePath)) ([ordered]@{ schemaVersion = $ResultSchema; ok = $false; action = $action; operationId = $operationId; reasonCode = $code })
+        $failureResult = [ordered]@{ schemaVersion = $ResultSchema; ok = $false; action = $action; operationId = $operationId; reasonCode = $code }
+        if ($action -ceq "probe" -and $null -ne $script:TesterPaneFailureDiagnostic -and
+            $script:TesterPaneFailureDiagnostic.reasonCode -ceq $code) {
+            $failureResult["testerPaneFailure"] = $script:TesterPaneFailureDiagnostic
+            $script:TesterPaneFailureDiagnostic = $null
+        }
+        if ($action -ceq "diagnose_compile" -and $code -ceq "metaeditor_clipboard_restore_mismatch") {
+            $mismatchMetadata = [MetafxMetaEditorCompileNative]::ConsumeClipboardRestoreMismatchMetadata()
+            if ($null -ne $mismatchMetadata) {
+                $failureResult["clipboardMismatch"] = $mismatchMetadata
+            }
+        }
+        Write-JsonExclusive ([System.IO.Path]::GetFullPath($ResponsePath)) $failureResult
     } catch {}
     Exit-TerminalMutex
     Exit-OperationMutex

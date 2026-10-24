@@ -231,6 +231,7 @@ class MissionRadarAutoFrontendTests(unittest.TestCase):
             self.function_source("normalizeRadarServiceHealth"),
             self.function_source("normalizeRadarRunStatus"),
             self.function_source("radarBangkokMinuteOfDay"),
+            self.function_source("normalizeRadarPublicationPolicy"),
             self.function_source("getRadarTodayRunState"),
             "const beforeNine='2026-08-23T01:30:00Z';",
             "const afterNine='2026-08-23T03:00:00Z';",
@@ -254,12 +255,12 @@ class MissionRadarAutoFrontendTests(unittest.TestCase):
         self.assertEqual(payload["awaiting"]["state"], "awaiting_schedule")
         self.assertEqual(payload["running"]["state"], "running")
         self.assertEqual(payload["correcting"]["state"], "corrective_running")
-        self.assertEqual(payload["repairQueued"]["state"], "corrective_running")
-        self.assertEqual(payload["repairQueued"]["tone"], "running")
-        self.assertEqual(payload["repairQueued"]["title"], "กำลังหาให้ครบ 6 รายการ")
+        self.assertEqual(payload["repairQueued"]["state"], "queued")
+        self.assertEqual(payload["repairQueued"]["tone"], "waiting")
+        self.assertEqual(payload["repairQueued"]["title"], "รอคิวค้นหาต่อให้ครบ 6 รายการ")
         self.assertEqual(payload["repairQueued"]["nextAttemptAt"], "2026-08-23T04:00:00Z")
         self.assertEqual(payload["repairQueued"]["nextRunAt"], "2026-08-23T04:00:00Z")
-        self.assertEqual(payload["repairDeferred"]["state"], "corrective_running")
+        self.assertEqual(payload["repairDeferred"]["state"], "deferred")
         self.assertIn("พักตามขีดจำกัดชั่วคราว", payload["repairDeferred"]["detail"])
         self.assertEqual(payload["repairDeferred"]["nextAttemptAt"], "2026-08-23T04:00:00Z")
         self.assertEqual(payload["untrustedRepair"]["state"], "corrective_failed")
@@ -271,11 +272,11 @@ class MissionRadarAutoFrontendTests(unittest.TestCase):
         self.assertEqual(payload["verifiedEmpty"]["state"], "verified_empty")
         self.assertEqual(payload["delayed"]["state"], "delayed")
         self.assertEqual(payload["complete"]["state"], "verified_results")
-        self.assertIn("6/6", payload["complete"]["title"])
+        self.assertIn("6 รายการ (กติกาเดิม)", payload["complete"]["title"])
         self.assertEqual(payload["partial"]["state"], "delayed")
         self.assertNotIn("2/6", payload["partial"]["title"])
 
-    def test_radar_today_panel_shows_backend_run_truth_and_six_item_progress_without_controls(self) -> None:
+    def test_radar_today_panel_shows_backend_run_truth_and_policy_counts_without_controls(self) -> None:
         normalizer = self.block("function normalizeIndicatorScoutDomain", "function normalizeTradingSystemPortalDomain")
         renderer = self.block("function renderIndicatorScoutPanel", "function renderFxBiasTable")
         notice = self.block("function createRadarTodayRunNotice", "function workflowBiasLabel")
@@ -286,13 +287,14 @@ class MissionRadarAutoFrontendTests(unittest.TestCase):
             normalizer,
         )
         self.assertIn("createRadarTodayRunNotice(domain)", renderer)
-        self.assertIn("`${entries.length}/${expectedBatchSize} รายการ`", renderer)
+        self.assertIn("radarPublicationCountLabel(domain, entries.length)", renderer)
         self.assertNotIn("วันนี้ยังไม่มีรายการใหม่จาก Backend", renderer)
         self.assertIn('notice.className = "workflow-radar-run-state"', notice)
         self.assertIn('notice.dataset.state = runState.state', notice)
         self.assertIn('notice.setAttribute("role", runState.tone === "error" ? "alert" : "status")', notice)
-        self.assertIn('progress.textContent = `${todayCount}/${expectedBatchSize}`', notice)
-        self.assertIn('runState.nextAttemptAt ? "ลองหาให้ครบอีกครั้ง" : "รอบถัดไป"', notice)
+        self.assertIn('domain.readState?.hasData === false ? "รอข้อมูล"', notice)
+        self.assertIn("radarPublicationCountLabel(domain, todayCount)", notice)
+        self.assertIn('runState.nextAttemptAt ? "ลองค้นหาอีกครั้ง" : "รอบถัดไป"', notice)
         self.assertNotIn("button", notice.lower())
         self.assertNotIn("approval", notice.lower())
         for selector in (

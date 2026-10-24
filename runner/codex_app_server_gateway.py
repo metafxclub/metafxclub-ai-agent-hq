@@ -8,7 +8,8 @@ bounded JSON-stdin/JSON-stdout helper.
 Important security properties:
 
 * only stdio or an authenticated 127.0.0.1 websocket may be launched;
-* ``danger-full-access`` and automatic external effects are never accepted;
+* native full access requires an explicit, durable backend thread grant;
+* automatic external effects are never authorized by a permission-level change;
 * every SDK client receives an explicit approval handler (the SDK default
   currently accepts command/file approvals, so relying on it is unsafe);
 * the default approval handler denies every server-initiated action;
@@ -53,6 +54,7 @@ MAX_LOCAL_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_ARTIFACTS = 200
+MAX_GENERATED_IMAGES_PER_TURN = 12
 MAX_APPROVAL_FILE_CHANGES = 16
 MAX_APPROVAL_DIFF_BYTES = 32 * 1024
 MAX_APPROVAL_DIFF_BYTES_PER_FILE = 16 * 1024
@@ -1089,6 +1091,7 @@ class ThreadPolicyRequest:
     workspace_roots: tuple[str, ...] = ()
     external_effects: str = "approval-required"
     auto_external_effects: bool = False
+    full_access_authorized: bool = False
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ThreadPolicyRequest":
@@ -1118,6 +1121,7 @@ class ThreadPolicyRequest:
             workspace_roots=tuple(str(item) for item in roots),
             external_effects=str(value.get("externalEffects") or "approval-required"),
             auto_external_effects=bool(value.get("autoExternalEffects", False)),
+            full_access_authorized=value.get("fullAccessAuthorized") is True,
         )
 
 
@@ -1162,6 +1166,7 @@ class ValidatedThreadPolicy:
         config: dict[str, Any] = {
             "model_reasoning_effort": self.reasoning_effort,
             "features": dict(self.feature_overrides),
+            "web_search": "live" if "web_search" in self.capabilities else "disabled",
         }
         if "mcp" not in self.capabilities:
             config["mcp_servers"] = {}
@@ -1169,6 +1174,8 @@ class ValidatedThreadPolicy:
 
     def sandbox_policy(self) -> dict[str, Any]:
         network = bool({"web_search", "browser", "computer_use"} & self.capabilities)
+        if self.sandbox == "danger-full-access":
+            return {"type": "dangerFullAccess"}
         if self.sandbox == "read-only":
             return {"type": "readOnly", "networkAccess": network}
         return {
@@ -1267,12 +1274,14 @@ def validate_thread_policy(
             )
 
     sandbox = request.sandbox or profile.default_sandbox
-    if sandbox == "danger-full-access":
+    if sandbox == "danger-full-access" and not (
+        profile.mode is AgentMode.FULL_AGENT and request.full_access_authorized is True
+    ):
         raise PolicyViolation(
             "danger_full_access_denied",
-            "danger-full-access is prohibited by HQ policy.",
+            "Native full access requires an explicit backend-recorded thread grant.",
         )
-    if sandbox not in {"read-only", "workspace-write"}:
+    if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         raise PolicyViolation("invalid_sandbox", "Sandbox mode is invalid.")
     if profile.mode is AgentMode.CHAT and sandbox != "read-only":
         raise PolicyViolation("sandbox_not_allowed", "Chat mode must be read-only.")
@@ -1303,6 +1312,8 @@ def validate_thread_policy(
             "explicit_approval_required",
             "Full external actions require explicit approval mode.",
         )
+    if sandbox == "danger-full-access" and approval_mode is not ApprovalMode.EXPLICIT:
+        raise PolicyViolation("explicit_approval_required", "Full access retains the explicit approval broker.")
 
     roots = tuple(dict.fromkeys(_normalize_workspace_root(root) for root in request.workspace_roots))
     if len(roots) > 8:
@@ -3521,6 +3532,8 @@ class CodexAppServerGateway:
         self._artifact_registry: dict[str, dict[str, Any]] = {}
         self._artifact_path_refs: dict[tuple[str, str, int], str] = {}
         self.sessions: dict[str, ThreadSessionState] = {}
+        # Private provenance only: never project native generated-image paths.
+        self._completed_image_turns: dict[str, str] = {}
         self.process_state = GatewayProcessState()
 
     def _create_client(self) -> Any:
@@ -3569,6 +3582,8 @@ class CodexAppServerGateway:
                 raise GatewayError(code, safe_message) from exc
 
     def close(self) -> None:
+        with self._session_lock:
+            self._completed_image_turns.clear()
         if self._approval_broker is not None:
             self._approval_broker.decline_all(reason="gateway_closed")
             self._approval_broker.wait_for_settlement()
@@ -3885,6 +3900,7 @@ class CodexAppServerGateway:
         policy = self._validate_policy(policy_value)
         params = {
             "approvalPolicy": policy.approval_policy,
+            "approvalsReviewer": "user",
             "cwd": policy.cwd,
             "ephemeral": False,
             "model": policy.model,
@@ -3909,7 +3925,7 @@ class CodexAppServerGateway:
         if (
             self._interactive_approval_ready
             and self._approval_broker is not None
-            and policy.mode is AgentMode.WORKSPACE
+            and policy.mode is not AgentMode.CHAT
             and policy.approval_mode is ApprovalMode.EXPLICIT
         ):
             self._approval_broker.bind_thread_workspace(
@@ -3935,6 +3951,7 @@ class CodexAppServerGateway:
         policy = self._validate_policy(policy_value)
         params = {
             "approvalPolicy": policy.approval_policy,
+            "approvalsReviewer": "user",
             "cwd": policy.cwd,
             "model": policy.model,
             "sandbox": policy.sandbox,
@@ -3970,7 +3987,7 @@ class CodexAppServerGateway:
             if (
                 self._interactive_approval_ready
                 and self._approval_broker is not None
-                and policy.mode is AgentMode.WORKSPACE
+                and policy.mode is not AgentMode.CHAT
                 and policy.approval_mode is ApprovalMode.EXPLICIT
             ):
                 self._approval_broker.bind_thread_workspace(
@@ -3983,7 +4000,67 @@ class CodexAppServerGateway:
                 status=SessionStatus.IDLE,
                 policy=policy,
             )
+            self._completed_image_turns.pop(thread_id, None)
         return {"ok": True, "status": "resumed", "thread": thread, "policy": policy.to_dict()}
+
+    def collect_completed_image_outputs(
+        self,
+        thread_id: str,
+        turn_id: str,
+        *,
+        stage_image: Callable[[str, str], None],
+    ) -> int:
+        """Hand only SDK-attested current-turn images to a trusted backend stager.
+
+        This is deliberately absent from the JSON/HTTP operations. Paths never
+        enter the public thread projection, return value, events, or audit.
+        """
+        if not SAFE_ID_RE.fullmatch(thread_id) or not SAFE_ID_RE.fullmatch(turn_id):
+            raise PolicyViolation("invalid_turn", "Thread or turn ID is invalid.")
+        with self._session_lock:
+            session = self.sessions.get(thread_id)
+            if (
+                session is None
+                or session.status is not SessionStatus.IDLE
+                or session.active_turn_id is not None
+                or session.policy.mode not in {AgentMode.WORKSPACE, AgentMode.FULL_AGENT}
+                or self._completed_image_turns.get(thread_id) != turn_id
+            ):
+                raise PolicyViolation("image_provenance_mismatch", "Image turn provenance is unavailable.")
+            response = _plain(self._ensure_client().thread_read(thread_id, include_turns=True))
+            thread = response.get("thread")
+            if not isinstance(thread, Mapping) or thread.get("id") != thread_id:
+                raise PolicyViolation("image_provenance_mismatch", "Image thread provenance does not match.")
+            turns = thread.get("turns")
+            matches = [value for value in turns if isinstance(value, Mapping) and value.get("id") == turn_id] if isinstance(turns, list) else []
+            if len(matches) != 1 or matches[0].get("status") != "completed":
+                raise PolicyViolation("image_provenance_mismatch", "Image turn is not uniquely completed.")
+            items = matches[0].get("items")
+            if not isinstance(items, list):
+                raise PolicyViolation("image_provenance_mismatch", "Image turn items are unavailable.")
+            images: list[tuple[str, str]] = []
+            seen_ids: set[str] = set()
+            for item in items:
+                if not isinstance(item, Mapping) or item.get("type") != "imageGeneration":
+                    continue
+                if item.get("status") != "completed":
+                    continue
+                item_id, source = item.get("id"), item.get("savedPath")
+                if (
+                    not isinstance(item_id, str) or not SAFE_ID_RE.fullmatch(item_id)
+                    or item_id in seen_ids or item.get("failure") is not None
+                    or not isinstance(source, str) or not source
+                ):
+                    raise PolicyViolation("image_provenance_mismatch", "Generated image evidence is incomplete.")
+                seen_ids.add(item_id)
+                images.append((item_id, source))
+                if len(images) > MAX_GENERATED_IMAGES_PER_TURN:
+                    raise PolicyViolation("too_many_output_artifacts", "Generated images exceed the per-turn limit.")
+            # Keep the session lock through staging: a newer turn/resume cannot
+            # replace the current-turn provenance while the files are copied.
+            for item_id, source in images:
+                stage_image(item_id, source)
+            return len(images)
 
     def thread_read(self, thread_id: str, *, include_turns: bool = True) -> dict[str, Any]:
         if not SAFE_ID_RE.fullmatch(thread_id):
@@ -4099,6 +4176,7 @@ class CodexAppServerGateway:
             )
         params = {
             "approvalPolicy": policy.approval_policy,
+            "approvalsReviewer": "user",
             "cwd": policy.cwd,
             "effort": policy.reasoning_effort,
             "model": policy.model,
@@ -4118,6 +4196,7 @@ class CodexAppServerGateway:
                 )
             if current.status not in {SessionStatus.IDLE, SessionStatus.COMPLETED, SessionStatus.FAILED}:
                 raise GatewayError("thread_busy", "Thread already has an active turn.")
+            self._completed_image_turns.pop(thread_id, None)
             # Keep resume and start mutually exclusive through the SDK request;
             # otherwise resume can replace a freshly RUNNING local session.
             response = self._ensure_client().turn_start(thread_id, sdk_input, params)
@@ -4238,6 +4317,8 @@ class CodexAppServerGateway:
                 and current.status in {SessionStatus.RUNNING, SessionStatus.STOPPING}
             ):
                 self.sessions[resolved_thread_id] = current.transition(target, active_turn_id=None)
+                if status == "completed" and current.policy.mode in {AgentMode.WORKSPACE, AgentMode.FULL_AGENT}:
+                    self._completed_image_turns[resolved_thread_id] = turn_id
         return {
             "ok": status == "completed",
             "status": status,

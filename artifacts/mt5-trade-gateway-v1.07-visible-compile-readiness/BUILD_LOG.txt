@@ -1,0 +1,26 @@
+PackageVersion: 1.07
+CandidateStatus: COMPILE_VERIFIED_SOURCE_ONLY
+Source: integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5
+SourceSHA256: 2E2D42EABDA1E82B454DC19DA28AB89C7302DFF53BDBEF5E6E3B86C2C2FC30D0
+SourceBytes: 271472
+CompileResult: PASS
+CompileMode: VISIBLE_METAEDITOR64_EXACT_SOURCE
+MetaEditorVersion: 5.0.0.6230
+CompileErrors: 0
+CompileWarnings: 0
+CompileElapsedMilliseconds: 10010
+CompileCpuTarget: AVX2+FMA3
+CompiledAtUTC: 2026-10-22T09:14:49.829402+00:00
+CompiledSourceSHA256: 2E2D42EABDA1E82B454DC19DA28AB89C7302DFF53BDBEF5E6E3B86C2C2FC30D0
+CurrentSourceMatchesCompiledSource: true
+LocalCompileBinaryBytes: 315720
+LocalCompileBinarySHA256: 676BD3C7FE1D9B29AD09627B287FC9D371C134C736416C734E8ED004D87ADBD4
+CompileProof: COMPILE_PROOF.png
+CompileProofSHA256: D1006B43B3E94940731DEC231E1787F0970574675ACE738F7411F80B9570B5E2
+ReleasePolicy: SOURCE_ONLY
+CompiledBinaryIncluded: false
+CompiledBinaryEligibleForDistribution: false
+FocusedStaticAndContractTests: PASS (82 tests, 0 failures, 0 errors, 0 skipped)
+DemoExecutionValidated: false
+LiveExecutionValidated: false
+Safety: Compile only. Candidate v1.07 was not attached; existing v1.06 remained on its chart. No Inputs, Algo Trading, active binary, orders or command replay changed by this compile.

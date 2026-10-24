@@ -71,11 +71,11 @@ class EquipmentPluginMapTests(unittest.TestCase):
         self.assertEqual(set(equipment), EXPECTED_PROPS)
         for prop_id, profile in equipment.items():
             with self.subTest(prop_id=prop_id):
-                if profile.get("serviceMode") == "deterministic_backend_direct":
-                    self.assertEqual(prop_id, "left_signal_cube")
-                    self.assertIsNone(profile["ownerAgentId"])
-                    self.assertEqual(profile["allowedActionIds"], [])
-                    self.assertEqual(self.roles[prop_id]["allowedDashboardActions"], [])
+                if prop_id == "left_signal_cube":
+                    self.assertEqual(profile["serviceMode"], "deterministic_price_snapshot_and_guarded_codex_with_direct_news")
+                    self.assertEqual(profile["ownerAgentId"], "codex_mcp_operator")
+                    self.assertEqual(profile["allowedActionIds"], ["analyze_fx28_trends"])
+                    self.assertEqual(self.roles[prop_id]["allowedDashboardActions"], ["analyze_fx28_trends"])
                     self.assertEqual(profile["schedule"]["actions"], [])
                     self.assertEqual(profile["schedule"]["manualOrAgentHandoffActions"], [])
                     self.assertEqual(
@@ -89,11 +89,20 @@ class EquipmentPluginMapTests(unittest.TestCase):
                             "schedule": "/api/props/left_signal_cube/news/schedule",
                         },
                     )
-                    self.assertTrue(profile["legacyActionDefinitionsOnly"])
+                    self.assertFalse(profile["legacyActionDefinitionsOnly"])
                     self.assertTrue(profile["actions"])
-                    for action in profile["actions"].values():
+                    legacy = set(self.roles[prop_id]["legacyGenericActionIdsRejected"])
+                    self.assertEqual(set(profile["actions"]), (legacy - {"refresh_daily_market_news"}) | {"analyze_fx28_trends"})
+                    for action_id in legacy.intersection(profile["actions"]):
+                        action = profile["actions"][action_id]
                         self.assertTrue(action["retired"])
                         self.assertEqual(action["rejection"], "direct_service_required")
+                    trend = profile["actions"]["analyze_fx28_trends"]
+                    self.assertEqual(trend["pluginSkillId"], "backend.fx28-trend-daily-v1")
+                    self.assertEqual(trend["outputFields"], ["fxTrendAnalysis"])
+                    self.assertEqual(set(trend["evidenceRequired"]), {"locked_price_snapshot", "28_pair_explanations"})
+                    self.assertEqual(trend["reportType"], "fx28_trend_report")
+                    self.assertFalse(trend.get("retired", False))
                     continue
                 self.assertIn(profile["ownerAgentId"], {
                     "codex_mcp_operator", "mission_archivist", "ea_developer",
@@ -124,12 +133,23 @@ class EquipmentPluginMapTests(unittest.TestCase):
                 continue
             self.assertEqual(schedule["timezone"], "Asia/Bangkok")
             self.assertTrue(schedule["defaultTimes"])
-            if profile.get("serviceMode") == "deterministic_backend_direct":
+            if prop_id == "left_signal_cube":
                 self.assertEqual(schedule["actions"], [])
                 self.assertEqual(schedule["manualOrAgentHandoffActions"], [])
                 self.assertEqual(schedule["directBackendHandler"], "news_bias_direct_refresh")
                 self.assertTrue(schedule["defaultEnabled"])
                 self.assertEqual(schedule["defaultTimes"], ["00:00", "12:00"])
+                trend = profile["trendSchedule"]
+                self.assertEqual(trend["defaultTimes"], ["08:00"])
+                self.assertEqual(trend["timezone"], "Asia/Bangkok")
+                self.assertEqual(trend["maximumRunsPerDay"], 1)
+                self.assertEqual(trend["maximumChildProcesses"], 0)
+                self.assertTrue(trend["singleMissionPerSlot"])
+                self.assertEqual(trend["maximumAttemptsPerMission"], 2)
+                self.assertEqual(trend["infrastructureRetry"]["failureCodes"], ["timeout", "runner_failed"])
+                self.assertTrue(trend["infrastructureRetry"]["normalQuotaRequired"])
+                self.assertFalse(trend["infrastructureRetry"]["quotaRefundAllowed"])
+                self.assertEqual(profile["actions"]["analyze_fx28_trends"]["automationMode"], "scheduled_read_only")
                 continue
             self.assertTrue(schedule["actions"])
             for action_id in schedule["actions"]:

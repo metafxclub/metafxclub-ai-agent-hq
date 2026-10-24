@@ -700,6 +700,15 @@ class MetaTraderMoneyManagementStaticContractTests(unittest.TestCase):
             ea_owned_sizing.issubset(set(orchestration_policy["forbiddenAiFields"]))
         )
         self.assertIn("mode", orchestration_policy["forbiddenAiFields"])
+        self.assertIn("riskCostBasis", bridge_policy["forbiddenAiSignalFields"])
+        self.assertIn("riskCostBasis", orchestration_policy["forbiddenAiFields"])
+        self.assertIn("riskCostBasis", bridge_policy["eaOwnedStatusPolicyFields"])
+        self.assertNotIn("riskCostBasis", bridge_policy["allowedAiSignalFields"])
+        self.assertNotIn("riskCostBasis", bridge_policy["eaOwnedInputs"])
+        risk_policy = bridge_policy["mt5RiskCostPolicy"]
+        self.assertEqual(risk_policy["acceptedValue"], "price_and_slippage_excluding_commission")
+        self.assertEqual(risk_policy["effectiveEstimatedCommissionPerLot"], 0)
+        self.assertIn("regardless of eaVersion", risk_policy["absentFieldBehavior"])
 
     def test_platform_specific_risk_valuation_and_margin_guards_exist(self) -> None:
         for token in (

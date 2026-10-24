@@ -902,6 +902,88 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(selected["researchState"], "not_started")
         self.assertNotIn("พร้อมใช้ในโรงงาน EA", selected["researchStatusTh"])
 
+    def test_deep_research_read_context_reuses_inputs_but_checks_each_identity(self) -> None:
+        report, source_mission, _transfer = self.verified_portal_system_fixture()
+        selected_record = report["metrics"]["systems"][1]["recordId"]
+        form = {"sourceReportId": report["id"], "sourceRecordId": selected_record}
+        context = {"missions": [source_mission]}
+        with (
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[report]) as reports,
+            mock.patch.object(self.bridge, "load_missions", side_effect=AssertionError("use the same Mission snapshot")),
+            mock.patch.object(self.bridge, "_world_sheet_catalog_rows", return_value=[]) as sheet_rows,
+            mock.patch.object(
+                self.bridge, "_verified_trading_systems_for_deep_research",
+                wraps=self.bridge._verified_trading_systems_for_deep_research,
+            ) as verify,
+        ):
+            first = self.bridge._workflow_selected_source(
+                "left_server_racks", "deep_research_system", form,
+                source_read_context=context,
+            )
+            second = self.bridge._workflow_selected_source(
+                "left_server_racks", "deep_research_system", form,
+                source_read_context=context,
+            )
+            self.assertEqual(first, second)
+            self.assertEqual(verify.call_count, 2)
+            sheet_rows.assert_not_called()
+            with self.assertRaises(self.bridge.RequestError):
+                self.bridge._workflow_selected_source(
+                    "left_server_racks", "deep_research_system",
+                    {**form, "sourceRecordId": "trading-system-detached-record"},
+                    source_read_context=context,
+                )
+            reports.assert_called_once_with(limit=240)
+            sheet_rows.assert_called_once_with()
+
+            # A new request gets fresh authoritative inputs. Prior validated
+            # selection results never become an admission cache.
+            reports.return_value = []
+            with self.assertRaises(self.bridge.RequestError):
+                self.bridge._workflow_selected_source(
+                    "left_server_racks", "deep_research_system", form,
+                    source_read_context={"missions": [source_mission]},
+                )
+            self.assertEqual(reports.call_count, 2)
+            self.assertEqual(sheet_rows.call_count, 2)
+
+    def test_deep_research_read_context_keeps_source_url_binding_guard(self) -> None:
+        report, source_mission, _transfer = self.verified_portal_system_fixture()
+        record_id = report["metrics"]["systems"][1]["recordId"]
+        form = {"sourceReportId": report["id"], "sourceRecordId": record_id}
+        read_context = {"missions": [source_mission]}
+        with mock.patch.object(self.bridge, "load_runtime_reports", return_value=[report]):
+            source = self.bridge._workflow_selected_source(
+                "left_server_racks", "deep_research_system", form,
+                source_read_context=read_context,
+            )
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "left_server_racks", "deep_research_system", form,
+        )
+        lineage = self.bridge._dashboard_workflow_lineage(
+            "left_server_racks", "deep_research_system", form, source,
+            plugin_profile=profile,
+        )
+        mission = {
+            "workflowContext": lineage, "toolId": "codex_web_research",
+            "owner": "mission_archivist", "reportType": "trading_system_research_report",
+        }
+        urls, error = self.bridge._deep_research_required_open_urls_for_mission(
+            mission, source_read_context=read_context,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(len(urls), 2)
+        detached = copy.deepcopy(mission)
+        binding = detached["workflowContext"]["deepResearchSourceBinding"]
+        binding["sourceUrls"][1] = "https://indicatorspot.com/replacement"
+        binding["sourceUrlDigest"] = self.bridge._deep_research_source_binding_digest(binding)
+        self.assertEqual(
+            self.bridge._deep_research_required_open_urls_for_mission(
+                detached, source_read_context=read_context,
+            ),
+            ([], "trading_system_research_source_binding_detached"),
+        )
+
     def test_deep_research_selection_is_bound_to_one_verified_record(self) -> None:
         report, source_mission, _transfer = self.verified_portal_system_fixture()
         selected_record = report["metrics"]["systems"][1]["recordId"]
@@ -3583,6 +3665,9 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             terminal_root = Path(temp_dir)
             (terminal_root / "MQL4").mkdir()
             candidate_id = "mtc-release-gate-1"
+            mt5_root = terminal_root / "mt5"
+            (mt5_root / "MQL5").mkdir(parents=True)
+            mt5_candidate_id = "mtc-release-gate-2"
             terminals = {
                 "status": "detected",
                 "checkedAt": checked_at,
@@ -3607,10 +3692,32 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                         "identityKey": self.bridge._metatrader_identity_key("mt4", str(terminal_root)),
                         "available": True,
                     },
+                    mt5_candidate_id: {
+                        "candidateId": mt5_candidate_id,
+                        "platform": "mt5",
+                        "localPath": str(mt5_root),
+                        "identityKey": self.bridge._metatrader_identity_key("mt5", str(mt5_root)),
+                        "available": True,
+                    },
+                },
+                "activePlatform": "mt4",
+                "platformSelections": {
+                    "mt4": {
+                        "candidateId": candidate_id,
+                        "selectionRevision": 1,
+                        "selectedAt": checked_at,
+                    },
+                    "mt5": {
+                        "candidateId": mt5_candidate_id,
+                        "selectionRevision": 2,
+                        "selectedAt": checked_at,
+                    },
                 },
                 "selections": {
                     "left_analytics_console": {
-                        "candidateId": candidate_id,
+                        # Compatibility projections cannot override the header.
+                        "candidateId": mt5_candidate_id,
+                        "selectionRevision": 4,
                         "selectedAt": checked_at,
                     },
                 },
@@ -3677,6 +3784,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         serialized = json.dumps(model, ensure_ascii=False)
         for forbidden in (
             str(terminal_root),
+            candidate_id,
+            mt5_candidate_id,
             "PRIVATE-HQ-SENTINEL",
             "998877",
             "ACCOUNT-SENTINEL",

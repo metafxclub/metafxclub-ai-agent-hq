@@ -1,6 +1,42 @@
 {
   "schemaVersion": "radar-website-source-policy-v1",
   "policyId": "free-first-daily-rotation",
+  "publicationPolicies": {
+    "currentVersion": 2,
+    "missionVersionField": "workflowContext.inputs.radarPublicationVersion",
+    "missingVersionMeansLegacy": true,
+    "legacy": {
+      "version": 1,
+      "mode": "exact_count",
+      "scheduledItemCount": 6,
+      "manualMinimumItemCount": 1,
+      "manualMaximumItemCount": 6,
+      "resultProfile": "radar_website_tool",
+      "historyRewriteAllowed": false
+    },
+    "current": {
+      "version": 2,
+      "mode": "up_to_maximum",
+      "minimumItemCount": 0,
+      "maximumItemCount": 3,
+      "resultProfile": "radar_website_tool_v2",
+      "manifestSchema": "metafx-radar-url-open-verification-v2",
+      "minimumCompletedSearchCount": 1,
+      "completedSearchEventProofRequired": true,
+      "eachPublishedSourceRequiresMainProcessOpen": true,
+      "mainProcessSlots": 1,
+      "correctiveChildSlots": 0,
+      "verifiedEmptyIsSuccessful": true,
+      "scarcityRetryAllowed": false,
+      "silentTruncationAllowed": false,
+      "toolKinds": ["indicator", "ea", "tool"],
+      "scheduledAllowedVerificationStatus": ["verified"],
+      "categoryQuotasRequired": false,
+      "githubTechnologyToolKind": "tool",
+      "mql5FallbackMaximumPerBatch": 1,
+      "sourceAndDedupGuardsUnchanged": true
+    }
+  },
   "appliesTo": {
     "propId": "left_audit_crystals",
     "actionId": "discover_new_indicators",

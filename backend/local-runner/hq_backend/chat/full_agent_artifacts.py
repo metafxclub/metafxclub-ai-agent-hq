@@ -89,8 +89,24 @@ _TYPE_BY_SUFFIX: dict[str, tuple[str, str]] = {
     ".py": ("text/x-python", "source"),
     ".mq4": ("text/plain", "source"),
     ".mq5": ("text/plain", "source"),
+    ".mqh": ("text/plain", "source"),
+    ".set": ("text/plain", "text"),
+    ".log": ("text/plain", "text"),
+    ".xml": ("application/xml", "text"),
+    ".yaml": ("text/yaml", "text"),
+    ".yml": ("text/yaml", "text"),
+    ".ini": ("text/plain", "text"),
+    ".toml": ("text/plain", "text"),
+    ".sql": ("text/plain", "source"),
+    ".c": ("text/plain", "source"),
+    ".cpp": ("text/plain", "source"),
+    ".h": ("text/plain", "source"),
+    ".hpp": ("text/plain", "source"),
+    ".pine": ("text/plain", "source"),
     ".zip": ("application/zip", "archive"),
 }
+
+SUPPORTED_FILE_EXTENSIONS = tuple(sorted(_TYPE_BY_SUFFIX))
 
 _OOXML_MARKERS = {
     ".pptx": "ppt/presentation.xml",
@@ -290,14 +306,17 @@ def _decode_base64(value: object) -> bytes:
 
 
 def _validate_text(payload: bytes, suffix: str) -> None:
-    if b"\x00" in payload:
-        raise FullAgentArtifactError("invalid_file_content", "Text file contains NUL bytes.")
     try:
-        text = payload.decode("utf-8", errors="strict")
+        # MetaEditor commonly writes UTF-16 with a BOM. Validate the decoded
+        # text while retaining the original bytes/hash in the immutable store.
+        encoding = "utf-16" if payload.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+        text = payload.decode(encoding, errors="strict")
     except UnicodeDecodeError as error:
         raise FullAgentArtifactError(
-            "invalid_file_content", "Text files must use UTF-8."
+            "invalid_file_content", "Text files must use UTF-8 or BOM-marked UTF-16."
         ) from error
+    if "\x00" in text or any(ord(char) < 32 and char not in "\t\r\n\f" for char in text):
+        raise FullAgentArtifactError("invalid_file_content", "Text file contains binary control characters.")
     if suffix == ".json":
         try:
             json.loads(text)
@@ -1560,6 +1579,11 @@ class FullAgentArtifactStore:
 
     @staticmethod
     def read_model(metadata: Mapping[str, Any]) -> dict[str, Any]:
+        is_input = metadata.get("direction") == "input" and metadata.get("state", "ready") == "ready"
+        kind = str(metadata.get("kind") or "file")
+        suffix = str(metadata.get("suffix") or Path(str(metadata.get("name") or "")).suffix).lower()
+        text_input = is_input and kind in {"text", "source"}
+        file_input = is_input and kind != "image"
         return {
             "id": str(metadata.get("id") or ""),
             "name": str(metadata.get("name") or ""),
@@ -1569,6 +1593,13 @@ class FullAgentArtifactStore:
             "sha256": str(metadata.get("sha256") or ""),
             "direction": str(metadata.get("direction") or "input"),
             "modelInputReady": bool(metadata.get("modelInputReady")),
+            # modelInputReady retains its native-image meaning for older
+            # callers. General files must never be dispatched as localImage.
+            "inputType": "image" if kind == "image" else "text" if text_input else "file",
+            "textInputReady": text_input,
+            "fileInputReady": file_input,
+            "textExtractionSupported": is_input and (text_input or suffix in {".docx", ".xlsx", ".pptx", ".zip", ".pdf"}),
+            "requiresWorkspace": file_input and suffix == ".pdf",
             "createdAt": metadata.get("createdAt"),
             "finalizedAt": metadata.get("finalizedAt"),
             "expiresAt": metadata.get("expiresAt"),

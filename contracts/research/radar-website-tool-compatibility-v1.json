@@ -4,6 +4,20 @@
   "propId": "left_audit_crystals",
   "workflowId": "indicator_website_scout",
   "canonicalName": "Radar Website Tool",
+  "publicationPolicy": {
+    "policyRef": "contracts/research/radar-website-source-policy-v1.json#/publicationPolicies",
+    "currentVersion": 2,
+    "resultProfile": "radar_website_tool_v2",
+    "minimumItemsPerRun": 0,
+    "maximumItemsPerRun": 3,
+    "versionInputField": "radarPublicationVersion",
+    "verifiedEmptyIsSuccessful": true,
+    "minimumCompletedSearchCount": 1,
+    "mainProcessOnly": true,
+    "legacyEntryContractPreserved": true,
+    "legacySixItemHistoryPreserved": true,
+    "categoryQuotasRequired": false
+  },
   "referencePlugin": {
     "skillId": "metafx-online-system-scout",
     "version": "0.1.2",
@@ -39,6 +53,11 @@
     "excludedPropIds": ["right_tool_console", "terminal_workstation"]
   },
   "presentation": {
+    "desktopGridColumns": 3,
+    "smallScreenLayout": "responsive",
+    "publishedItemCountIsActual": true,
+    "verifiedEmptyDistinctFromNoData": true,
+    "legacyHistoryMustNotBeTruncated": true,
     "mainTabId": "today",
     "historyIncludedInTabId": "seven_days",
     "tabs": [

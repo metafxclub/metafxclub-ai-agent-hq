@@ -530,6 +530,9 @@ if (-not $rejected) {{ throw 'Synthetic stale EA candidate was accepted' }}
                 "typing-inspection",
                 "typing-extensions",
                 "tzdata",
+                "metatrader5",
+                "numpy",
+                "pypdf",
             },
             requirement_names,
         )

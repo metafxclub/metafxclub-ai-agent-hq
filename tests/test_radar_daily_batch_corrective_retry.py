@@ -57,15 +57,17 @@ class RadarDailyBatchCorrectiveRetryTests(unittest.TestCase):
     def scheduled_radar(self) -> tuple[dict, str]:
         today = datetime.now(self.bridge.THAILAND_TIMEZONE).date().isoformat()
         slot_key = f"indicatorScoutSchedule:{today}:0900"
-        response = self.bridge.run_dashboard_workflow_action(
-            "left_audit_crystals",
-            {
-                "actionId": "discover_new_indicators",
-                "form": {},
-                "idempotencyKey": f"dashboard-schedule:{slot_key}",
-            },
-            trusted_trigger_source="schedule",
-        )
+        # Recreate historical v1 inputs before signing; production defaults remain v2.
+        with mock.patch.object(self.bridge, "_radar_current_publication_inputs", side_effect=lambda form: dict(form)):
+            response = self.bridge.run_dashboard_workflow_action(
+                "left_audit_crystals",
+                {
+                    "actionId": "discover_new_indicators",
+                    "form": {},
+                    "idempotencyKey": f"dashboard-schedule:{slot_key}",
+                },
+                trusted_trigger_source="schedule",
+            )
         return response["mission"], slot_key
 
     def prior_day_scheduled_radar_completion_retry(
@@ -74,15 +76,17 @@ class RadarDailyBatchCorrectiveRetryTests(unittest.TestCase):
         current_day = datetime.now(self.bridge.THAILAND_TIMEZONE).date()
         prior_day = (current_day - timedelta(days=1)).isoformat()
         slot_key = f"indicatorScoutSchedule:{prior_day}:0900"
-        response = self.bridge.run_dashboard_workflow_action(
-            "left_audit_crystals",
-            {
-                "actionId": "discover_new_indicators",
-                "form": {},
-                "idempotencyKey": f"dashboard-schedule:{slot_key}",
-            },
-            trusted_trigger_source="schedule",
-        )
+        # Recreate historical v1 inputs before signing; production defaults remain v2.
+        with mock.patch.object(self.bridge, "_radar_current_publication_inputs", side_effect=lambda form: dict(form)):
+            response = self.bridge.run_dashboard_workflow_action(
+                "left_audit_crystals",
+                {
+                    "actionId": "discover_new_indicators",
+                    "form": {},
+                    "idempotencyKey": f"dashboard-schedule:{slot_key}",
+                },
+                trusted_trigger_source="schedule",
+            )
         mission = response["mission"]
         self.bridge._dashboard_workflow_update_schedule_state(
             "indicatorScoutSchedule",

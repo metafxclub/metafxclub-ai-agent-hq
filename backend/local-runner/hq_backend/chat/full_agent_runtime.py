@@ -13,6 +13,7 @@ idempotency digests and storage paths are never exposed.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -37,6 +38,7 @@ APPROVAL_JOURNAL_FILENAME = "full-agent-approval-v1.json"
 APPROVAL_JOURNAL_LOCK_FILENAME = ".full-agent-approval.lock"
 
 DEFAULT_MODEL_ALLOWLIST = (
+    "gpt-6.1-sol",
     "gpt-5.6-sol",
     "gpt-6-astra",
     "gpt-6-sol",
@@ -1261,6 +1263,7 @@ class FullAgentRuntime:
                 "interruptIdempotency": {},
                 "activeTurnId": None,
                 "backendThreadId": None,
+                "accessGrant": self._mode_access_grant(mode, now),
             }
             store["threads"][thread_id] = thread
             if key is not None:
@@ -1353,6 +1356,8 @@ class FullAgentRuntime:
                     "Thread settings cannot change while a turn is active.",
                     status=409,
                 )
+            if "mode" in changes:
+                thread["accessGrant"] = self._mode_access_grant(changes["mode"], self._now())
             thread.update(changes)
             self._touch_thread(store, thread)
             return self._thread_read_model(thread, include_events=True)
@@ -1361,6 +1366,19 @@ class FullAgentRuntime:
         """Compatibility alias for callers that name this operation generically."""
 
         return self.update_settings(thread_id, **changes)
+
+    @staticmethod
+    def _mode_access_grant(mode: str, now: str) -> dict[str, Any] | None:
+        """The explicit create/settings request grants this thread, never the app.
+
+        Old stores intentionally have no inferred grant. Re-selecting a tool
+        mode records one; choosing Chat revokes it. Tool escalation decisions
+        remain separate one-shot records in FullAgentApprovalJournal.
+        """
+        if mode == "chat":
+            return None
+        return {"version": 1, "mode": mode, "grantedAt": now,
+                "scope": "thread", "authorization": "user_selected_mode"}
 
     def archive_thread(
         self,
@@ -1520,6 +1538,39 @@ class FullAgentRuntime:
                 "idempotentReplay": False,
             }
 
+    def lookup_turn_request(
+        self,
+        thread_id: str,
+        *,
+        content: str,
+        idempotency_key: str,
+        request_identity: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Replay a transport-identical request without resolving consumed uploads.
+
+        Only the backend supplies this identity. It binds the original upload
+        IDs as well as the prompt, so a new file with equal bytes cannot reuse
+        an old key. No execution, history mutation or upload access occurs.
+        """
+        thread_id = _identifier(thread_id, field="threadId")
+        key = _idempotency_key(idempotency_key, required=True)
+        event_input = self._event_input(role="user", content=content, event_type="message", metadata=None)
+        identity_hash = _request_digest({"content": event_input["content"], "identity": _sanitize_metadata(request_identity)})
+        thread = self._get_thread(self._load_store(), thread_id)
+        prior = thread["turnIdempotency"].get(_key_digest(key))
+        if prior is None or prior.get("transportDigest") is None:
+            return None
+        if prior.get("transportDigest") != identity_hash:
+            raise FullAgentRuntimeError("idempotency_conflict", "That idempotency key was already used for a different turn.", status=409)
+        turn = self._find_turn(thread, prior.get("turnId"))
+        return {
+            "turn": self._turn_read_model(turn),
+            "thread": self._thread_read_model(thread, include_events=True),
+            "turnEvents": [self._event_read_model(event) for event in thread["events"]
+                           if isinstance(event.get("metadata"), Mapping) and event["metadata"].get("turnId") == turn["id"]],
+            "idempotentReplay": True,
+        }
+
     def request_turn(
         self,
         thread_id: str,
@@ -1527,6 +1578,7 @@ class FullAgentRuntime:
         content: str,
         idempotency_key: str,
         metadata: Mapping[str, Any] | None = None,
+        request_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist one user turn request without executing a model or tool."""
 
@@ -1537,13 +1589,16 @@ class FullAgentRuntime:
             role="user", content=content, event_type="message", metadata=metadata
         )
         request_hash = _request_digest(event_input)
+        transport_hash = (_request_digest({"content": event_input["content"], "identity": _sanitize_metadata(request_identity)})
+                          if request_identity is not None else None)
         with self._mutation() as store:
             thread = self._get_thread(store, thread_id)
             self._ensure_thread_writable(thread)
             digest = _key_digest(key)
             prior = thread["turnIdempotency"].get(digest)
             if prior is not None:
-                if prior.get("requestDigest") != request_hash:
+                if (prior.get("requestDigest") != request_hash
+                        or (transport_hash is not None and prior.get("transportDigest") not in {None, transport_hash})):
                     raise FullAgentRuntimeError(
                         "idempotency_conflict",
                         "That idempotency key was already used for a different turn.",
@@ -1596,6 +1651,7 @@ class FullAgentRuntime:
             thread["turnIdempotency"][digest] = {
                 "turnId": turn["id"],
                 "requestDigest": request_hash,
+                **({"transportDigest": transport_hash} if transport_hash is not None else {}),
             }
             self._touch_thread(store, thread, now=now)
             return {
@@ -2148,6 +2204,19 @@ class FullAgentRuntime:
             self._validate_model(thread["model"])
             self._validate_reasoning(thread["reasoning"])
             self._validate_mode(thread["mode"])
+            grant = thread.get("accessGrant")
+            if grant is not None and (
+                not isinstance(grant, dict)
+                or set(grant) != {"version", "mode", "grantedAt", "scope", "authorization"}
+                or grant.get("version") != 1
+                or grant.get("mode") != thread["mode"]
+                or thread["mode"] == "chat"
+                or grant.get("scope") != "thread"
+                or grant.get("authorization") != "user_selected_mode"
+                or not isinstance(grant.get("grantedAt"), str)
+                or not grant.get("grantedAt")
+            ):
+                raise FullAgentRuntimeError("store_corrupt", "Thread access grant is invalid.", status=500)
             if _plain_text(
                 thread["title"], field="title", maximum=MAX_TITLE_CHARS
             ) != thread["title"]:
@@ -2307,6 +2376,7 @@ class FullAgentRuntime:
             "model": thread["model"],
             "reasoning": thread["reasoning"],
             "mode": thread["mode"],
+            "accessGrant": copy.deepcopy(thread.get("accessGrant")),
             "status": thread["status"],
             "archived": thread["archived"],
             "createdAt": thread["createdAt"],

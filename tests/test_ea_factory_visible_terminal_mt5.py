@@ -7659,18 +7659,24 @@ try {{
         self.assertIn('Find-ControlByIdPresent $launcher "10888"', pane_content)
         self.assertEqual(
             pane_reveal.count("Test-TesterPaneContentVisible $Required $activeRoot"),
-            2,
+            3,
         )
         self.assertNotIn(
             "Find-ControlByIdPresent $activeRoot $paneId",
             pane_reveal,
         )
+        reveal_command = (
+            "[MetafxMt5VisibleNative]::InvokeTesterRevealMenuExact("
+            "[uint32]$TerminalProcess.Id, $signedRoot)"
+        )
+        self.assertIn(reveal_command, pane_reveal)
+        self.assertNotIn("[System.Windows.Forms.SendKeys]::SendWait", pane_reveal)
         self.assertLess(
             pane_reveal.index("Test-TesterPaneContentVisible $Required $activeRoot"),
-            pane_reveal.index('[System.Windows.Forms.SendKeys]::SendWait("^r")'),
+            pane_reveal.index(reveal_command),
         )
         self.assertLess(
-            pane_reveal.index('[System.Windows.Forms.SendKeys]::SendWait("^r")'),
+            pane_reveal.index(reveal_command),
             pane_reveal.rindex("Test-TesterPaneContentVisible $Required $activeRoot"),
         )
         self.assertIn("Get-BoundTerminalRoot $Request $signedRoot", pane_reveal)
@@ -9029,7 +9035,7 @@ if ([MetafxMt5VisibleNative]::IsWindow($dialog)) {{ throw 'popup command dialog 
         )
         self.assertIn("[string]$observed.snapshotSha256 -cne $DifferentFromSha256", wait)
         self.assertIn(
-            "if ([DateTime]::UtcNow -lt $deadline) { return $observed }",
+            "if ([long]$observed.captureTimestampTicks -lt $deadlineTicks) { return $observed }",
             wait,
         )
         self.assertIn("$TimeoutCode -cnotmatch '^[a-z0-9_]{3,100}$'", wait)
@@ -9167,13 +9173,13 @@ function Find-CompileResult(
             if ($script:ProbeCount -lt 3) {{
                 throw [System.InvalidOperationException]::new('mt5_metaeditor_compile_result_unverified')
             }}
-            return [ordered]@{{ rowCount = 2; snapshotSha256 = ('a' * 64); resultLine = $null }}
+            return [ordered]@{{ rowCount = 2; snapshotSha256 = ('a' * 64); resultLine = $null; captureTimestampTicks = [Diagnostics.Stopwatch]::GetTimestamp() }}
         }}
         'stale' {{
             if ($script:ProbeCount -lt 3) {{
-                return [ordered]@{{ rowCount = 3; snapshotSha256 = $staleDigest; resultLine = '0 errors, 0 warnings' }}
+                return [ordered]@{{ rowCount = 3; snapshotSha256 = $staleDigest; resultLine = '0 errors, 0 warnings'; captureTimestampTicks = [Diagnostics.Stopwatch]::GetTimestamp() }}
             }}
-            return [ordered]@{{ rowCount = 3; snapshotSha256 = $freshDigest; resultLine = '0 errors, 0 warnings' }}
+            return [ordered]@{{ rowCount = 3; snapshotSha256 = $freshDigest; resultLine = '0 errors, 0 warnings'; captureTimestampTicks = [Diagnostics.Stopwatch]::GetTimestamp() }}
         }}
         'nonretryable' {{
             throw [System.InvalidOperationException]::new('mt5_metaeditor_control_owner_changed')
@@ -9183,7 +9189,7 @@ function Find-CompileResult(
         }}
         'late_success' {{
             Start-Sleep -Milliseconds 1200
-            return [ordered]@{{ rowCount = 3; snapshotSha256 = $freshDigest; resultLine = '0 errors, 0 warnings' }}
+            return [ordered]@{{ rowCount = 3; snapshotSha256 = $freshDigest; resultLine = '0 errors, 0 warnings'; captureTimestampTicks = [Diagnostics.Stopwatch]::GetTimestamp() }}
         }}
         default {{ throw [System.InvalidOperationException]::new('unexpected_probe_mode') }}
     }}

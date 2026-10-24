@@ -404,7 +404,7 @@
         "allowedModes": ["manual", "auto_on_new_closed_bar"],
         "triggerPolicy": "new_closed_bar",
         "activationPolicy": "wait_next_closed_bar",
-        "backlogPolicy": "durable_fifo_exact_snapshot_audit_only_when_stale",
+        "backlogPolicy": "new_closed_bar_only_no_backfill",
         "councilExecution": "parallel_with_round_deadline",
         "snapshotPollSeconds": 5,
         "autoSupportedTimeframes": ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],
@@ -521,26 +521,260 @@
       "reportRoute": {"targetPropId": "left_audit_crystals", "primaryReportType": "indicator_scout_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_signal_cube": {
-      "moduleNameTh": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
-      "availability": {"ui": "ready", "data": "official_structured_direct", "execution": "deterministic_analysis_only", "economicCalendar": "official_allowlist_direct", "scheduler": "implemented_direct_backend"},
+      "moduleNameTh": "แนวโน้ม 28 คู่เงินและข่าวตลาด",
+      "availability": {
+        "ui": "ready",
+        "data": "official_structured_direct",
+        "execution": "deterministic_analysis_only",
+        "economicCalendar": "official_allowlist_direct",
+        "scheduler": "implemented_direct_backend"
+      },
       "localTabs": [
-        {"id": "pair_bias", "labelTh": "มุมมอง 28 คู่เงิน", "actionIds": []},
-        {"id": "today", "labelTh": "ข่าวตลาดวันนี้", "actionIds": [], "viewOnly": true},
-        {"id": "history", "labelTh": "ประวัติข่าว", "actionIds": [], "viewOnly": true}
+        {
+          "id": "pair_bias",
+          "labelTh": "มุมมอง 28 คู่เงิน",
+          "actionIds": []
+        },
+        {
+          "id": "today",
+          "labelTh": "ข่าวตลาดวันนี้",
+          "actionIds": [],
+          "viewOnly": true
+        },
+        {
+          "id": "history",
+          "labelTh": "ประวัติข่าว",
+          "actionIds": [],
+          "viewOnly": true
+        }
       ],
       "connections": [
-        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
-        {"id": "official_structured_sources", "labelTh": "แหล่งข่าวทางการ 8 สกุลเงิน", "required": true, "adapterStatus": "implemented_allowlist", "mode": "https_read_only"},
-        {"id": "fx_bias_analysis", "labelTh": "ประเมิน 28 คู่เงินแบบ Deterministic", "required": true, "adapterStatus": "implemented", "mode": "analysis_only"},
-        {"id": "direct_news_store", "labelTh": "ประวัติข่าว Direct แยกจาก Mission", "required": true, "adapterStatus": "implemented_atomic_local_store"},
-        {"id": "backend_scheduler", "labelTh": "อัปเดตข่าวตลาดสูงสุด 2 ครั้งต่อวัน", "required": true, "adapterStatus": "implemented_direct_backend"}
+        {
+          "id": "local_bridge",
+          "labelTh": "Local Bridge",
+          "required": true,
+          "adapterStatus": "implemented"
+        },
+        {
+          "id": "official_structured_sources",
+          "labelTh": "แหล่งข่าวทางการ 8 สกุลเงิน",
+          "required": true,
+          "adapterStatus": "implemented_allowlist",
+          "mode": "https_read_only"
+        },
+        {
+          "id": "fx_bias_analysis",
+          "labelTh": "ประเมิน 28 คู่เงินแบบ Deterministic",
+          "required": true,
+          "adapterStatus": "implemented",
+          "mode": "analysis_only"
+        },
+        {
+          "id": "direct_news_store",
+          "labelTh": "ประวัติข่าว Direct แยกจาก Mission",
+          "required": true,
+          "adapterStatus": "implemented_atomic_local_store"
+        },
+        {
+          "id": "backend_scheduler",
+          "labelTh": "อัปเดตข่าวตลาดสูงสุด 2 ครั้งต่อวัน",
+          "required": true,
+          "adapterStatus": "implemented_direct_backend"
+        },
+        {
+          "id": "fx28_readonly_prices",
+          "labelTh": "ราคาปิด 28 คู่จาก MT5 ที่เลือก",
+          "required": true,
+          "adapterStatus": "implemented_read_only",
+          "mode": "closed_bars_only"
+        },
+        {
+          "id": "fx28_codex_explanations",
+          "labelTh": "คำอธิบายแนวโน้มจาก Codex",
+          "required": false,
+          "adapterStatus": "implemented_guarded",
+          "mode": "analysis_only"
+        }
       ],
-      "liveTradingPolicy": {"enabled": false, "orderSubmission": "disabled", "activationFromFrontend": false, "analysisIsNotTradeSignal": true},
-      "codexUsage": {"dependency": "none", "agentUsed": false, "aiUsed": false, "missionCreated": false},
-      "operation": {"defaultMode": "one_or_two_runs_per_day", "allowedModes": ["manual_refresh", "one_or_two_runs_per_day"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": true, "scheduleDefaultTimes": ["00:00", "12:00"], "scheduleDefaultMinimumImpact": "low", "schedulePreferenceMaxRunsPerDay": 2, "scheduleHardMaximumRunsPerDay": 2, "scheduleHardMaximumRuntimeEnforced": true, "scheduleDailyCounterPersistence": "backend_local_settings", "scheduleCountingPolicy": "pre_dispatch_fail_closed_reservation", "scheduleStalePendingPolicy": "expire_at_bangkok_day_boundary", "scheduleCatchUpPolicy": "latest_same_day_slot_only", "scheduleExecutionAdapterStatus": "implemented_direct_backend", "scheduledActionIds": [], "manualOrAgentHandoffActionIds": [], "legacyGenericActionIdsRejected": ["save_news_bias_schedule", "refresh_daily_market_news", "analyze_daily_market_news", "build_fx_pair_bias"], "refreshEndpoint": "/api/props/left_signal_cube/news/refresh", "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule"},
-      "readModel": {"schemaVersion": "fx-news-bias-dashboard-v3", "pairBiasSchemaVersion": "fx-pair-bias-read-model-v3", "directServiceField": "directNewsService", "primaryViews": ["pair_bias", "today", "history"], "defaultView": "pair_bias", "directSnapshotFeeds": ["events", "dangerWindows", "pairBias", "sourceHealth", "historyDays"], "pairCount": 28, "unknownValue": "insufficient_data", "assessmentStates": ["directional_ready", "upcoming_event", "awaiting_actual", "released_no_direction", "no_direct_event", "unavailable"], "assessmentCoverageFields": ["assessedPairCount", "directionalPairCount", "awaitingEventPairCount", "upcomingEventPairCount", "awaitingActualPairCount", "releasedNoDirectionPairCount", "noDirectEventPairCount", "unavailablePairCount", "assessmentComplete"], "pairAssessmentFields": ["assessmentStatus", "assessmentComplete", "relevantEventCount", "relevantEvents", "nextEvent"], "maximumRelevantEventMetadataPerPair": 3, "preEventDirectionalPolicy": "direction_only_after_comparable_actual_forecast_matches_explicit_rule", "scheduleAndMethodLocation": "left_rail", "historyPresentationTab": true, "historyView": "history", "historySource": "directNewsService.historyDays", "historyOfficialSourceLinksClickable": true, "todayFreshnessFields": ["asOf", "currentBangkokDate", "reportBangkokDate", "stale", "currentDataAvailable", "sourceStatus", "verifiedEmpty", "coverageCurrencies", "failedCurrencies"], "staleTodayPolicy": "fail_closed_and_label_last_good_separately"},
-      "workflowReadiness": {"officialStructuredSources": "ready_allowlisted_read_only", "fxBiasAnalysis": "ready_deterministic", "directStoreAudit": "ready", "economicCalendarMode": "official_structured_direct", "authoritativePublicSourcesRequired": true, "forexFactoryScraping": false, "fairEconomyScraping": false, "recurringScheduler": "ready_direct_backend"},
-      "reportRoute": {"targetPropId": "left_signal_cube", "primaryReportType": "fx_news_bias_report", "primaryStore": "fx-daily-news-direct-store-v1", "missionReportRoute": null}
+      "liveTradingPolicy": {
+        "enabled": false,
+        "orderSubmission": "disabled",
+        "activationFromFrontend": false,
+        "analysisIsNotTradeSignal": true
+      },
+      "codexUsage": {
+        "dependency": "none",
+        "agentUsed": false,
+        "aiUsed": false,
+        "missionCreated": false,
+        "scope": "direct_news_only"
+      },
+      "operation": {
+        "defaultMode": "one_or_two_runs_per_day",
+        "allowedModes": [
+          "manual_refresh",
+          "one_or_two_runs_per_day"
+        ],
+        "plannedModes": [],
+        "intervalMinutes": null,
+        "scheduleBackendOwned": true,
+        "scheduleDefaultEnabled": true,
+        "scheduleDefaultTimes": [
+          "00:00",
+          "12:00"
+        ],
+        "scheduleDefaultMinimumImpact": "low",
+        "schedulePreferenceMaxRunsPerDay": 2,
+        "scheduleHardMaximumRunsPerDay": 2,
+        "scheduleHardMaximumRuntimeEnforced": true,
+        "scheduleDailyCounterPersistence": "backend_local_settings",
+        "scheduleCountingPolicy": "pre_dispatch_fail_closed_reservation",
+        "scheduleStalePendingPolicy": "expire_at_bangkok_day_boundary",
+        "scheduleCatchUpPolicy": "latest_same_day_slot_only",
+        "scheduleExecutionAdapterStatus": "implemented_direct_backend",
+        "scheduledActionIds": [],
+        "manualOrAgentHandoffActionIds": [],
+        "legacyGenericActionIdsRejected": [
+          "save_news_bias_schedule",
+          "refresh_daily_market_news",
+          "analyze_daily_market_news",
+          "build_fx_pair_bias"
+        ],
+        "refreshEndpoint": "/api/props/left_signal_cube/news/refresh",
+        "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule"
+      },
+      "readModel": {
+        "schemaVersion": "fx-news-bias-dashboard-v3",
+        "pairBiasSchemaVersion": "fx-pair-bias-read-model-v3",
+        "directServiceField": "directNewsService",
+        "primaryViews": [
+          "pair_bias",
+          "today",
+          "history"
+        ],
+        "defaultView": "pair_bias",
+        "directSnapshotFeeds": [
+          "events",
+          "dangerWindows",
+          "pairBias",
+          "sourceHealth",
+          "historyDays"
+        ],
+        "pairCount": 28,
+        "unknownValue": "insufficient_data",
+        "assessmentStates": [
+          "directional_ready",
+          "upcoming_event",
+          "awaiting_actual",
+          "released_no_direction",
+          "no_direct_event",
+          "unavailable"
+        ],
+        "assessmentCoverageFields": [
+          "assessedPairCount",
+          "directionalPairCount",
+          "awaitingEventPairCount",
+          "upcomingEventPairCount",
+          "awaitingActualPairCount",
+          "releasedNoDirectionPairCount",
+          "noDirectEventPairCount",
+          "unavailablePairCount",
+          "assessmentComplete"
+        ],
+        "pairAssessmentFields": [
+          "assessmentStatus",
+          "assessmentComplete",
+          "relevantEventCount",
+          "relevantEvents",
+          "nextEvent"
+        ],
+        "maximumRelevantEventMetadataPerPair": 3,
+        "preEventDirectionalPolicy": "direction_only_after_comparable_actual_forecast_matches_explicit_rule",
+        "scheduleAndMethodLocation": "left_rail",
+        "historyPresentationTab": true,
+        "historyView": "history",
+        "historySource": "directNewsService.historyDays",
+        "historyOfficialSourceLinksClickable": true,
+        "todayFreshnessFields": [
+          "asOf",
+          "currentBangkokDate",
+          "reportBangkokDate",
+          "stale",
+          "currentDataAvailable",
+          "sourceStatus",
+          "verifiedEmpty",
+          "coverageCurrencies",
+          "failedCurrencies"
+        ],
+        "staleTodayPolicy": "fail_closed_and_label_last_good_separately"
+      },
+      "workflowReadiness": {
+        "officialStructuredSources": "ready_allowlisted_read_only",
+        "fxBiasAnalysis": "ready_deterministic",
+        "directStoreAudit": "ready",
+        "economicCalendarMode": "official_structured_direct",
+        "authoritativePublicSourcesRequired": true,
+        "forexFactoryScraping": false,
+        "fairEconomyScraping": false,
+        "recurringScheduler": "ready_direct_backend"
+      },
+      "reportRoute": {
+        "targetPropId": "left_signal_cube",
+        "primaryReportType": "fx_news_bias_report",
+        "primaryStore": "fx-daily-news-direct-store-v1",
+        "missionReportRoute": null
+      },
+      "trendCodexUsage": {
+        "dependency": "guarded_codex_runner",
+        "agentUsed": true,
+        "aiUsed": true,
+        "missionCreated": true,
+        "oneMissionPerDailySlot": true,
+        "orderSubmission": false
+      },
+      "trendPipeline": {
+        "resultProfile": "fx_trend_daily_v1",
+        "actionId": "analyze_fx28_trends",
+        "reportType": "fx28_trend_report",
+        "pairCount": 28,
+        "horizons": [
+          "short",
+          "medium",
+          "long"
+        ],
+        "priceAuthority": "backend_deterministic_closed_bar_snapshot",
+        "codexRole": "grounded_thai_explanations_only",
+        "snapshotDigestRequired": true,
+        "sourceRefsRequired": true,
+        "nativeDirectOpenRequiredForNews": true,
+        "newsContextOptional": true,
+        "freshPriceVisibleWhileAiPending": true,
+        "aiOnGetAllowed": false,
+        "orderSubmissionAllowed": false,
+        "secretAccessAllowed": false
+      },
+      "trendSchedule": {
+        "supported": true,
+        "defaultEnabled": true,
+        "timezone": "Asia/Bangkok",
+        "defaultTimes": [
+          "08:00"
+        ],
+        "maximumTimes": 1,
+        "maximumRunsPerDay": 1,
+        "catchUpPolicy": "latest_same_day_slot_only",
+        "stalePendingPolicy": "expire_at_bangkok_day_boundary",
+        "singleMissionPerSlot": true,
+        "maximumAttemptsPerMission": 2,
+        "infrastructureRetry": {"maximumRetries": 1, "failureCodes": ["timeout", "runner_failed"], "delayMinutes": 5, "sameMissionAndAssignment": true, "sameBangkokDayOnly": true, "normalQuotaRequired": true, "quotaRefundAllowed": false},
+        "maximumChildProcesses": 0,
+        "quotaPolicy": "existing_codex_quota_and_reserve_guards"
+      },
+      "trendReportRoute": {
+        "targetPropId": "left_signal_cube",
+        "primaryReportType": "fx28_trend_report",
+        "summaryTargetPropId": "mission_strategy_table"
+      }
     },
     "right_status_crystals": {
       "moduleNameTh": "ศูนย์รวมสถานะการเชื่อมต่ออุปกรณ์",

@@ -1,0 +1,26 @@
+PackageVersion: 1.05
+CandidateStatus: COMPILE_VERIFIED_SOURCE_ONLY
+Source: integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5
+SourceSHA256: E1F7A84474BBA7EEB7932ED8F501944575E8A33BFEAA2E4D5D04C9117D545467
+SourceBytes: 248513
+CompileResult: PASS
+CompileMode: VISIBLE_METAEDITOR64_EXACT_SOURCE
+MetaEditorVersion: 5.0.0.6230
+CompileErrors: 0
+CompileWarnings: 0
+CompileElapsedMilliseconds: 11008
+CompileCpuTarget: AVX2+FMA3
+CompiledAtUTC: 2026-10-21T10:17:18.141914+00:00
+CompiledSourceSHA256: E1F7A84474BBA7EEB7932ED8F501944575E8A33BFEAA2E4D5D04C9117D545467
+CurrentSourceMatchesCompiledSource: true
+LocalCompileBinaryBytes: 294906
+LocalCompileBinarySHA256: 71246B82197578561BD90DAAC67B41044A70D4E3FD74967949B7FF935402CDC9
+CompileProof: COMPILE_PROOF.png
+CompileProofSHA256: 2C2A6A83BBD5C7D498EBC0115625B62247E360B7E6143F908FEE631308B71590
+ReleasePolicy: SOURCE_ONLY
+CompiledBinaryIncluded: false
+CompiledBinaryEligibleForDistribution: false
+FocusedStaticAndContractTests: PASS (65 tests, 0 failures, 0 errors, 0 skipped)
+DemoExecutionValidated: false
+LiveExecutionValidated: false
+Safety: Compile phase only: candidate v1.05 was not attached; existing v1.04 remained in Shadow. Terminal stayed open; Algo Trading unchanged; no order or trade command sent.

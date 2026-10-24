@@ -2739,7 +2739,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         with patch.object(
             self.bridge,
             "_deep_research_report_lineage",
-            side_effect=lambda report, mission: (copy.deepcopy(mission), None),
+            side_effect=lambda report, mission, **kwargs: (copy.deepcopy(mission), None),
         ):
             runtime_records = self.bridge._ea_factory_research_source_records(
                 [first, second],
@@ -2789,7 +2789,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         with patch.object(
             self.bridge,
             "_deep_research_report_lineage",
-            side_effect=lambda candidate, candidate_mission: (
+            side_effect=lambda candidate, candidate_mission, **kwargs: (
                 copy.deepcopy(candidate_mission),
                 None,
             ),

@@ -1828,7 +1828,7 @@ void OnTick()
         build, _stage, generation_brief, generation_lineage = (
             self.factory_generation_fixture("ea-build-worker-command")
         )
-        _review_build, review_brief, review_lineage = (
+        review_build, review_brief, review_lineage = (
             self.factory_review_fixture("ea-build-worker-review-command")
         )
         captured_commands: list[list[str]] = []
@@ -1854,6 +1854,10 @@ void OnTick()
             Path(temporary) / "bridge-audit.jsonl",
         ), mock.patch.object(
             self.bridge,
+            "_ea_factory_state_path",
+            return_value=Path(temporary) / "ea-factory-state.json",
+        ), mock.patch.object(
+            self.bridge,
             "load_operator_mode_record",
             return_value={"mode": "auto_guarded"},
         ):
@@ -1869,6 +1873,15 @@ void OnTick()
                 review_lineage,
                 "ea-factory-worker-review",
             )
+            # The dispatch guard reads durable Build ownership before claiming
+            # a worker. Seed exact stage bindings in this isolated store rather
+            # than consulting the developer's real Factory state.
+            self.bridge._ea_factory_stage_row(build, "generate_source")["missionId"] = generation["id"]
+            self.bridge._ea_factory_stage_row(review_build, "source_review")["missionId"] = review["id"]
+            self.bridge.write_json(self.bridge._ea_factory_state_path(), {
+                "schemaVersion": self.bridge.EA_FACTORY_STATE_SCHEMA_VERSION,
+                "builds": [build, review_build],
+            })
             with mock.patch.object(
                 self.bridge,
                 "bridge_status",
@@ -2070,7 +2083,12 @@ void OnTick()
             self.assertEqual(runner_receipt["exitCode"], expected_code)
 
     def test_exact_waiting_factory_stage_is_recovered_without_approval(self) -> None:
-        build, stage, brief, lineage = self.factory_generation_fixture()
+        render_brief = self.bridge._ea_factory_generation_brief
+        with mock.patch.object(
+            self.bridge, "_ea_factory_generation_brief",
+            side_effect=lambda build: render_brief(build, legacy_output_contract=True),
+        ):
+            build, stage, brief, lineage = self.factory_generation_fixture()
         mission = self.legacy_false_approval_mission(
             build,
             stage,
@@ -2099,7 +2117,7 @@ void OnTick()
                 build,
                 stage,
                 "build_strategy_code",
-                brief,
+                self.bridge._ea_factory_generation_brief(build),
             )
             stored = self.bridge.find_mission(mission["id"])
             audits = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
@@ -2159,9 +2177,14 @@ void OnTick()
                     return_value=self.writer_ready_status(),
                 ) as detect,
             ):
-                build, stage, mission, report = (
-                    self.legacy_writer_failure_fixture()
-                )
+                render_brief = self.bridge._ea_factory_generation_brief
+                with mock.patch.object(
+                    self.bridge, "_ea_factory_generation_brief",
+                    side_effect=lambda build: render_brief(build, legacy_output_contract=True),
+                ):
+                    build, stage, mission, report = (
+                        self.legacy_writer_failure_fixture()
+                    )
                 old_authorization_id = mission["execution"]["authorizationId"]
                 prior_report_digest = self.bridge.payload_digest(
                     "ea-factory-invalid-writer-report-v1",

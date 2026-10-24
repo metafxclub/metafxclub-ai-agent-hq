@@ -71,7 +71,7 @@ const AGENT_RUNTIME_CAPABILITY_MODES = Object.freeze([
   { id: "chat", label: "Chat", description: "สนทนา/วิเคราะห์โดยไม่เรียก Tool" },
   { id: "workspace", label: "Workspace", description: "ไฟล์และ Terminal ในพื้นที่ที่อนุญาต" },
   { id: "computer", label: "Computer Use", description: "ควบคุมหน้าจอเมื่อ Backend ยืนยัน" },
-  { id: "full", label: "Full Agent", description: "Workspace + Computer Use + MCP/Plugin" },
+  { id: "full", label: "Full Access", description: "สิทธิ์ไฟล์และ Terminal ตามที่คุณอนุญาต" },
 ]);
 const AGENT_RUNTIME_BLOCKER_PRESENTATION = Object.freeze({
   live_write_sentinel_failed_unapproved_write: "Safety test พบว่า Workspace เขียนได้โดยไม่ส่ง Approval จึงถูกล็อก",
@@ -107,6 +107,8 @@ const AGENT_COLLABORATION_POLL_MS = 15000;
 const MISSION_POLL_MS = 30000;
 const GLOBAL_METATRADER_POLL_MS = 15000;
 const AI_TRADE_HEARTBEAT_FRESH_SECONDS = 20;
+const AI_TRADE_HEARTBEAT_POLL_MS = 5000;
+const AI_TRADE_HEARTBEAT_FETCH_TIMEOUT_MS = 5000;
 const MISSION_FETCH_TIMEOUT_MS = 25000;
 const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;
 const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;
@@ -147,6 +149,7 @@ const DEFAULT_FETCH_TIMEOUT_MS = 6000;
 const BOOT_CONTRACT_FETCH_TIMEOUT_MS = 20000;
 const UI_SESSION_FETCH_TIMEOUT_MS = 5000;
 const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;
+const AI_TRADE_COUNCIL_REPORT_FETCH_TIMEOUT_MS = 60000;
 const NAVIGATION_MASK_LOAD_TIMEOUT_MS = 20000;
 
 const STATUS_LABELS = {
@@ -414,7 +417,7 @@ const PROP_DISPLAY = {
   mission_strategy_table: "โต๊ะวางแผน Mission",
   terminal_workstation: "EA Development Studio",
   left_audit_crystals: "Radar Website Tool",
-  left_signal_cube: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex",
+  left_signal_cube: "Sentiment Universe · 32 สินทรัพย์",
   right_status_crystals: "ศูนย์การเชื่อมต่ออุปกรณ์ HQ",
   front_entry_gate: "จุดเข้า Agent",
 };
@@ -469,8 +472,8 @@ const WORKFLOW_DASHBOARD_IDENTITIES = Object.freeze({
   left_signal_cube: {
     id: "market-news-bias",
     mark: "FX",
-    labelTh: "FX BIAS CENTER",
-    eyebrowTh: "ภาพรวม 28 คู่เงิน ข่าว และช่วงเวลาที่ EA ควรระวัง",
+    labelTh: "SENTIMENT UNIVERSE",
+    eyebrowTh: "Myfxbook Sentiment · MT5 Correlation · ปฏิทินข่าว",
     handoffAgentId: "manager",
   },
   terminal_workstation: {
@@ -643,7 +646,7 @@ const {
 const INDICATOR_SCOUT_PRESENTATION_TAB_IDS = Object.freeze(["discoveries", "archive"]);
 const INDICATOR_SCOUT_DEFAULT_TIME = "09:00";
 const INDICATOR_SCOUT_TIMEZONE = "Asia/Bangkok";
-const INDICATOR_SCOUT_EXPECTED_BATCH_SIZE = 6;
+const INDICATOR_SCOUT_EXPECTED_BATCH_SIZE = 3;
 const BACKEND_OWNED_DAILY_ACTION_IDS = new Set([
   "discover_trading_systems",
   "save_discovery_schedule",
@@ -651,6 +654,84 @@ const BACKEND_OWNED_DAILY_ACTION_IDS = new Set([
   "save_indicator_scout_schedule",
 ]);
 const FX_NEWS_BIAS_PROP_ID = "left_signal_cube";
+// BEGIN SENTIMENT_UNIVERSE_HQ_V1
+const SENTIMENT_UNIVERSE_ENABLED = true;
+const SENTIMENT_UNIVERSE_BASE = "/frontend/public/sentiment-universe/";
+let sentimentUniverseMount = null;
+let sentimentUniverseGeneration = 0;
+let sentimentUniverseModule = null;
+
+function disposeSentimentUniverse() {
+  sentimentUniverseGeneration += 1;
+  sentimentUniverseMount?.handle?.unmount();
+  sentimentUniverseMount?.host?.remove();
+  sentimentUniverseMount = null;
+  els.gameModal?.classList.remove("sentiment-universe-modal");
+}
+
+function renderSentimentUniverse() {
+  const content = els.workflowDashboardContent;
+  if (!content) return;
+  els.gameModal?.classList.add("sentiment-universe-modal");
+  if (els.workspaceTitle) els.workspaceTitle.textContent = "Sentiment Universe · 32 สินทรัพย์";
+  if (els.modalTitle) els.modalTitle.textContent = "Sentiment Universe · 32 สินทรัพย์";
+  if (els.modalWorkflowDashboardWorkspace) els.modalWorkflowDashboardWorkspace.hidden = false;
+  if (els.workflowResultsPanel) els.workflowResultsPanel.hidden = true;
+  content.hidden = false;
+  content.setAttribute("aria-label", "Sentiment Universe · ข้อมูลตลาดแบบดูอย่างเดียว");
+  if (!document.getElementById("sentiment-universe-layout")) {
+    const stylesheet = document.createElement("link");
+    stylesheet.id = "sentiment-universe-layout";
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = "/frontend/src/styles/sentiment-universe.css?v=20261024-hq-v1";
+    document.head.appendChild(stylesheet);
+  }
+  if (sentimentUniverseMount?.host?.parentNode === content) return;
+  disposeSentimentUniverse();
+  els.gameModal?.classList.add("sentiment-universe-modal");
+  const generation = ++sentimentUniverseGeneration;
+  const host = document.createElement("div");
+  host.className = "hq-sentiment-universe-host";
+  const loading = document.createElement("p");
+  loading.className = "hq-sentiment-loading";
+  loading.setAttribute("role", "status");
+  loading.textContent = "กำลังเปิด Sentiment Universe…";
+  host.appendChild(loading);
+  content.replaceChildren(host);
+  sentimentUniverseMount = {host,handle:null};
+  const moduleUrl = `${SENTIMENT_UNIVERSE_BASE}sentiment-universe.js?v=20261024-hq-v1`;
+  if (!sentimentUniverseModule) {
+    sentimentUniverseModule = import(moduleUrl).catch((error) => {
+      sentimentUniverseModule = null;
+      throw error;
+    });
+  }
+  sentimentUniverseModule.then((module) => {
+    if (generation !== sentimentUniverseGeneration || !host.isConnected || !state.modal.open
+      || state.modal.type !== "prop" || state.modal.id !== FX_NEWS_BIAS_PROP_ID) return;
+    host.replaceChildren();
+    sentimentUniverseMount.handle = module.mountSentimentUniverse(host, {
+      assetBase: SENTIMENT_UNIVERSE_BASE,
+      marketUrl: `${SENTIMENT_UNIVERSE_BASE}market.json`,
+      setupUrl: "http://127.0.0.1:4197/connect",
+    });
+  }).catch(() => {
+    if (generation !== sentimentUniverseGeneration || !host.isConnected) return;
+    const message = document.createElement("p");
+    message.setAttribute("role", "alert");
+    message.textContent = "ยังเปิด Sentiment Universe ไม่สำเร็จ ตรวจบริการข้อมูลในเครื่องแล้วลองอีกครั้ง";
+    const setup = document.createElement("a");
+    setup.href = "http://127.0.0.1:4197/connect";
+    setup.target = "_blank"; setup.rel = "noopener noreferrer";
+    setup.textContent = "ตั้งค่า Myfxbook / MT5";
+    const retry = document.createElement("button");
+    retry.type = "button"; retry.textContent = "ลองเปิดอีกครั้ง";
+    retry.addEventListener("click", () => {disposeSentimentUniverse();renderSentimentUniverse();});
+    host.replaceChildren(message,setup,retry);
+  });
+}
+// END SENTIMENT_UNIVERSE_HQ_V1
+
 const FX_NEWS_BIAS_PRESENTATION_TAB_IDS = Object.freeze(["pair_bias", "today", "history"]);
 const FX_NEWS_BIAS_DEFAULT_TIMES = Object.freeze(["00:00", "12:00"]);
 const FX_NEWS_BIAS_TIMEZONE = "Asia/Bangkok";
@@ -795,7 +876,7 @@ const EA_FACTORY_STAGE_COPY = Object.freeze({
   backtest_recheck: {
     labelTh: "6 เปิด Terminal / Visual Backtest",
     titleTh: "เปิด MT4/MT5 ทำ Visual Backtest และตรวจ Source Contract 6 กลุ่ม",
-    descriptionTh: "ใช้เฉพาะ MT4/MT5 โดยต้องเห็น Strategy Tester, เปิด Visual mode และตรวจ Source Contract 10 ช่อง/6 กลุ่มแบบ Static; ถ้าทดสอบจบแต่ได้ 0 ออเดอร์ ระบบจะเก็บหลักฐานและเตือนให้ตรวจข้อมูล/เงื่อนไขโดยไม่กด Start ซ้ำ; Pine Script จะข้ามขั้นนี้ตามสถานะ Backend",
+    descriptionTh: "ใช้เฉพาะ MT4/MT5 โดยต้องเห็น Strategy Tester, เปิด Visual mode และตรวจ Source Contract 10 ช่อง/6 กลุ่มแบบ Static; ถ้าได้ 0 ออเดอร์หรือคุณภาพข้อมูลไม่ผ่าน ระบบจะเก็บหลักฐานและหยุดก่อน Final Report โดยไม่กด Start ซ้ำ; Pine Script จะข้ามขั้นนี้ตามสถานะ Backend",
   },
   artifacts_report: {
     labelTh: "7 ไฟล์และ Report",
@@ -1531,6 +1612,12 @@ const state = {
       confirmationInFlight: false,
       confirmationMessage: "",
       confirmationTone: "neutral",
+      confirmationReportKey: "",
+      confirmationReportSource: null,
+      confirmationSheetKey: "",
+      confirmationReceipt: null,
+      confirmationRequest: null,
+      confirmationRefreshMessage: "",
       simulationRegime: "trend_up",
       dataset: null,
       datasetStatus: "idle",
@@ -1544,6 +1631,9 @@ const state = {
     eaFactory: {
       selectedSourceId: "",
       selectedBuildId: "",
+      explicitPageId: "",
+      confirmedCreateBuildId: "",
+      cancelledContinuationIntents: {},
       selectedPlatform: "",
       selectedArtifactKind: "",
       sourceMode: "",
@@ -1552,6 +1642,8 @@ const state = {
       importedRecordDigest: "",
       importedCatalogDigest: "",
       importedSnapshotDigest: "",
+      pendingGoogleSheetImport: null,
+      readContextRevision: 0,
       googleSheetCatalog: {
         schemaVersion: "",
         status: "idle",
@@ -1841,6 +1933,14 @@ const state = {
     previousTimeframe: "",
     changedAt: null,
   },
+  aiTradeCouncilHeartbeat: {
+    data: null,
+    status: "idle",
+    controller: null,
+    timer: null,
+    nextPollAt: 0,
+    failures: 0,
+  },
   aiTradeCouncilHistoryPages: {
     orders: {
       items: [],
@@ -1974,6 +2074,7 @@ let eaFactoryGoogleSheetCatalogAbortController = null;
 let eaFactoryGoogleSheetCatalogRefreshTimer = null;
 let eaFactoryGoogleSheetCatalogRefreshDueAt = 0;
 let eaFactoryActiveProgressPollTimer = null;
+let eaFactoryDeferredReadPollingContext = null;
 let eaFactoryActiveActionAbortController = null;
 
 const PROP_HIT_ALPHA_THRESHOLD = 42;
@@ -2360,7 +2461,7 @@ const agentWaypoints = {
   left_server_racks: { x: 28.0, y: 46.0, label: "คลังวิจัยระบบเทรด" },
   right_server_racks: { x: 70.0, y: 46.0, label: "โรงงานสร้าง EA และ Indicator" },
   left_audit_crystals: { x: 22.0, y: 72.0, label: "Radar Website Tool" },
-  left_signal_cube: { x: 24.2, y: 66.0, label: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex" },
+  left_signal_cube: { x: 24.2, y: 66.0, label: "Sentiment Universe" },
   right_status_crystals: { x: 77.0, y: 59.0, label: "ศูนย์การเชื่อมต่ออุปกรณ์ HQ" },
 };
 
@@ -2738,6 +2839,7 @@ function runInitialPollingRead() {
 }
 
 function stopAutomaticPolling() {
+  stopAiTradeHeartbeatPolling();
   if (state.codexRate.timer) window.clearInterval(state.codexRate.timer);
   if (state.operatorMode.timer) window.clearInterval(state.operatorMode.timer);
   if (state.agentCollaboration.timer) window.clearInterval(state.agentCollaboration.timer);
@@ -2758,6 +2860,7 @@ function stopAutomaticPolling() {
 }
 
 function startGlobalMetatraderPolling() {
+  startAiTradeHeartbeatPolling();
   const hub = state.globalMetatraderHub;
   if (hub.pollTimer) return;
   // Terminal selection is shared Backend state. Every visible tab refreshes it
@@ -2829,10 +2932,12 @@ function initializePollingLeadership() {
   });
   window.addEventListener("focus", () => {
     if (document.visibilityState === "visible") {
+      startAiTradeHeartbeatPolling();
       void pollOpenPropReport({ force: true });
       void loadGlobalMetatraderHub({ preserveMessage: true }).catch(() => null);
     }
   });
+  window.addEventListener("blur", stopAiTradeHeartbeatPolling);
   window.addEventListener("storage", (event) => {
     if (event.key !== POLLING_LEADER_STORAGE_KEY) return;
     const current = readPollingLeaderLease();
@@ -3002,7 +3107,9 @@ function renderCodexRateLimit(snapshot = state.codexRate.snapshot) {
   els.codexRateSummary.textContent = `เหลือ ${formatCodexRatePercent(primary.remainingPercent)} • ใช้แล้ว ${formatCodexRatePercent(primary.usedPercent)}`;
   els.codexRateReset.textContent = `${formatCodexRateWindow(primary.windowDurationMinutes)} • ${formatCodexRateReset(primary.resetsAt)}`;
   const checkedLabel = formatCodexRateCheckedAt(snapshot.checkedAt);
-  els.codexRateFreshness.textContent = displayState === "stale" ? `ข้อมูลเดิม • ${checkedLabel}` : `ข้อมูลล่าสุด • ${checkedLabel}`;
+  els.codexRateFreshness.textContent = displayState === "stale" ? `ข้อมูลเดิม • ${checkedLabel}`
+    : displayState === "unavailable" ? `ยังยืนยันข้อมูลล่าสุดไม่ได้ • ${checkedLabel}`
+      : `ข้อมูลล่าสุด • ${checkedLabel}`;
   updateCodexRateProgress(els.codexRateProgressTrack, els.codexRateProgress, primary, "Codex");
 
   if (snapshot.secondary) {
@@ -6235,7 +6342,11 @@ function getSubjectImage(subject, type) {
 
 function getPropertyRole(subject) {
   if (!subject?.id) return null;
-  return state.propReports[subject.id]?.propertyRole || null;
+  // SENTIMENT_UNIVERSE_COPY_V1: only display copy changes; retain role/backend IDs.
+  const role = state.propReports[subject.id]?.propertyRole || null;
+  return SENTIMENT_UNIVERSE_ENABLED && subject.id === FX_NEWS_BIAS_PROP_ID
+    ? {...role,displayTitle: PROP_DISPLAY[FX_NEWS_BIAS_PROP_ID],purpose: getEquipmentPurpose(subject),openingMessage: "ข้อมูลตลาดแบบดูอย่างเดียวจาก Myfxbook, MT5 และปฏิทินข่าว"}
+    : role;
 }
 
 function getEquipmentPurpose(subject, fallback = "") {
@@ -6247,7 +6358,7 @@ function getEquipmentPurpose(subject, fallback = "") {
     [EA_OPTIMIZATION_LAB_PROP_ID]: "วางแผนและติดตามการทดสอบ EA พร้อมช่วงพารามิเตอร์และผลวิเคราะห์ โดย MT4 ใช้วางแผน และ MT5 ใช้รันเมื่อระบบพร้อม",
     terminal_workstation: "พัฒนา Source MQL4 / MQL5 ที่ได้รับอนุญาต พร้อม Brief เป้าหมายประสิทธิภาพ และรายงานผลงาน",
     [INDICATOR_SCOUT_PROP_ID]: "รวบรวม Indicator, EA และเครื่องมือจากเว็บไซต์สาธารณะ พร้อมหลักฐาน ผลย้อนหลัง และสถานะแหล่งข้อมูล",
-    [FX_NEWS_BIAS_PROP_ID]: "ติดตามข่าวและแนวโน้ม 28 คู่เงินในระยะสั้น กลาง และยาว พร้อมกำหนดเวลาอัปเดตข่าว โดยไม่ส่งคำสั่งเทรด",
+    [FX_NEWS_BIAS_PROP_ID]: "ดู Sentiment ชุมชน Myfxbook ความสัมพันธ์ราคาจาก MT5 และข่าว สำหรับ Forex 28 คู่ Metals 2 และ Oil 2 โดย Oil แสดงเมื่อมีข้อมูลที่ใช้ได้ ไม่มีการส่งคำสั่งเทรด",
     [HQ_CONNECTION_HUB_PROP_ID]: "ตรวจความพร้อมและจุดติดขัดของอุปกรณ์ทั้งหมดใน HQ พร้อมเปิดอุปกรณ์ที่ต้องการตั้งค่าหรือตรวจสอบ",
   };
   return purposes[subject?.id] || fallback;
@@ -7018,6 +7129,142 @@ function formatAgentAttachmentBytes(value) {
   return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
+function agentAttachmentExtensionsForModel(policy, supportsImage) {
+  if (policy?.inputReady !== true || !Array.isArray(policy.acceptedExtensions)) return [];
+  return policy.acceptedExtensions.filter((extension) => {
+    const image = [".png", ".jpg", ".jpeg", ".webp"].includes(extension);
+    return image ? supportsImage && policy.imageInputReady !== false : policy.fileInputReady === true;
+  });
+}
+
+function normalizeAgentInputAttachments(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, AGENT_RUNTIME_ATTACHMENT_HARD_MAX_FILES).filter((item) => (
+    item && typeof item === "object" && !Array.isArray(item)
+  )).map((item) => ({
+    name: safeAgentAttachmentName(item.fileName || item.name || item.basename, "ไฟล์แนบ"),
+    url: item.available === true ? getSafeAgentRuntimeArtifactUrl(item.downloadUrl || item.url) : "",
+    byteSize: Number.isFinite(Number(item.byteSize)) ? Number(item.byteSize) : null,
+  }));
+}
+
+function appendAgentInputAttachments(container, attachments) {
+  if (!attachments?.length) return;
+  const list = document.createElement("div");
+  list.className = "agent-runtime-input-attachment-list";
+  list.setAttribute("aria-label", "ไฟล์ที่ส่งพร้อมข้อความนี้");
+  attachments.forEach((item) => {
+    const url = getSafeAgentRuntimeArtifactUrl(item.url);
+    const chip = document.createElement(url ? "a" : "span");
+    chip.textContent = safeAgentAttachmentName(item.name, "ไฟล์แนบ");
+    if (url) {
+      chip.href = url;
+      chip.download = chip.textContent;
+      chip.setAttribute("aria-label", `ดาวน์โหลด ${chip.textContent}`);
+    }
+    list.appendChild(chip);
+  });
+  container.appendChild(list);
+}
+
+function appendAgentMessageInline(container, value) {
+  // Model Markdown is untrusted. Only DOM text and vetted HTTP(S) links render;
+  // local output images/files use the separate immutable artifact gallery.
+  const text = String(value || "");
+  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]{1,300}\]\((?:https?:\/\/)[^\s<>)]{1,2000}\)|https?:\/\/[^\s<>"'`]{1,2000})/g;
+  const appendText = (part) => {
+    if (!part) return;
+    const span = document.createElement("span");
+    span.textContent = part;
+    container.appendChild(span);
+  };
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    appendText(text.slice(cursor, match.index));
+    const token = match[0];
+    if (token.startsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = token.slice(1, -1);
+      container.appendChild(code);
+    } else if (token.startsWith("**")) {
+      const strong = document.createElement("strong");
+      strong.textContent = token.slice(2, -2);
+      container.appendChild(strong);
+    } else {
+      const markdown = token.match(/^\[([^\]]+)\]\((.+)\)$/);
+      const rawUrl = markdown ? markdown[2] : token.replace(/[.,;:!?]+$/, "");
+      const url = getSafeExternalHttpUrl(rawUrl);
+      if (url) {
+        const link = document.createElement("a");
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = markdown ? markdown[1] : rawUrl;
+        container.appendChild(link);
+        if (!markdown) appendText(token.slice(rawUrl.length));
+      } else appendText(token);
+    }
+    cursor = match.index + token.length;
+  }
+  appendText(text.slice(cursor));
+}
+
+function appendAgentMessageMarkdown(container, value) {
+  const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+  let codeLines = null;
+  let language = "";
+  let list = null;
+  const flushCode = () => {
+    if (codeLines === null) return;
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    code.textContent = codeLines.join("\n");
+    pre.appendChild(code);
+    pre.setAttribute("tabindex", "0");
+    if (language) pre.setAttribute("aria-label", `โค้ด ${language}`);
+    if (codeLines.length > 24) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      details.className = "agent-message-code-details";
+      summary.textContent = `ดูโค้ด ${language || ""} (${codeLines.length} บรรทัด)`;
+      details.append(summary, pre);
+      container.appendChild(details);
+    } else container.appendChild(pre);
+    codeLines = null;
+  };
+  lines.forEach((line) => {
+    const fence = line.match(/^\s*```([a-zA-Z0-9_+#.-]*)\s*$/);
+    if (fence) {
+      list = null;
+      if (codeLines !== null) flushCode();
+      else { codeLines = []; language = fence[1].slice(0, 40); }
+      return;
+    }
+    if (codeLines !== null) { codeLines.push(line); return; }
+    if (!line.trim()) { list = null; return; }
+    const listItem = line.match(/^\s*(?:([-*])|\d+[.)])\s+(.+)$/);
+    if (listItem) {
+      const tag = listItem[1] ? "ul" : "ol";
+      if (!list || list.dataset.listKind !== tag) {
+        list = document.createElement(tag);
+        list.dataset.listKind = tag;
+        container.appendChild(list);
+      }
+      const item = document.createElement("li");
+      appendAgentMessageInline(item, listItem[2]);
+      list.appendChild(item);
+      return;
+    }
+    list = null;
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    const quote = line.match(/^>\s?(.*)$/);
+    const block = document.createElement(heading ? "h4" : quote ? "blockquote" : "p");
+    appendAgentMessageInline(block, heading ? heading[2] : quote ? quote[1] : line);
+    container.appendChild(block);
+  });
+  flushCode();
+}
+
 function appendAgentRuntimeArtifactCards(container, artifacts) {
   if (state.agentRuntime.status?.attachments?.outputReady !== true) return;
   const safeArtifacts = normalizeAgentRuntimeArtifacts(artifacts);
@@ -7058,7 +7305,12 @@ function appendAgentRuntimeArtifactCards(container, artifacts) {
     meta.textContent = `${artifact.kind} • ${artifact.mediaType} • ${formatAgentAttachmentBytes(artifact.byteSize)}`;
     action.className = "agent-runtime-artifact-action";
     action.textContent = artifact.imagePreview ? "เปิดตัวอย่างรูป" : "ดาวน์โหลดไฟล์";
-    copy.append(name, meta, action);
+    const download = document.createElement("a");
+    download.className = "agent-runtime-artifact-download";
+    download.href = artifact.url;
+    download.download = artifact.name;
+    download.textContent = artifact.imagePreview ? "ดาวน์โหลดรูป" : "ดาวน์โหลดไฟล์";
+    copy.append(name, meta, action, download);
     card.append(link, copy);
     gallery.appendChild(card);
   });
@@ -7125,11 +7377,14 @@ function renderChatLog(subject, type) {
     const item = document.createElement("div");
     item.className = `chat-line ${line.side || "agent"}`;
     const speaker = document.createElement("strong");
-    const text = document.createElement("span");
+    const text = document.createElement("div");
     speaker.textContent = line.speaker || "Agent";
-    text.textContent = line.text || "";
+    text.className = "agent-message-content";
+    if (type === "agent" && line.side !== "user") appendAgentMessageMarkdown(text, line.text || "");
+    else text.textContent = line.text || "";
     item.append(speaker, text);
-    appendAgentInputAttachmentNames(item, line.attachmentNames);
+    if (line.inputAttachments?.length) appendAgentInputAttachments(item, line.inputAttachments);
+    else appendAgentInputAttachmentNames(item, line.attachmentNames);
     appendAgentRuntimeArtifactCards(item, line.artifacts);
     els.modalChatLog.appendChild(item);
   });
@@ -8330,7 +8585,7 @@ function safeAgentChatReplyText(value, fallback = "Agent ยังไม่ส�
     .replace(/\b[A-Za-z]:\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
     .replace(/\\\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
     .replace(/(^|\s)\/(?:Users|home|root|var|etc|tmp|opt|srv)\/[^,\n;|]+/gi, "$1[ปกปิดตำแหน่งไฟล์]");
-  const limit = 5000;
+  const limit = 50000;
   const marker = "\n… [แสดงบางส่วน: ข้อความยาวเกินขอบเขตหน้าจอ]";
   return safeText.length > limit
     ? `${safeText.slice(0, Math.max(0, limit - marker.length))}${marker}`
@@ -8455,11 +8710,15 @@ function codexQuotaConnectionItem(codexUsage = {}) {
       action: null,
     };
   }
+  const displayState = getCodexRateDisplayState(snapshot);
+  const uncertain = ["stale", "unavailable", "loading"].includes(displayState);
+  const freshness = displayState === "stale" ? "ข้อมูลโควตาเดิม • รอตรวจข้อมูลล่าสุด"
+    : uncertain ? "ยังยืนยันโควตาล่าสุดไม่ได้" : "ข้อมูลโควตาล่าสุด";
   return {
     id: "codex_account_quota",
     labelTh: "โควตาบัญชี Codex",
-    status: snapshot.limitReached ? "blocked" : "connected",
-    detailTh: `${activityLabel} • ข้อมูลรวมของบัญชี: เหลือ ${formatCodexRatePercent(snapshot.primary.remainingPercent)} • ใช้แล้ว ${formatCodexRatePercent(snapshot.primary.usedPercent)} • ${formatCodexRateReset(snapshot.primary.resetsAt)}`,
+    status: uncertain ? "needs_attention" : snapshot.limitReached ? "blocked" : "connected",
+    detailTh: `${activityLabel} • ${freshness} • ตรวจเมื่อ ${formatCodexRateCheckedAt(snapshot.checkedAt)} • ข้อมูลรวมของบัญชี: เหลือ ${formatCodexRatePercent(snapshot.primary.remainingPercent)} • ใช้แล้ว ${formatCodexRatePercent(snapshot.primary.usedPercent)} • ${formatCodexRateReset(snapshot.primary.resetsAt)}`,
     required: false,
     action: null,
   };
@@ -9366,6 +9625,228 @@ async function applyGlobalMetatraderTarget(platform) {
     renderGlobalMetatraderHubControl();
   }
 }
+function aiTradeHeartbeatSelection() {
+  const hub = state.globalMetatraderHub?.readModel;
+  const platform = String(hub?.activePlatform || "").toLowerCase();
+  if (!["mt4", "mt5"].includes(platform)) return null;
+  const target = hub?.platforms?.[platform]?.targets?.find((item) => (
+    item?.propId === AI_TRADE_COUNCIL_PROP_ID && item?.status === "configured"
+  ));
+  const candidateId = String(target?.selectedCandidate?.candidateId || "");
+  const revision = target?.selectionRevision;
+  if (!candidateId || !Number.isInteger(revision) || revision < 1) return null;
+  return { platform, candidateId, revision, key: `${platform}:${candidateId}:${revision}` };
+}
+
+function canPollAiTradeHeartbeat() {
+  return document.visibilityState === "visible"
+    && (typeof document.hasFocus !== "function" || document.hasFocus())
+    && state.modal.open && state.modal.type === "prop"
+    && state.modal.id === AI_TRADE_COUNCIL_PROP_ID;
+}
+
+function stopAiTradeHeartbeatPolling() {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (heartbeat.timer) window.clearInterval(heartbeat.timer);
+  heartbeat.timer = null;
+  heartbeat.controller?.abort();
+  heartbeat.data = null;
+  heartbeat.status = "idle";
+  heartbeat.nextPollAt = 0;
+}
+
+function startAiTradeHeartbeatPolling() {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (!canPollAiTradeHeartbeat()) return;
+  if (!heartbeat.timer) heartbeat.timer = window.setInterval(() => {
+    void pollAiTradeHeartbeat();
+  }, AI_TRADE_HEARTBEAT_POLL_MS);
+  void pollAiTradeHeartbeat();
+}
+
+async function pollAiTradeHeartbeat() {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (!canPollAiTradeHeartbeat() || heartbeat.controller || Date.now() < heartbeat.nextPollAt) return null;
+  const selection = aiTradeHeartbeatSelection();
+  if (!selection) {
+    heartbeat.data = null;
+    heartbeat.status = "unavailable";
+    return null;
+  }
+  const controller = new AbortController();
+  heartbeat.controller = controller;
+  try {
+    const result = await fetchJson("/api/mt4-trade-gateway/status", {
+      signal: controller.signal, timeoutMs: AI_TRADE_HEARTBEAT_FETCH_TIMEOUT_MS,
+    });
+    if (controller.signal.aborted || !canPollAiTradeHeartbeat()) return null;
+    const gateway = result?.tradeGateway;
+    const initStatus = gateway?.initStatus || {};
+    const current = aiTradeHeartbeatSelection();
+    const matches = result?.ok === true && current?.key === selection.key
+      && gateway?.selectedCandidateId === selection.candidateId
+      && gateway?.selectionRevision === selection.revision
+      && String(gateway?.selectedPlatform || "").toLowerCase() === selection.platform;
+    // This observation belongs only to the connection display. Never merge it
+    // into the report, market snapshot, consensus or execution readiness.
+    heartbeat.data = matches ? {
+      selectionKey: selection.key,
+      receivedAt: Date.now(),
+      connected: gateway.connected === true,
+      observedAt: gateway.observedAt,
+      ageSeconds: gateway.ageSeconds,
+      reasonCode: gateway.reasonCode,
+      executionGuardReason: gateway.executionGuardReady === true ? "" : gateway.executionGuardReason,
+      currentStatus: {
+        mode: gateway.mode, status: gateway.status,
+        executionGuardReady: gateway.executionGuardReady,
+        executionGuardReason: gateway.executionGuardReason,
+        liveArmed: gateway.liveArmed,
+        liveOrderExecutionAvailable: gateway.liveOrderExecutionAvailable,
+        demoOrderExecutionAvailable: gateway.demoOrderExecutionAvailable,
+        shadowValidationAvailable: gateway.shadowValidationAvailable,
+        killSwitchActive: gateway.killSwitchActive,
+      },
+      initStatus: {
+        available: initStatus.available === true,
+        severity: initStatus.severity, stage: initStatus.stage,
+        reasonCode: initStatus.reasonCode, warningCode: initStatus.warningCode,
+        observedAt: initStatus.observedAt, ageSeconds: initStatus.ageSeconds,
+        stale: initStatus.stale === true,
+        supersededByLiveStatus: initStatus.supersededByLiveStatus === true,
+        eaAttached: initStatus.eaAttached === true,
+        runtimeReady: typeof initStatus.runtimeReady === "boolean" ? initStatus.runtimeReady : null,
+        inputValidation: initStatus.inputValidation && typeof initStatus.inputValidation === "object" ? {
+          field: initStatus.inputValidation.field,
+          value: initStatus.inputValidation.value,
+          minimum: initStatus.inputValidation.minimum,
+          maximum: initStatus.inputValidation.maximum,
+          minimumInclusive: initStatus.inputValidation.minimumInclusive,
+          maximumInclusive: initStatus.inputValidation.maximumInclusive,
+          constraint: initStatus.inputValidation.constraint,
+        } : null,
+      },
+    } : null;
+    heartbeat.status = matches ? "ready" : "unavailable";
+    heartbeat.failures = 0;
+    heartbeat.nextPollAt = Date.now() + AI_TRADE_HEARTBEAT_POLL_MS;
+    return heartbeat.data;
+  } catch {
+    heartbeat.data = null;
+    if (controller.signal.aborted) {
+      heartbeat.status = "idle";
+      heartbeat.nextPollAt = 0;
+      return null;
+    }
+    heartbeat.status = "error";
+    heartbeat.failures = Math.min(3, heartbeat.failures + 1);
+    heartbeat.nextPollAt = Date.now() + Math.min(30000, AI_TRADE_HEARTBEAT_POLL_MS * 2 ** heartbeat.failures);
+    return null;
+  } finally {
+    heartbeat.controller = null;
+    if (canPollAiTradeHeartbeat()) renderOpenAiTradeCouncilRuntimeStatus();
+  }
+}
+
+function aiTradeHeartbeatDisplayModel() {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (!heartbeat || heartbeat.status === "idle") return null;
+  const selection = aiTradeHeartbeatSelection();
+  if (!selection) return null;
+  const data = heartbeat.data;
+  const matches = data?.selectionKey === selection.key;
+  const initStatus = matches ? data?.initStatus || {} : {};
+  const initObservedAt = Date.parse(String(initStatus.observedAt || ""));
+  const initAge = Math.max(Number(initStatus.ageSeconds) || 0, (Date.now() - initObservedAt) / 1000, 0);
+  const initError = initStatus.available === true && initStatus.severity === "error"
+    && initStatus.stale !== true && initStatus.supersededByLiveStatus !== true
+    && Number.isFinite(initAge) && heartbeat.status === "ready"
+    && Date.now() - Number(data?.receivedAt || 0) <= AI_TRADE_HEARTBEAT_FRESH_SECONDS * 1000;
+  const initDiagnostic = initError ? signalGatewayInitStatusMessage(initStatus) : null;
+  const observedAtMs = Date.parse(String(data?.observedAt || ""));
+  const age = Math.max(Number(data?.ageSeconds) || 0, (Date.now() - observedAtMs) / 1000, 0);
+  const connected = heartbeat.status === "ready" && matches && !initError && data.connected === true
+    && Number.isFinite(age) && age <= AI_TRADE_HEARTBEAT_FRESH_SECONDS;
+  return {
+    platform: selection.platform.toUpperCase(), candidateId: selection.candidateId,
+    selected: true, state: initError ? "error" : connected ? "connected" : "waiting",
+    reasonCode: initError ? String(initStatus.reasonCode || "gateway_init_error")
+      : !matches ? "selected_candidate_heartbeat_pending"
+      : connected ? "ready" : data?.connected === true ? "gateway_status_stale"
+        : String(data?.reasonCode || "gateway_status_not_observed"),
+    observedAt: matches ? String(data?.observedAt || "") : "",
+    ageSeconds: Number.isFinite(age) ? age : null,
+    freshForSeconds: AI_TRADE_HEARTBEAT_FRESH_SECONDS,
+    messageTh: initDiagnostic?.text || (connected ? "EA ส่ง heartbeat สดแล้ว • สถานะการเทรดตรวจแยกจากรายงานสภา"
+      : "ยังยืนยัน heartbeat สดจาก Terminal ที่เลือกไม่ได้"),
+    remediationTh: initError ? signalExecutionGuardRecoveryLabel(initStatus.reasonCode)
+      : connected ? "" : "ตรวจว่า EA ยังทำงานและ Local Runner เชื่อมต่ออยู่",
+    executionGuardReady: false,
+    executionGuardReason: matches ? String(data?.executionGuardReason || "") : "",
+  };
+}
+
+function signalTradingReportPendingLabel(runtime = {}) {
+  const reason = runtime.selectedConnectionHealth?.reasonCode;
+  if (!["gateway_status_stale", "council_report_expired", "council_report_refresh_failed"].includes(reason)) return "";
+  return aiTradeHeartbeatDisplayModel()?.state === "connected"
+    ? "รอรายงานสถานะการเทรด • EA ยังส่ง heartbeat สด"
+    : "สถานะรายงานหมดอายุ • รอตรวจการเชื่อมต่อใหม่";
+}
+
+function signalCurrentInitFailureDisplay(runtime = {}) {
+  const display = aiTradeHeartbeatDisplayModel();
+  if (display?.state !== "error"
+    || display.candidateId !== runtime.selectedCandidateId
+    || display.platform !== String(runtime.selectedPlatform || "").toUpperCase()) return null;
+  // Current, selection-bound diagnostics explain unavailable runtime data.
+  // They never replace the report's readiness or execution authority.
+  return { ...display, label: `EA ถูกบล็อก • ${display.reasonCode}` };
+}
+
+function signalCurrentGatewayStatusDisplay(runtime = {}) {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (!canPollAiTradeHeartbeat() || !heartbeat || heartbeat.status === "idle") return null;
+  const selection = aiTradeHeartbeatSelection();
+  const data = heartbeat.data;
+  const current = data?.currentStatus;
+  const pending = "รอรายงานสถานะการเทรด • รอสถานะ EA ล่าสุด";
+  const unavailable = { status: pending, mode: pending, summary: pending, tone: "warning" };
+  // Separate display projection only: never replace report/snapshot authority.
+  // A failed or older observation must not resurrect the report's previous READY.
+  if (!selection || heartbeat.status !== "ready" || data?.selectionKey !== selection.key
+    || runtime.selectedCandidateId !== selection.candidateId
+    || String(runtime.selectedPlatform || "").toLowerCase() !== selection.platform) return unavailable;
+  const receivedAge = Date.now() - data.receivedAt;
+  const observedAge = (Date.now() - Date.parse(String(data.observedAt || ""))) / 1000;
+  const fresh = Number.isFinite(receivedAge) && receivedAge >= 0
+    && receivedAge <= AI_TRADE_HEARTBEAT_FRESH_SECONDS * 1000
+    && Number.isFinite(observedAge) && observedAge >= 0
+    && typeof data.ageSeconds === "number" && Number.isFinite(data.ageSeconds) && data.ageSeconds >= 0
+    && Math.max(observedAge, data.ageSeconds) <= AI_TRADE_HEARTBEAT_FRESH_SECONDS;
+  const complete = current && ["shadow", "demo", "live"].includes(current.mode)
+    && typeof current.status === "string" && current.status.trim()
+    && typeof current.executionGuardReason === "string"
+    && ["executionGuardReady", "liveArmed", "liveOrderExecutionAvailable",
+      "demoOrderExecutionAvailable", "shadowValidationAvailable", "killSwitchActive"]
+      .every((key) => typeof current[key] === "boolean");
+  if (!fresh || !complete || signalCurrentInitFailureDisplay(runtime)) return unavailable;
+  const mode = current.mode.toUpperCase();
+  const guardReady = data.connected === true && current.executionGuardReady === true
+    && current.killSwitchActive === false;
+  const summary = data.connected !== true ? "สถานะ EA ล่าสุด: ยังไม่เชื่อม EA"
+    : current.killSwitchActive ? "สถานะ EA ล่าสุด: Kill Switch กำลังหยุดระบบ"
+      : guardReady ? (current.mode === "shadow"
+        ? "สถานะ EA ล่าสุด: Execution Guard พร้อมตรวจคำสั่ง • SHADOW ไม่ส่ง Order"
+        : `สถานะ EA ล่าสุด: Execution Guard พร้อม • ${mode} • สิทธิ์ส่ง Order ตรวจจากรอบวิเคราะห์ใหม่`)
+        : `สถานะ EA ล่าสุด: ${signalExecutionGuardReasonLabel(current.executionGuardReason || "GUARD_NOT_READY")}`;
+  return {
+    status: data.connected === true ? `EA ล่าสุด: ${current.status}` : "EA ล่าสุด: ยังไม่เชื่อม",
+    mode: data.connected === true ? `${mode}${current.mode === "shadow" ? " • ไม่ส่ง Order" : ""}` : "ยังไม่เชื่อม EA",
+    summary, tone: guardReady ? "info" : "warning",
+  };
+}
+
 function aiTradePlatformConnectionModels(report = {}, checklist = {}) {
   const council = signalCouncilModel(report);
   const projection = council?.platformConnections && typeof council.platformConnections === "object"
@@ -9401,6 +9882,8 @@ function aiTradePlatformConnectionModels(report = {}, checklist = {}) {
   const projectionRefreshFailed = reportLoadState.status === "error";
 
   return ["MT4", "MT5"].map((platform) => {
+    const heartbeatDisplay = aiTradeHeartbeatDisplayModel();
+    if (heartbeatDisplay?.platform === platform) return heartbeatDisplay;
     const key = platform.toLowerCase();
     const supplied = projectedItems.find((item) => (
       String(item?.platform || "").toLowerCase() === key
@@ -9756,6 +10239,7 @@ function renderAiTradeTerminalSummary(subject, checklist, canDiscoverMetatrader,
   const applicable = subject?.id === AI_TRADE_COUNCIL_PROP_ID;
   els.modalAiTradeTerminalSummary.hidden = !applicable;
   if (!applicable) return;
+  startAiTradeHeartbeatPolling();
 
   const connectionModels = aiTradePlatformConnectionModels(report || {}, checklist || {});
   connectionModels.forEach(renderAiTradePlatformStatusCard);
@@ -9765,7 +10249,7 @@ function renderAiTradeTerminalSummary(subject, checklist, canDiscoverMetatrader,
   const otherConnected = connectionModels.find((item) => item.state === "connected" && !item.selected);
   els.modalAiTradeTerminalSummary.dataset.state = selected?.state || "waiting";
   if (selected?.state === "connected") {
-    setConnectionBadge(els.modalAiTradeTerminalBadge, "connected", `${selected.platform} พร้อม`);
+    setConnectionBadge(els.modalAiTradeTerminalBadge, "connected", `${selected.platform} เชื่อมแล้ว`);
   } else if (selected?.state === "error") {
     setConnectionBadge(els.modalAiTradeTerminalBadge, "error", `${selected.platform} ผิดพลาด`);
   } else {
@@ -10729,6 +11213,36 @@ function signalConnectionIsReady(item = null) {
     && !["disabled", "coming_soon", "contract_only"].includes(adapterStatus);
 }
 
+function signalGatewayInputValidationText(validation) {
+  if (!validation || typeof validation !== "object" || Array.isArray(validation)) return "";
+  const allowedFields = new Set([
+    "PollIntervalSeconds", "SnapshotIntervalSeconds", "SnapshotBars", "MaxCommandBytes",
+    "MaxCommandTtlSeconds", "MaxHeartbeatTtlSeconds", "MaxClockSkewSeconds", "MaxSpreadPoints",
+    "SlippagePoints", "MagicNumber", "MaxSnapshotAgeSeconds", "MaxSignalDriftPoints", "MaxQuoteAgeSeconds",
+    "MaxManagedOpenPositions", "MaxManagedTotalLots", "FixedLot", "MaxTradesPerBrokerDay",
+    "MaxLossPerTradePercent", "MaxDailyLossPercent", "MaxManagedWeeklyLossPercent", "MaxConsecutiveManagedLosses",
+    "ConsecutiveLossCooldownMinutes", "MaxAccountEquityDrawdownPercent", "MinRewardRiskRatio",
+    "MinProjectedMarginLevelPercent", "RequireHeartbeat",
+  ]);
+  const { field, value, minimum, maximum, minimumInclusive, maximumInclusive, constraint } = validation;
+  if (!allowedFields.has(field) || (value !== null && !Number.isFinite(value))) return "";
+  const expectedConstraint = field === "FixedLot" ? "at_most_MaxManagedTotalLots"
+    : field === "RequireHeartbeat" ? "required_for_execution" : "range";
+  if (constraint !== expectedConstraint) return "";
+  const actual = value === null ? "ค่าตัวเลขไม่ถูกต้อง" : String(value);
+  if (constraint === "required_for_execution") return `${field} = ${actual} • ต้องเปิดใช้งาน (= 1) สำหรับส่งคำสั่ง`;
+  if ((minimum !== null && !Number.isFinite(minimum)) || (maximum !== null && !Number.isFinite(maximum))
+    || (minimum === null && maximum === null)
+    || (minimum !== null && typeof minimumInclusive !== "boolean")
+    || (maximum !== null && typeof maximumInclusive !== "boolean")
+    || (minimum !== null && maximum !== null && minimum > maximum)) return "";
+  const bounds = [
+    minimum === null ? "" : `${minimumInclusive ? "≥" : ">"} ${minimum}`,
+    maximum === null ? "" : `${maximumInclusive ? "≤" : "<"} ${maximum}${constraint === "at_most_MaxManagedTotalLots" ? " (MaxManagedTotalLots)" : ""}`,
+  ].filter(Boolean).join(" และ ");
+  return `${field} = ${actual} • ค่าต้อง ${bounds}`;
+}
+
 function signalGatewayInitStatusMessage(initStatus = {}) {
   if (!initStatus || initStatus.available !== true) return null;
   const severity = String(initStatus.severity || "").toLowerCase();
@@ -10757,6 +11271,14 @@ function signalGatewayInitStatusMessage(initStatus = {}) {
     OPTIONAL_SIGNING_KEY_PIN_INVALID_IGNORED: "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ถูกต้อง ระบบจึงไม่ใช้ค่านี้",
     OPTIONAL_SIGNING_KEY_PIN_MISMATCH_IGNORED: "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ตรงกับ Backend ระบบจึงใช้ค่าจาก Backend",
     CRYPTO_SELF_TEST_FAILED: "การตรวจระบบลายเซ็น HMAC-SHA256 ไม่ผ่าน",
+    LIVE_COMMISSION_POLICY_UNCONFIRMED: "โหมด Live ยังไม่ยืนยันค่าคอมมิชชันไป-กลับหรือบัญชีปลอดค่าคอมมิชชัน",
+    LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST: "โหมด Live ต้องใส่ชื่อ Symbol เต็มของกราฟใน AllowedSymbols",
+    LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT: "โหมด Live ต้องใช้บัญชีจริง หากเป็นบัญชีทดลองให้เลือก Demo",
+    MT5_HEDGING_ACCOUNT_REQUIRED: "MT5 ต้องใช้บัญชีแบบ Hedging; บัญชี Netting หรือ Exchange ยังไม่รองรับ",
+    LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE: "มี MT5 Live Gateway อื่นในเครื่องนี้ถือสิทธิ์บัญชีนี้อยู่แล้ว",
+    ACCOUNT_EXECUTION_LOCK_UNAVAILABLE: "EA ไม่สามารถล็อกสิทธิ์ส่งคำสั่งระดับบัญชีได้",
+    PORTFOLIO_POLICY_MISMATCH: "นโยบายพอร์ตของ EA ไม่ตรงกับ Channel นี้",
+    PORTFOLIO_POLICY_LEASE_UNAVAILABLE: "EA ยังยืนยันสิทธิ์ใช้นโยบายพอร์ตร่วมไม่ได้",
     GATEWAY_INPUT_CONFIGURATION_INVALID: "ค่าตั้งต้นของ EA ไม่ผ่านการตรวจสอบ",
     SYMBOL_OR_TIMEFRAME_NOT_ALLOWED: "คู่เงินหรือ Timeframe ของกราฟไม่อยู่ในรายการที่อนุญาต",
     SNAPSHOT_CHANNEL_ALREADY_OWNED: "มี EA อีกตัวใช้ Channel ID นี้อยู่แล้ว",
@@ -10769,15 +11291,21 @@ function signalGatewayInitStatusMessage(initStatus = {}) {
   const signingCode = code.startsWith(liveDisarmedPrefix)
     ? code.slice(liveDisarmedPrefix.length)
     : "";
-  const detail = signingCode
+  const inputDetail = code === "GATEWAY_INPUT_CONFIGURATION_INVALID"
+    ? signalGatewayInputValidationText(initStatus.inputValidation) : "";
+  const detail = [signingCode
     ? `เลือกโหมด Live แล้วแต่ LiveArmed ยังปิดอยู่; ${labels[signingCode] || "ระบบลายเซ็นจาก Local Runner ยังไม่พร้อม"} และ EA ยังคงติดกราฟโดยไม่ส่งคำสั่งเทรด`
-    : (labels[code] || "การเริ่มทำงานของ EA มีรายการที่ต้องตรวจสอบ");
+    : (labels[code] || "การเริ่มทำงานของ EA มีรายการที่ต้องตรวจสอบ"), inputDetail].filter(Boolean).join(" • ");
   const oldData = stale ? " ข้อมูลนี้เก่าและใช้เพื่อช่วยวินิจฉัยเท่านั้น" : "";
+  const codeNote = /^[A-Z][A-Z0-9_]{0,119}$/.test(code) ? ` (${code})` : "";
+  const residentBlocked = initStatus.eaAttached === true && initStatus.runtimeReady === false;
   return {
     tone: severity === "error" ? "error" : "warning",
-    text: severity === "error"
-      ? `EA เริ่มทำงานไม่สำเร็จ: ${detail}.${oldData}`.trim()
-      : `EA เริ่มทำงานแล้ว แต่มีคำเตือน: ${detail}.${oldData}`.trim(),
+    text: residentBlocked
+      ? `EA ยังอยู่บนกราฟ แต่หยุดการทำงานและไม่ส่งคำสั่งเทรด: ${detail}${codeNote}.${oldData}`.trim()
+      : severity === "error"
+        ? `EA เริ่มทำงานไม่สำเร็จ: ${detail}${codeNote}.${oldData}`.trim()
+        : `EA เริ่มทำงานแล้ว แต่มีคำเตือน: ${detail}${codeNote}.${oldData}`.trim(),
   };
 }
 
@@ -11246,6 +11774,17 @@ function getSignalRuntimeTruth(report = {}) {
       ageSeconds: Number.isFinite(Number(gatewayInit.ageSeconds)) ? Number(gatewayInit.ageSeconds) : null,
       stale: gatewayInit.stale === true,
       supersededByLiveStatus: gatewayInit.supersededByLiveStatus === true,
+      eaAttached: gatewayInit.eaAttached === true,
+      runtimeReady: typeof gatewayInit.runtimeReady === "boolean" ? gatewayInit.runtimeReady : null,
+      inputValidation: gatewayInit.inputValidation && typeof gatewayInit.inputValidation === "object" ? {
+        field: gatewayInit.inputValidation.field,
+        value: gatewayInit.inputValidation.value,
+        minimum: gatewayInit.inputValidation.minimum,
+        maximum: gatewayInit.inputValidation.maximum,
+        minimumInclusive: gatewayInit.inputValidation.minimumInclusive,
+        maximumInclusive: gatewayInit.inputValidation.maximumInclusive,
+        constraint: gatewayInit.inputValidation.constraint,
+      } : null,
     },
     gatewayAccountType: gatewayAccountTypeRaw,
     gatewayIsDemoAccount,
@@ -11269,6 +11808,11 @@ function getSignalRuntimeTruth(report = {}) {
     ).trim().toUpperCase(),
     gatewayEstimatedCommissionPerLot: gatewayNumber("estimatedCommissionPerLot"),
     gatewayCommissionFreeAccountConfirmed: gateway.commissionFreeAccountConfirmed === true,
+    gatewayRiskCostBasis: selectedPlatform === "MT5"
+      && gateway.riskCostBasis === "price_and_slippage_excluding_commission"
+      && gateway.estimatedCommissionPerLot === 0
+      ? "price_and_slippage_excluding_commission"
+      : "",
     gatewayBrokerVolumeMin: gatewayNumber("brokerVolumeMin"),
     gatewayBrokerVolumeMax: gatewayNumber("brokerVolumeMax"),
     gatewayBrokerVolumeStep: gatewayNumber("brokerVolumeStep"),
@@ -11547,14 +12091,30 @@ function signalCouncilAutomationModel(report = {}) {
     automation_disabled: "ปิดการวิเคราะห์อัตโนมัติอยู่",
     baseline_required: "กำลังตั้งแท่งปัจจุบันเป็นจุดเริ่ม โดยจะไม่เรียกงานย้อนหลัง",
     baseline_set: "ตั้งจุดเริ่มแล้ว และกำลังรอแท่งปิดถัดไป",
+    restart_baseline: "เริ่มระบบใหม่แล้ว • รอแท่งปิดถัดไปโดยไม่วิเคราะห์ย้อนหลัง",
+    stream_change_baseline: "เปลี่ยนกราฟแล้ว • รอแท่งปิดถัดไปโดยไม่วิเคราะห์ย้อนหลัง",
     waiting_new_bar: "ยังเป็นแท่งเดิม จึงยังไม่เรียก Codex",
-    waiting_for_new_closed_bar: "แท่งปัจจุบันยังไม่ปิด • แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม",
+    waiting_for_new_closed_bar: "แท่งปัจจุบันยังไม่ปิด • ตรวจความพร้อมอีกครั้งเมื่อแท่งถัดไปปิด",
+    new_bar_only_wait_next_bar: "รอแท่งปิดใหม่ • โควตากลับมาระหว่างแท่งจะไม่เริ่มย้อนหลัง",
+    new_bar_only_backlog_cancelled: "ยกเลิกคิวเก่าแล้ว • บันทึกเป็นข้ามและรอแท่งปิดใหม่",
+    new_bar_only_trigger_not_admitted: "แท่งนี้ไม่ผ่านเงื่อนไขตอนปิด • ข้ามโดยไม่เรียก AI และรอแท่งถัดไป",
+    new_bar_only_trigger_window_expired: "พ้นช่วงเริ่มวิเคราะห์ของแท่งนี้แล้ว • ข้ามโดยไม่เรียก AI",
+    new_bar_only_missed_trigger: "พลาดช่วงแท่งปิดนี้ • บันทึกเป็นข้าม ไม่วิเคราะห์ย้อนหลัง",
+    new_bar_only_restart_baseline: "ข้ามคิวเดิมหลังเริ่มระบบใหม่ • รอแท่งปิดถัดไป",
+    new_bar_only_stream_change_baseline: "ข้ามคิวเดิมหลังเปลี่ยนกราฟ • รอแท่งปิดถัดไป",
     unsupported_timeframe: "กรอบเวลานี้ใช้ปุ่มวิเคราะห์เองเพื่อป้องกันการใช้ Rate Limit ถี่เกินไป",
     full_access_required: "เปิด Full Access ก่อน ระบบจึงจะสร้าง Mission อัตโนมัติได้",
     terminal_not_selected: "กรุณาเลือก MT4 หรือ MT5 เป้าหมายก่อน",
     snapshot_missing: `ยังไม่พบ Snapshot จาก ${platformLabel}`,
     snapshot_not_ready: "Snapshot ยังไม่พร้อมสำหรับการวิเคราะห์",
     snapshot_stale: `Snapshot เก่าเกินกำหนด กำลังรอข้อมูลใหม่จาก ${platformLabel}`,
+    analysis_snapshot_expired_before_start: "Snapshot หมดอายุก่อนเริ่ม • ข้ามโดยไม่เรียก AI และรอแท่งปิดใหม่",
+    analysis_snapshot_ready_before_start: "อายุ Snapshot ผ่านการตรวจก่อนเริ่ม AI • ตรวจสิทธิ์ส่งคำสั่งอีกครั้งหลังวิเคราะห์",
+    analysis_snapshot_time_invalid_before_start: "ยืนยันเวลาจับ Snapshot ไม่ได้ • ข้ามโดยไม่เรียก AI",
+    execution_age_limit_unavailable_before_start: "รอเกณฑ์อายุ Snapshot จาก EA ก่อนเริ่ม AI",
+    stream_cursor_restored: "คืนตำแหน่งกราฟที่ติดตามไว้แล้ว • ตรวจแท่งปิดใหม่ต่อจากประวัติเดิม",
+    restart_pending_recovered: "ตรวจพบคิวเดิมหลังเริ่มระบบใหม่ • ตรวจสถานะล่าสุดจาก Backend",
+    gap_history_unavailable: "อ่านประวัติแท่งในช่วงที่ขาดหายไม่ได้ • ยังยืนยันจำนวนแท่งช่วงนั้นไม่ได้",
     durable_snapshot_unavailable: "หยุดรอบอัตโนมัติชั่วคราว • Snapshot ถาวรของหัวคิวอ่านไม่ได้ จึงยังไม่เริ่มวิเคราะห์",
     snapshot_artifact_capture_failed: "หยุดรอบอัตโนมัติชั่วคราว • บันทึก Snapshot ถาวรไม่สำเร็จ",
     pending_queue_capacity_exceeded: "คิววิเคราะห์เต็ม • แท่งล่าสุดถูกข้ามและยังไม่เริ่มวิเคราะห์",
@@ -11563,9 +12123,9 @@ function signalCouncilAutomationModel(report = {}) {
     codex_runner_unavailable: "Codex Runner ยังไม่พร้อม",
     rate_limit_unavailable: "ยังอ่าน Rate Limit ของ Codex ไม่ได้ จึงพักไว้ก่อน",
     rate_limit_reached: "Rate Limit เต็มแล้ว จึงพักการวิเคราะห์อัตโนมัติ",
-    quota_limit_reached: "โควตา Codex ถึงขีดจำกัดแล้ว • แท่งใหม่ยังถูกบันทึกเข้าคิว แต่จะไม่เริ่มวิเคราะห์จนกว่าโควตาพร้อม",
+    quota_limit_reached: "โควตา Codex ถึงขีดจำกัดแล้ว • ข้ามแท่งนี้โดยไม่เรียก AI และรอแท่งปิดใหม่",
     quota_reserve: "Rate Limit คงเหลือต่ำกว่าค่าสำรองที่กำหนด",
-    quota_below_reserve: "พักการวิเคราะห์ เพราะ Codex คงเหลือต่ำกว่าค่าสำรองที่กำหนด • แท่งปิดใหม่จะอยู่ในคิวถาวรตามลำดับ",
+    quota_below_reserve: "พักการวิเคราะห์ เพราะ Codex คงเหลือต่ำกว่าค่าสำรองที่กำหนด • ข้ามแท่งนี้และรอแท่งปิดใหม่",
     daily_cap_reached: "ครบจำนวนรอบวิเคราะห์อัตโนมัติของวันนี้แล้ว",
     mission_running: "กำลังรอ Council รอบก่อนหน้าทำเสร็จ",
     council_round_already_active: "กำลังรอ Council รอบก่อนหน้าทำเสร็จ",
@@ -11602,16 +12162,16 @@ function signalCouncilAutomationModel(report = {}) {
   const pendingCount = Math.max(0, Math.trunc(Number(
     runtimeState.pendingCount ?? pending.queueDepth ?? supplied.pendingCount ?? 0,
   ) || 0));
-  const newBarPending = enabled && (
-    pendingCount > 0
-    || (
-      lastObservedClosedBarTime !== null
-      && (
-        lastAnalyzedClosedBarTime === null
-        || lastObservedClosedBarTime > lastAnalyzedClosedBarTime
-      )
-    )
-  );
+  const pendingTotalCount = Math.max(pendingCount, Math.trunc(Number(
+    runtimeState.pendingTotalCount ?? supplied.pendingTotalCount ?? pendingCount,
+  ) || 0));
+  const deferredPendingCount = Math.max(0, Math.trunc(Number(
+    runtimeState.deferredPendingCount ?? supplied.deferredPendingCount ?? 0,
+  ) || 0));
+  // A skipped candle can be newer than the last analyzed candle. Only actual
+  // pending work from Backend means a new round is waiting; a timestamp gap
+  // must never resurrect a skipped round in the UI.
+  const newBarPending = enabled && pendingTotalCount > 0;
   const blockedReasons = new Set([
     "unsupported_timeframe",
     "full_access_required",
@@ -11619,6 +12179,7 @@ function signalCouncilAutomationModel(report = {}) {
     "snapshot_missing",
     "snapshot_not_ready",
     "snapshot_stale",
+    "execution_age_limit_unavailable_before_start",
     "durable_snapshot_unavailable",
     "snapshot_artifact_capture_failed",
     "pending_queue_capacity_exceeded",
@@ -11652,8 +12213,8 @@ function signalCouncilAutomationModel(report = {}) {
   const blocked = enabled && (blockedReasons.has(reason) || blockedStatuses.has(status));
   const statusLabels = {
     disabled: "ปิดอยู่",
-    idle: enabled ? "เปิดอยู่ • แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม" : "ปิดอยู่",
-    baseline: "ตั้งจุดเริ่มแล้ว • แท่งถัดไปปิดแล้ววิเคราะห์",
+    idle: enabled ? "เปิดอยู่ • ตรวจความพร้อมเมื่อแท่งถัดไปปิด" : "ปิดอยู่",
+    baseline: "ตั้งจุดเริ่มแล้ว • รอแท่งปิดถัดไปและตรวจความพร้อม",
     watching: "เปิดอยู่ • เฝ้าแท่งปิดใหม่",
     pending: "แท่งใหม่ปิดแล้ว • รอข้อมูลนิ่ง",
     pending_settle: "แท่งใหม่ปิดแล้ว • รอข้อมูลนิ่ง",
@@ -11662,7 +12223,7 @@ function signalCouncilAutomationModel(report = {}) {
     active_round: "รอรอบก่อนหน้าทำเสร็จ",
     unsupported_timeframe: "กรอบเวลานี้ใช้ปุ่มวิเคราะห์เอง",
     quota_guard: "พักเพื่อสำรอง Rate Limit",
-    waiting_gate: "พักที่ Safety Gate • แท่งปิดใหม่กำลังรอในคิว",
+    waiting_gate: "ระบบยังไม่พร้อม • ข้ามแท่งนี้และตรวจใหม่เมื่อแท่งถัดไปปิด",
     quota_unavailable: "พักเพราะยังอ่าน Rate Limit ไม่ได้",
     daily_limit: dailyRoundLimitEnabled
       ? "ครบจำนวนรอบอัตโนมัติวันนี้"
@@ -11726,6 +12287,8 @@ function signalCouncilAutomationModel(report = {}) {
       executionPolicy: safeDashboardDisplayText(pending.executionPolicy, ""),
     } : null,
     pendingCount,
+    pendingTotalCount,
+    deferredPendingCount,
     waitingGateActive: waitingGate.active === true || status === "waiting_gate",
     backlogPolicy: supplied.backlogPolicy && typeof supplied.backlogPolicy === "object"
       ? supplied.backlogPolicy
@@ -12050,17 +12613,15 @@ function renderSignalDailyPanel(report = {}) {
     || automation.reasonMessage
     || (
       automation.enabled
-        ? `Snapshot ตรวจทุก ${automation.pollSeconds} วินาที • เมื่อพบแท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม โดยทุกแท่งจะเข้าคิวถาวรตามลำดับ FIFO`
-        : "เปิดเมื่อต้องการให้ Agent เฝ้าแท่งปิดใหม่และเริ่มวิเคราะห์เมื่อระบบพร้อม"
+        ? `Snapshot ตรวจทุก ${automation.pollSeconds} วินาที • วิเคราะห์เฉพาะแท่งที่เพิ่งปิดและผ่านเงื่อนไข • ไม่วิเคราะห์ย้อนหลัง`
+        : "เปิดเมื่อต้องการให้ Agent ตรวจความพร้อมตอนแท่งใหม่ปิดและวิเคราะห์เฉพาะรอบนั้น"
     );
-  const automationQueueMessage = automation.pendingCount > 0
-    ? ` • รอคิว ${automation.pendingCount} แท่ง${automation.pending?.closedBarTime
-      ? ` • แท่งเก่าสุด ${formatBrokerBarTime(automation.pending.closedBarTime)}`
+  const automationQueueMessage = automation.pendingTotalCount > 0
+    ? ` • Backend รายงานงานรอ ${automation.pendingTotalCount} แท่ง${automation.pending?.closedBarTime
+      ? ` • เวลาแท่ง ${formatBrokerBarTime(automation.pending.closedBarTime)}`
       : ""}${automation.pending?.detectedAt
-      ? ` • รอตั้งแต่ ${formatThaiDateTime(automation.pending.detectedAt)}`
-      : ""}${automation.pending?.queuePosition !== null && automation.pending?.queuePosition !== undefined
-      ? ` • หัวคิว ${Math.trunc(automation.pending.queuePosition)}/${Math.trunc(automation.pending.queueDepth || automation.pendingCount)}`
-      : ""}`
+      ? ` • ตรวจพบ ${formatThaiDateTime(automation.pending.detectedAt)}`
+      : ""} • เริ่มได้เฉพาะแท่งปิดใหม่ในช่วงที่กำหนด • คิวเก่าจะถูกข้าม`
     : "";
   const automationMessage = `${automationBaseMessage}${automationQueueMessage}`;
   const initDiagnostic = signalGatewayInitStatusMessage(runtime.gatewayInitStatus);
@@ -12171,7 +12732,7 @@ function renderSignalDailyPanel(report = {}) {
           <small>
             ${automation.dailyRoundLimitEnabled && automation.effectiveMaxDailyRounds !== null
               ? `เพดานรายวัน ${automation.effectiveMaxDailyRounds} รอบ`
-              : "ไม่มีเพดานรายวัน"} • ประมวลผลคิวแท่งปิดตามลำดับ FIFO • รอบย้อนหลังใช้ตรวจสอบเท่านั้นและห้ามส่ง Order เก่า • รองรับ ${automation.supported.join(", ")}
+              : "ไม่มีเพดานรายวัน"} • วิเคราะห์เฉพาะแท่งปิดใหม่ • โควตากลับมาระหว่างแท่งให้รอแท่งถัดไป • รอบที่พลาดหรือหมดอายุบันทึกว่าข้ามโดยไม่เรียก AI • รองรับ ${automation.supported.join(", ")}
           </small>
         </section>
         <button type="button" class="signal-primary-action" data-signal-run-analysis ${daily.analysisReady && !analysisBusy ? "" : "disabled"}>
@@ -12560,14 +13121,19 @@ function signalGatewaySizingSummary(runtime = {}) {
   const maxLossPerTradePercent = runtime.gatewayRiskTelemetry?.maxLossPerTradePercent;
   const commission = runtime.gatewayEstimatedCommissionPerLot;
   const commissionFreeConfirmed = runtime.gatewayCommissionFreeAccountConfirmed === true;
+  const excludesCommission = runtime.selectedPlatform === "MT5"
+    && runtime.gatewayRiskCostBasis === "price_and_slippage_excluding_commission"
+    && commission === 0;
   const accountCurrency = safeDashboardDisplayText(runtime.gatewayAccountCurrency, "").trim().toUpperCase();
   const commissionUnit = accountCurrency || "หน่วยเงินบัญชี";
-  const commissionPolicy = Number.isFinite(commission) && commission > 0
-    ? ` • สำรองค่าธรรมเนียม ${commission} ${commissionUnit}/lot`
-    : commissionFreeConfirmed
-      ? " • ยืนยันบัญชีไม่มีค่าคอมมิชชัน"
-      : " • ยังไม่ยืนยันนโยบายค่าคอมมิชชัน (Live ถูกบล็อก)";
-  const commissionPolicyReady = (Number.isFinite(commission) && commission > 0) || commissionFreeConfirmed;
+  const commissionPolicy = excludesCommission
+    ? " • ความเสี่ยงถึง SL ไม่รวมค่าคอมมิชชัน"
+    : Number.isFinite(commission) && commission > 0
+      ? ` • สำรองค่าธรรมเนียม ${commission} ${commissionUnit}/lot`
+      : commissionFreeConfirmed
+        ? " • ยืนยันบัญชีไม่มีค่าคอมมิชชัน"
+        : " • ยังไม่ยืนยันนโยบายค่าคอมมิชชัน (Live ถูกบล็อก)";
+  const commissionPolicyReady = excludesCommission || (Number.isFinite(commission) && commission > 0) || commissionFreeConfirmed;
   const brokerLimits = Number.isFinite(minimum) && Number.isFinite(maximum) && Number.isFinite(step)
     ? ` • Broker Lot ${minimum}-${maximum} • Step ${step}`
     : Number.isFinite(step)
@@ -12576,7 +13142,9 @@ function signalGatewaySizingSummary(runtime = {}) {
   const hardCap = Number.isFinite(maxLossPerTradePercent)
     ? ` • เพดานไม่เกิน ${maxLossPerTradePercent}% ของ Balance`
     : " • รอค่าเพดานต่อรายการจาก EA";
-  const estimateNote = " • ประมาณการถึง SL รวม Slippage/ค่าธรรมเนียมที่ตั้งไว้; Gap, Fill, Swap หรือค่าธรรมเนียมจริงอาจทำให้ผลต่าง";
+  const estimateNote = excludesCommission
+    ? " • ประมาณการถึง SL รวม Slippage ที่ตั้งไว้; ขาดทุนจริงอาจเกินงบจากค่าคอมมิชชัน, Fill, Gap หรือ Swap"
+    : " • ประมาณการถึง SL รวม Slippage/ค่าธรรมเนียมที่ตั้งไว้; Gap, Fill, Swap หรือค่าธรรมเนียมจริงอาจทำให้ผลต่าง";
   if (mode === "RISK_PERCENT") {
     const percent = runtime.gatewayRiskPercent;
     const capital = runtime.gatewayRiskCapitalBase === "BALANCE" ? "Balance" : "Equity";
@@ -12637,6 +13205,19 @@ function signalGatewayAckSizingSummary(ack = null, accountCurrency = "") {
   if (estimatedRisk !== null && riskCapital !== null && estimatedRisk >= 0 && riskCapital >= 0) {
     parts.push(`ความเสี่ยงประมาณ ${estimatedRisk} ${currency} จากฐาน ${riskCapital} ${currency}`);
   }
+  if (String(ack.status || "").trim().toUpperCase() === "EXECUTED") {
+    const filledSlippage = finiteNumber(ack.filledSlippagePoints);
+    if (ack.filledSlippageKnown === false) {
+      parts.push("คำเตือน: ไม่ทราบ Slippage ตอนส่งคำสั่งเดิมจากหลักฐานกู้คืน; ไม่ใช่ 0 จุด");
+    } else if (
+      (ack.filledSlippageKnown === true || ack.filledSlippageKnown === undefined)
+      && filledSlippage !== null && filledSlippage >= 0
+    ) {
+      parts.push(`Slippage ที่ EA รายงาน ${filledSlippage} จุด`);
+    } else {
+      parts.push("ไม่พบหลักฐาน Slippage ที่ตรวจสอบได้");
+    }
+  }
   parts.push("ข้อมูลอ่านอย่างเดียวจาก EA; AI/Backend ไม่ได้กำหนด Lot");
   return parts.join(" • ");
 }
@@ -12647,6 +13228,9 @@ function renderSignalMarketStrip(container, report, runtime) {
   const stale = report?.connectionChecklist?.stale === true;
   const modeAccount = signalGatewayModeAccountStatus(runtime);
   const effectiveGuardReason = signalEffectiveExecutionGuardReason(runtime);
+  const initFailure = signalCurrentInitFailureDisplay(runtime);
+  const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
+  const pendingReportLabel = signalTradingReportPendingLabel(runtime);
   const selectedPlatform = String(runtime.selectedPlatform || "").trim().toUpperCase();
   const platformLabel = ["MT4", "MT5"].includes(selectedPlatform)
     ? selectedPlatform
@@ -12656,7 +13240,7 @@ function renderSignalMarketStrip(container, report, runtime) {
     [`${platformLabel} ที่เลือก`, market.terminal, runtime.terminalSelected ? "ready" : "warning"],
     ["สัญลักษณ์", market.symbol, market.available ? "ready" : "muted"],
     ["กรอบเวลา", market.timeframe, market.available ? "ready" : "muted"],
-    ["แท่งเทียนล่าสุด", market.observedAt ? formatThaiDateTime(market.observedAt) : "รอ Adapter", market.observedAt ? "ready" : "warning"],
+    ["Snapshot ล่าสุด", market.observedAt ? formatThaiDateTime(market.observedAt) : "รอ Adapter", market.observedAt ? "ready" : "warning"],
     [
       "ความสดของข้อมูล",
       market.freshnessMinutes === null
@@ -12665,24 +13249,32 @@ function renderSignalMarketStrip(container, report, runtime) {
       market.freshnessMinutes !== null && market.freshnessMinutes <= 5 ? "ready" : "warning",
     ],
     ["Spread ปัจจุบัน", market.spread === null ? "ยังไม่มีข้อมูล" : String(market.spread), market.spread === null ? "muted" : "ready"],
-    ["สถานะ Gateway", displayStatus(runtime.gatewayStatus), runtime.gatewayConnected ? "info" : "warning"],
+    ["สถานะ Gateway", initFailure?.label || currentGateway?.status || pendingReportLabel || displayStatus(runtime.gatewayStatus), initFailure ? "error" : currentGateway?.tone || (runtime.gatewayConnected ? "info" : "warning")],
     [
       "สิทธิ์ส่ง Order",
-      runtime.gatewayExecutionGuardReady
+      initFailure?.messageTh || pendingReportLabel || (runtime.gatewayExecutionGuardReady
         ? "Execution Guard พร้อม"
-        : signalExecutionGuardReasonLabel(effectiveGuardReason),
-      runtime.gatewayExecutionGuardReady ? "ready" : "warning",
+        : signalExecutionGuardReasonLabel(effectiveGuardReason)),
+      initFailure ? "error" : runtime.gatewayExecutionGuardReady ? "ready" : "warning",
     ],
     [
       "โหมด Gateway",
-      runtime.gatewayConnected
+      initFailure?.label || currentGateway?.mode || (runtime.gatewayConnected
         ? (modeAccount.observed ? modeAccount.value : runtime.gatewayMode.toUpperCase())
-        : "ยังไม่เชื่อม EA",
-      runtime.gatewayConnected && !modeAccount.mismatch ? "info" : "warning",
+        : pendingReportLabel || "ยังไม่เชื่อม EA"),
+      initFailure ? "error" : currentGateway?.tone || (runtime.gatewayConnected && !modeAccount.mismatch ? "info" : "warning"),
     ],
     [sizing.label, sizing.value, sizing.tone],
   ];
   container.innerHTML = "";
+  if (initFailure) {
+    const diagnostic = document.createElement("div");
+    diagnostic.className = "signal-market-init-diagnostic";
+    diagnostic.setAttribute("role", "alert");
+    diagnostic.setAttribute("aria-atomic", "true");
+    diagnostic.textContent = `${initFailure.messageTh}\nวิธีแก้: ${initFailure.remediationTh}`;
+    container.appendChild(diagnostic);
+  }
   items.forEach(([label, value, tone]) => {
     const item = document.createElement("div");
     const name = document.createElement("span");
@@ -12753,6 +13345,14 @@ function signalMissionReason(mission = null, fallback = "ยังไม่ม�
     return capabilityReasons[blockedCapability];
   }
   if (mission?.result) {
+    // A successful council child stores its vote as JSON. If no validated
+    // current vote is available, this fallback must not expose it as prose.
+    const rawResult = typeof mission.result === "string" ? mission.result.trim() : "";
+    if (typeof mission.result === "object" || (rawResult !== "[TRUNCATED]" && (/^[\[{]/.test(rawResult) || /^```(?:json)?\s*[\[{]/i.test(rawResult)))) {
+      return status === "completed"
+        ? "Agent วิเคราะห์เสร็จแล้ว แต่ยังไม่มีผลที่ยืนยันสำหรับรอบปัจจุบัน • ดูผลรอบที่บันทึกไว้ในประวัติ"
+        : "ยังไม่มีคำอธิบายผลที่ยืนยันสำหรับรอบปัจจุบัน • ตรวจรายละเอียดสถานะของ Agent";
+    }
     const resultText = safeDashboardDisplayText(mission.result, "");
     if (resultText && resultText !== "[TRUNCATED]") return resultText;
     if (resultText === "[TRUNCATED]") {
@@ -12948,9 +13548,24 @@ function signalCouncilRunModel(report = {}) {
   const automationParent = automation.lastMissionId
     ? parents.find((item) => String(item?.id || "") === automation.lastMissionId) || null
     : null;
-  const consensusParent = !automation.lastMissionId && consensusParentId
+  const consensusParent = consensusParentId
     ? parents.find((item) => String(item?.id || "") === consensusParentId) || null
     : null;
+  // A completed automatic round remains in autoAnalysis.lastMissionId after
+  // a newer manual round finishes. Show the newer completed result with its
+  // own children and immutable snapshot; live/current and blocked rounds keep
+  // their existing precedence below.
+  const consensusSnapshotId = safeDashboardDisplayText(pipeline?.consensus?.snapshotId, "");
+  const newerCompletedConsensusParent = automationParent
+    && consensusParent
+    && signalMissionUiState(automationParent) === "completed"
+    && signalMissionUiState(consensusParent) === "completed"
+    && signalMissionCreatedTime(automationParent) > 0
+    && signalMissionCreatedTime(consensusParent) > signalMissionCreatedTime(automationParent)
+    && consensusSnapshotId
+    && consensusSnapshotId === safeDashboardDisplayText(consensusParent?.delegation?.snapshotId, "")
+      ? consensusParent
+      : null;
   const waitingForCurrentRound = automation.newBarPending === true && !activeParent;
   if (waitingForCurrentRound) {
     return {
@@ -12974,6 +13589,7 @@ function signalCouncilRunModel(report = {}) {
   );
   const parent = activeParent
     || currentRunParent
+    || newerCompletedConsensusParent
     || automationParent
     || consensusParent
     || (!hasExplicitCurrentIdentity ? historicalParent : null);
@@ -13207,9 +13823,27 @@ function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report)) 
         : readyForCurrentSnapshot
           ? currentSnapshotObservedAt
           : (mission?.completedAt || mission?.updatedAt || mission?.createdAt || null),
+      analysisCompletedAt: available ? (mission?.completedAt || null) : null,
+      evidenceObservedAt: available ? (evidenceObservedAt || view.observedAt || null) : null,
       blocker,
     };
   });
+}
+
+function signalAgentTimestampLabel(view = {}) {
+  if (view.available === true) {
+    const parts = [view.analysisCompletedAt
+      ? `วิเคราะห์เสร็จ ${formatThaiDateTime(view.analysisCompletedAt)}`
+      : "ยังไม่มีเวลาจบการวิเคราะห์"];
+    if (view.evidenceObservedAt) {
+      const label = view.id === "news" ? "เวลาหลักฐานข่าวแรก" : "เวลาข้อมูลที่ใช้";
+      parts.push(`${label} ${formatThaiDateTime(view.evidenceObservedAt)}`);
+    }
+    return parts.join(" • ");
+  }
+  return view.observedAt
+    ? `อัปเดตสถานะ ${formatThaiDateTime(view.observedAt)}`
+    : "ยังไม่มี Snapshot ที่ยืนยันโดย Backend";
 }
 
 function createSignalAgentBlockerPanel(view) {
@@ -13351,9 +13985,7 @@ function createSignalAgentCard(view, { compact = false } = {}) {
     item.textContent = safeDashboardDisplayText(reason);
     reasons.appendChild(item);
   });
-  footer.textContent = view.observedAt
-    ? `อัปเดตล่าสุด ${formatThaiDateTime(view.observedAt)}`
-    : "ยังไม่มี Snapshot ที่ยืนยันโดย Backend";
+  footer.textContent = signalAgentTimestampLabel(view);
   card.dataset.workState = view.state || "idle";
   card.append(heading, decision, protectivePrices);
   const blockerPanel = createSignalAgentBlockerPanel(view);
@@ -13417,9 +14049,7 @@ function createSignalCouncilOverviewCard(view) {
     view.reasons?.[0],
     "ยังไม่มีเหตุผลจาก Local Runner",
   );
-  footer.textContent = view.observedAt
-    ? `อัปเดตล่าสุด ${formatThaiDateTime(view.observedAt)}`
-    : "ยังไม่มี Snapshot ที่ยืนยันโดย Backend";
+  footer.textContent = signalAgentTimestampLabel(view);
   const chatButton = createSignalAgentChatButton(view);
   chatButton.textContent = "คุย";
   card.append(portrait, identity, metrics);
@@ -13883,10 +14513,20 @@ function signalPrepublishExecutionBlockReason(value) {
   return code.endsWith("_BEFORE_PUBLISH") ? code : "";
 }
 
+function signalTicketText(value = {}) {
+  const text = value?.ticketText;
+  const valid = (candidate) => typeof candidate === "string" && /^[1-9]\d{0,19}$/.test(candidate)
+    && (candidate.length < 20 || candidate <= "18446744073709551615");
+  if (valid(text)) return text;
+  const ticket = value?.ticket;
+  if (valid(ticket)) return ticket;
+  return Number.isSafeInteger(ticket) && ticket > 0 ? String(ticket) : "";
+}
+
 function signalExactClosedOrderOutcome(report = {}, command = null, ack = null) {
   const commandId = safeDashboardDisplayText(command?.commandId, "");
-  const ticket = Number(ack?.ticket);
-  if (!commandId || !Number.isInteger(ticket) || ticket <= 0) return null;
+  const ticket = signalTicketText(ack);
+  if (!commandId || !ticket) return null;
   const council = signalCouncilModel(report);
   const rawGatewayHistory = council.tradeGateway?.orderHistory
     && typeof council.tradeGateway.orderHistory === "object"
@@ -13913,7 +14553,7 @@ function signalExactClosedOrderOutcome(report = {}, command = null, ack = null) 
       item
       && typeof item === "object"
       && safeDashboardDisplayText(item.commandId, "") === commandId
-      && Number(item.ticket) === ticket
+      && signalTicketText(item) === ticket
       && String(item.ackStatus || "").toUpperCase() === "EXECUTED"
       && item.outcomeIdentityVerified === true
       && String(item.executionState || "").toUpperCase() === "CLOSED"
@@ -14031,7 +14671,7 @@ function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {}) {
         label: "Fill / สถานะ Order ล่าสุด",
         state: fillState,
         value: exactClosedOutcome
-          ? `ปิดแล้ว • Ticket ${exactClosedOutcome.ticket} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`
+          ? `ปิดแล้ว • Ticket ${signalTicketText(exactClosedOutcome)} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`
           : fillVerified
           ? "Backend ยืนยัน Fill แล้ว"
           : ackStatus === "EXECUTED"
@@ -14088,7 +14728,7 @@ function signalTradeGatewayHeadlineLabel(
     || gatewayRun.commandPublished === true;
   const exactClosedOutcome = operations.exactClosedOutcome;
   if (exactClosedOutcome) {
-    return `Order ปิดแล้ว • Ticket ${exactClosedOutcome.ticket} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`;
+    return `Order ปิดแล้ว • Ticket ${signalTicketText(exactClosedOutcome)} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`;
   }
   if (operations.prepublishBlocked === true) {
     return `ยังไม่ส่ง Order • ${signalExecutionGuardReasonLabel(reasonCode)}`;
@@ -14114,6 +14754,8 @@ function signalTradeGatewayHeadlineLabel(
   }
   if (commandPublished) return "ส่งคำสั่งแล้ว • รอ ACK";
   if (runStatus === "waiting_previous_ack") return "รอ EA ตอบรับคำสั่งก่อนหน้า";
+  const pendingReportLabel = signalTradingReportPendingLabel(runtime);
+  if (pendingReportLabel) return pendingReportLabel;
   if (consensus.tradePlan?.available && runtime.gatewayModeAccountMismatch) {
     return signalExecutionGuardReasonLabel(runtime.gatewayModeAccountMismatchReason);
   }
@@ -14198,7 +14840,7 @@ function signalRoundHealthModel(report = {}, automation = signalCouncilAutomatio
           : `ไม่จำกัด • วันนี้ ${automation.dailyRunCount} รอบ`,
         detail: automation.dailyRoundLimitEnabled
           ? "Backend เปิดเพดานรอบรายวันไว้"
-          : "แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม และอยู่ในคิวถาวรตามลำดับ FIFO",
+          : "วิเคราะห์เฉพาะแท่งที่เพิ่งปิดและผ่านเงื่อนไข • รอบที่ข้ามไม่ใช้ AI ย้อนหลัง",
       },
       {
         label: "Codex คงเหลือ",
@@ -14352,13 +14994,18 @@ function renderSignalProtectivePlanProvenance(container, consensus) {
 function signalExecutionGuardReasonLabel(value) {
   const code = String(value || "").trim().toUpperCase();
   const labels = {
+    GATEWAY_INPUT_CONFIGURATION_INVALID: "ค่าตั้งต้นของ EA ไม่ผ่านการตรวจสอบ • ดู Input และเกณฑ์ในรายละเอียด EA",
     READY: "ผ่านการตรวจความพร้อม",
+    SINGLE_OUTSTANDING_COMMAND: "มีคำสั่งก่อนหน้าค้างรอ ACK • หยุดคำสั่งใหม่จนยืนยันผลเดิม",
+    INVALID_ACK_TICKET: "Backend ปฏิเสธ ACK เพราะ Ticket ไม่ถูกต้อง • ผลคำสั่งยังไม่ยืนยัน ห้ามส่งซ้ำ",
+    EXPIRED_WAITING_ACK: "คำสั่งหมดอายุแต่ยังรอ ACK ที่ตรวจสอบได้ • ยังไม่ปล่อยคิวและห้ามส่งซ้ำ",
     STARTING: "EA กำลังเริ่มระบบ",
     KILL_SWITCH_ACTIVE: "Kill Switch กำลังหยุดระบบ",
     TERMINAL_NOT_CONNECTED: "Terminal ที่เลือกยังไม่เชื่อมต่อกับ Broker",
     QUOTE_NOT_AVAILABLE: "ยังไม่มีราคาล่าสุด",
-    QUOTE_NOT_OBSERVED: "EA ยังไม่ส่งราคา Bid/Ask ที่ตรวจสอบได้",
+    QUOTE_NOT_OBSERVED: "EA กำลังรอ Tick ใหม่จากกราฟหลังเริ่มทำงานหรือเชื่อมต่อ Broker ใหม่ จึงยังไม่ส่ง Order",
     QUOTE_STALE: "ราคาล่าสุดเก่าเกินกำหนด",
+    QUOTE_STALE_OR_FUTURE: "Tick ล่าสุดเก่าเกินกำหนดหรือเวลา Broker ไม่สอดคล้องกัน จึงยังไม่ส่ง Order",
     FIXED_LOT_CONFIGURATION_INVALID: "ค่า Fixed Lot ไม่ถูกต้อง",
     MONEY_MANAGEMENT_MODE_INVALID: "โหมด Money Management ต้องเป็น Fixed Lot หรือ Risk Percent",
     RISK_CAPITAL_BASE_INVALID: "ฐานคำนวณความเสี่ยงต้องเป็น Balance หรือ Equity",
@@ -14430,6 +15077,14 @@ function signalExecutionGuardReasonLabel(value) {
     SIGNED_ENVELOPE_INVALID: "ซองคำสั่งที่ลงลายเซ็นมีรูปแบบไม่ถูกต้อง",
     EA_TRADING_NOT_ALLOWED: "Terminal ที่เลือกยังไม่อนุญาตให้ EA ส่งคำสั่ง",
     EXECUTION_UNKNOWN: "EA ยังยืนยันผลการส่งคำสั่งไม่ได้ ต้องตรวจและกู้สถานะก่อนส่งซ้ำ",
+    EXECUTION_SLIPPAGE_EVIDENCE_UNAVAILABLE: "ส่งคำสั่งไปแล้วแต่ยังตรวจหลักฐาน Slippage ไม่ได้ • ต้องตรวจผลที่ Broker และห้ามส่งซ้ำ",
+    ORDER_VERIFIED_OPEN: "EA ยืนยันว่าเปิด Order แล้วจากหลักฐาน Broker",
+    ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED: "เปิด Order แล้ว • คำเตือน: Slippage และความเสี่ยงถึง SL หลัง Fill สูงกว่าค่าที่เผื่อไว้",
+    ORDER_VERIFIED_OPEN_RISK_ESTIMATE_EXCEEDED: "เปิด Order แล้ว • คำเตือน: ความเสี่ยงถึง SL หลัง Fill สูงกว่าค่าประมาณก่อนส่ง",
+    ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_EXCEEDED: "เปิด Order แล้ว • คำเตือน: Slippage หลัง Fill สูงกว่าค่าที่เผื่อไว้",
+    ORDER_VERIFIED_OPEN_RISK_UNAVAILABLE: "เปิด Order แล้ว • คำเตือน: ยังตรวจค่าความเสี่ยงถึง SL หลัง Fill ไม่ได้",
+    RECOVERED_ORDER_FOUND: "พบหลักฐาน Order ของคำสั่งเดิมจาก Broker และกู้สถานะแล้ว • ไม่ส่งคำสั่งซ้ำ",
+    EXECUTION_RECONCILED_WITH_WARNING: "ยืนยันผลคำสั่งเดิมจากหลักฐาน Broker แล้ว • มีคำเตือนที่ต้องตรวจรายละเอียด • ไม่ส่งคำสั่งซ้ำ",
     ACK_TIMEOUT: "หมดเวลารอ ACK จาก EA",
     PREVIOUS_COMMAND_UNRESOLVED: "คำสั่งก่อนหน้ายังไม่ทราบผล ระบบไม่ส่งซ้ำ",
     DECISION_DISPATCH_WINDOW_EXPIRED: "รอบวิเคราะห์นี้เก่าเกินเวลาส่ง Order แล้ว ระบบจะรอข้อมูลแท่งใหม่และไม่ส่งคำสั่งย้อนหลัง",
@@ -14442,6 +15097,8 @@ function signalExecutionGuardReasonLabel(value) {
     EXECUTION_REWARD_RISK_BELOW_MINIMUM: "Reward/Risk ณ ราคาก่อน Publish ต่ำกว่าเกณฑ์ • Backend ไม่ส่ง Command",
     EXECUTION_REWARD_RISK_BELOW_MINIMUM_BEFORE_PUBLISH: "Reward/Risk ณ ราคาก่อน Publish ต่ำกว่าเกณฑ์ • Backend ไม่ส่ง Command",
     EXECUTION_QUOTE_STALE_BEFORE_PUBLISH: "ราคาก่อน Publish เก่าเกินกำหนด • Backend ไม่ส่ง Command",
+    ANALYSIS_SNAPSHOT_STALE_BEFORE_PUBLISH: "Snapshot ที่ใช้วิเคราะห์เก่าเกินเกณฑ์ของ EA ก่อนส่งคำสั่ง • Backend ไม่ส่ง Command",
+    ANALYSIS_SNAPSHOT_FUTURE_BEFORE_PUBLISH: "เวลาของ Snapshot ที่ใช้วิเคราะห์อยู่ในอนาคต • Backend ไม่ส่ง Command",
     EXECUTION_QUOTE_MARKET_CLOSED_BEFORE_PUBLISH: "ตลาดปิดอยู่ก่อน Publish • Backend ไม่ส่ง Command",
     EXECUTION_PROTECTIVE_PLAN_INVALID_BEFORE_PUBLISH: "SL/TP ไม่ผ่านการตรวจทิศทางก่อน Publish • Backend ไม่ส่ง Command",
     TERMINAL_SELECTION_CHANGED_BEFORE_PUBLISH: "เป้าหมาย MT4 / MT5 เปลี่ยนก่อน Publish • Backend ไม่ส่ง Command",
@@ -14463,12 +15120,14 @@ function signalExecutionGuardReasonLabel(value) {
 function signalExecutionGuardRecoveryLabel(value) {
   const code = String(value || "").trim().toUpperCase();
   const recovery = {
+    GATEWAY_INPUT_CONFIGURATION_INVALID: "ตรวจ Input ที่ระบุในรายละเอียด EA แก้ค่าให้อยู่ในเกณฑ์ แล้วเริ่ม EA ใหม่",
     READY: "ไม่ต้องแก้ไข EA พร้อมตรวจคำสั่งรอบใหม่",
     STARTING: "รอให้ EA เขียน Snapshot และสถานะรอบแรก แล้วกดตรวจข้อมูล Terminal ใหม่",
     TERMINAL_NOT_CONNECTED: "เข้าสู่ระบบ Broker ให้สำเร็จ และตรวจว่าราคาใน Market Watch เคลื่อนไหว",
     QUOTE_NOT_AVAILABLE: "เปิด Market Watch ให้มีราคา Bid/Ask แล้วรอ Snapshot รอบใหม่",
     QUOTE_NOT_OBSERVED: "หากตลาดปิดให้รอ Tick แรกหลังตลาดเปิด หากตลาดเปิดอยู่ให้ตรวจ Market Watch ว่าราคาเคลื่อนไหว และตรวจว่า EA อยู่บนกราฟ Symbol กับ Timeframe ที่อนุญาต แล้วรอ Snapshot รอบใหม่",
     QUOTE_STALE: "ตรวจอินเทอร์เน็ตและการเชื่อมต่อ Broker แล้วรอราคาและ Snapshot รอบใหม่",
+    QUOTE_STALE_OR_FUTURE: "รอ Tick ใหม่ที่ EA ได้รับจริงและตรวจเวลา Broker; การรีเฟรชหน้า Dashboard ไม่ทำให้ราคาเก่าสดขึ้น",
     KILL_SWITCH_ACTIVE: "ตรวจสาเหตุที่เปิด Kill Switch ก่อน แล้วจึงปลดจาก EA เมื่อปลอดภัย",
     FIXED_LOT_CONFIGURATION_INVALID: "แก้ FixedLot ใน EA ให้มากกว่า 0 และไม่เกินเพดาน Lot ที่กำหนด",
     MONEY_MANAGEMENT_MODE_INVALID: "เลือก MoneyManagementMode เป็น FIXED_LOT หรือ RISK_PERCENT ที่ EA",
@@ -14514,6 +15173,14 @@ function signalExecutionGuardRecoveryLabel(value) {
     SIGNING_KEY_MISMATCH: "คัดลอก Key ID ล่าสุดจาก Local Runner ไปใส่ EA ให้ตรงกัน",
     ACK_TIMEOUT: "ตรวจแท็บ Experts และ Journal ของ Terminal ที่เลือกก่อนสั่งรอบใหม่",
     PREVIOUS_COMMAND_UNRESOLVED: "ตรวจ ACK หรือสถานะ Order ของคำสั่งก่อนหน้าให้จบก่อนเริ่มรอบใหม่",
+    EXECUTION_SLIPPAGE_EVIDENCE_UNAVAILABLE: "ตรวจ Position, Deal และราคา Fill ของคำสั่งเดิมที่ Broker; ห้ามถือว่าไม่ได้เปิด Order หรือ Slippage เป็นศูนย์ และไม่ส่งคำสั่งเดิมซ้ำ",
+    ORDER_VERIFIED_OPEN: "ตรวจ Position และ SL/TP ที่ Broker; ไม่ต้องส่งคำสั่งเดิมซ้ำ",
+    ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED: "ตรวจ Position, ราคา Fill และ SL/TP จริง; คำเตือนนี้ไม่ย้อนการเปิด Order และไม่ใช่เหตุให้ส่งซ้ำ",
+    ORDER_VERIFIED_OPEN_RISK_ESTIMATE_EXCEEDED: "ตรวจ Position และความเสี่ยงจากราคา Fill ถึง SL จริง; ไม่ส่งคำสั่งเดิมซ้ำ",
+    ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_EXCEEDED: "ตรวจราคา Fill และความเสี่ยงของ Position ที่เปิดแล้ว; ไม่ส่งคำสั่งเดิมซ้ำ",
+    ORDER_VERIFIED_OPEN_RISK_UNAVAILABLE: "ตรวจ Position, SL/TP และข้อมูลความเสี่ยงที่ Broker ก่อนทำรายการต่อ; ไม่ส่งคำสั่งเดิมซ้ำ",
+    RECOVERED_ORDER_FOUND: "ตรวจ Position หรือประวัติ Broker ของคำสั่งเดิม; หากไม่ทราบ Slippage ห้ามถือว่าเป็นศูนย์ และไม่ส่งคำสั่งเดิมซ้ำ",
+    EXECUTION_RECONCILED_WITH_WARNING: "ตรวจ ACK, Position หรือประวัติ Broker และคำเตือนที่แนบมา; ข้อมูลที่ยังไม่ทราบต้องคงเป็นไม่ทราบ และไม่ส่งคำสั่งเดิมซ้ำ",
   };
   return recovery[code]
     || "กดตรวจข้อมูล Terminal ใหม่ แล้วเปิดรายละเอียด EA หรือ Journal เพื่อดูสาเหตุล่าสุดก่อนเริ่มรอบใหม่";
@@ -14536,6 +15203,12 @@ function signalEffectiveExecutionGuardReason(runtime = {}) {
 }
 
 function signalExecutionGuardSummary(runtime = {}) {
+  const initFailure = signalCurrentInitFailureDisplay(runtime);
+  if (initFailure) return `${initFailure.messageTh} • วิธีแก้: ${initFailure.remediationTh}`;
+  const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
+  if (currentGateway) return currentGateway.summary;
+  const pendingLabel = signalTradingReportPendingLabel(runtime);
+  if (pendingLabel) return pendingLabel;
   const selectedPlatform = String(runtime.selectedPlatform || "").trim().toUpperCase();
   const platformLabel = ["MT4", "MT5"].includes(selectedPlatform)
     ? selectedPlatform
@@ -14616,6 +15289,10 @@ function signalSigningKeyCopyState(runtime = {}) {
 }
 
 function signalLiveAccountStatus(runtime = {}, modeAccount = signalGatewayModeAccountStatus(runtime)) {
+  const initFailure = signalCurrentInitFailureDisplay(runtime);
+  if (initFailure) return initFailure.messageTh;
+  const pendingLabel = signalTradingReportPendingLabel(runtime);
+  if (pendingLabel) return pendingLabel;
   const guardReady = runtime.gatewayExecutionGuardReady === true;
   const signedCommandReady = runtime.backendSignedCommandVerificationAvailable === true
     && runtime.signedCommandVerificationAvailable === true
@@ -14671,13 +15348,15 @@ function signalLiveAccountStatus(runtime = {}, modeAccount = signalGatewayModeAc
 
 function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
   if (!container) return;
+  const initFailure = signalCurrentInitFailureDisplay(runtime);
+  const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
   const telemetry = runtime.gatewayRiskTelemetry || {};
   const currentVsMax = (current, maximum, suffix = "") => (
     current === null || maximum === null
       ? "รอข้อมูลจาก EA"
       : `${current} / ${maximum}${suffix}`
   );
-  const guardReady = runtime.gatewayExecutionGuardReady === true;
+  const guardReady = !initFailure && runtime.gatewayExecutionGuardReady === true;
   const signedCommandReady = runtime.backendSignedCommandVerificationAvailable === true
     && runtime.signedCommandVerificationAvailable === true
     && runtime.signingKeyMatch === true;
@@ -14699,10 +15378,10 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
     ["ระบบหลาย Agent", runtime.ensembleAvailable, runtime.ensembleAvailable ? "พร้อมวิเคราะห์" : "รอ Adapter"],
     [
       "MetafxHQ AI Council EA",
-      runtime.gatewayConnected && runtime.gatewayMode !== "shadow",
-      runtime.gatewayConnected
+      !initFailure && runtime.gatewayConnected && runtime.gatewayMode !== "shadow",
+      initFailure?.label || currentGateway?.mode || (runtime.gatewayConnected
         ? (runtime.gatewayMode === "shadow" ? "SHADOW • ไม่ส่ง Order" : runtime.gatewayMode.toUpperCase())
-        : "ยังไม่เชื่อม",
+        : signalTradingReportPendingLabel(runtime) || "ยังไม่เชื่อม"),
     ],
     [
       "Money Management ของ EA",
@@ -14737,7 +15416,7 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
     ["ลายเซ็นคำสั่งจาก Local Runner", signedCommandReady, signedCommandReady ? `ตรวจได้ • ${runtime.signatureAlgorithm || "HMAC-SHA256"}` : "ยังตรวจแบบครบเส้นทางไม่ได้"],
     ["Key ID สำหรับตั้ง Live", signingKey.ready, signingKey.label, signingKey.copyValue],
     ["Key สำหรับบัญชีจริง", runtime.signingKeyPinned === true && runtime.signingKeyMatch === true, runtime.signingKeyPinned === true ? (runtime.signingKeyMatch === true ? "ปักหมุดแล้วและตรงกับ Backend" : "ปักหมุดแล้วแต่ Key ไม่ตรง") : "ยังไม่ปักหมุดใน EA • Live ถูกล็อก"],
-    ["บัญชีจริง", runtime.liveOrderExecutionAvailable, liveAccountStatus],
+    ["บัญชีจริง", !initFailure && runtime.liveOrderExecutionAvailable, liveAccountStatus],
   ];
   container.innerHTML = "";
   items.forEach(([label, ready, value, copyValue]) => {
@@ -15907,7 +16586,7 @@ function renderSignalLatestNewsVote(container, news = {}) {
     section.append(sectionTitle, list);
     card.appendChild(section);
   });
-  appendSignalDeepEvidenceList(card, news.evidence);
+  appendSignalDeepEvidenceList(card, news.evidence || news.sources);
   container.appendChild(card);
   return true;
 }
@@ -15915,7 +16594,7 @@ function renderSignalLatestNewsVote(container, news = {}) {
 function renderSignalNewsContextPanel() {
   const shell = renderSignalDeepShell(els.signalConsensusNewsContent, {
     eyebrow: "News & Market Context",
-    title: "ข่าวและสถานการณ์ระยะสั้น กลาง และยาว",
+    title: "ข่าวและบริบทตลาด",
     description: "แสดงทิศทาง Confidence และลิงก์หลักฐานที่ Backend ส่งมาเท่านั้น หากไม่มีข่าวจะไม่แต่งข้อมูลขึ้นเอง",
   });
   if (!shell?.body) return;
@@ -15932,17 +16611,20 @@ function renderSignalNewsContextPanel() {
     : {};
   const latest = document.createElement("div");
   latest.className = "signal-deep-news-latest-wrap";
-  if (renderSignalLatestNewsVote(latest, news)) {
+  const renderedLatest = renderSignalLatestNewsVote(latest, news);
+  if (renderedLatest) {
     body.appendChild(latest);
   }
-  const grid = document.createElement("div");
-  grid.className = "signal-deep-news-grid";
-  renderSignalNewsHorizonCard(grid, news, "short", "ระยะสั้น");
-  renderSignalNewsHorizonCard(grid, news, "medium", "ระยะกลาง");
-  renderSignalNewsHorizonCard(grid, news, "long", "ระยะยาว");
-  body.appendChild(grid);
+  const horizons = [["short", "ระยะสั้น"], ["medium", "ระยะกลาง"], ["long", "ระยะยาว"]]
+    .filter(([horizon]) => signalDeepNewsHorizon(news, horizon).items.length > 0);
+  if (horizons.length) {
+    const grid = document.createElement("div");
+    grid.className = "signal-deep-news-grid";
+    horizons.forEach(([horizon, label]) => renderSignalNewsHorizonCard(grid, news, horizon, label));
+    body.appendChild(grid);
+  }
   const globalEvidence = signalDeepEvidenceItems(news.evidence || news.sources);
-  if (globalEvidence.length) {
+  if (globalEvidence.length && !renderedLatest) {
     const sourceSection = document.createElement("section");
     const title = document.createElement("h4");
     sourceSection.className = "signal-deep-global-sources";
@@ -16545,14 +17227,16 @@ function renderSignalLivePanel(report = {}) {
   const gatewayAction = container.querySelector("[data-signal-gateway-action]");
   const gatewayDetail = container.querySelector("[data-signal-gateway-detail]");
   if (gatewayAction) {
-    gatewayAction.textContent = runtime.gatewayMode === "shadow"
+    const initFailure = signalCurrentInitFailureDisplay(runtime);
+    const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
+    gatewayAction.textContent = initFailure?.label || currentGateway?.summary || signalTradingReportPendingLabel(runtime) || (runtime.gatewayMode === "shadow"
       ? "SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order"
       : runtime.gatewayExecutionGuardReady
         ? `พร้อมรับคำสั่งรอบใหม่ • ${runtime.gatewayMode.toUpperCase()}`
       : runtime.gatewayConnected
         ? `เชื่อม EA แล้ว • ยังไม่พร้อมส่ง Order`
-        : "ยังไม่เชื่อม EA";
-    gatewayAction.dataset.ready = runtime.gatewayExecutionGuardReady && runtime.gatewayMode !== "shadow" ? "true" : "false";
+        : "ยังไม่เชื่อม EA");
+    gatewayAction.dataset.ready = !initFailure && runtime.gatewayExecutionGuardReady && runtime.gatewayMode !== "shadow" ? "true" : "false";
   }
   if (gatewayDetail) {
     const sizing = signalGatewaySizingSummary(runtime);
@@ -16562,7 +17246,9 @@ function renderSignalLivePanel(report = {}) {
       runtime.gatewayAccountCurrency,
     );
     const modeAccount = signalGatewayModeAccountStatus(runtime);
-    gatewayDetail.textContent = `${sizing.value} • ${signalExecutionGuardSummary(runtime)} • ${ackStatus}${ackSizing ? ` • ${ackSizing}` : ""}${modeAccount.mismatch ? ` • ${modeAccount.value}` : ""}`;
+    const ackReason = runtime.gatewayLastAck?.reasonCode
+      ? signalExecutionGuardReasonLabel(runtime.gatewayLastAck.reasonCode) : "";
+    gatewayDetail.textContent = `${sizing.value} • ${signalExecutionGuardSummary(runtime)} • ${ackStatus}${ackReason ? ` • ${ackReason}` : ""}${ackSizing ? ` • ${ackSizing}` : ""}${modeAccount.mismatch ? ` • ${modeAccount.value}` : ""}`;
   }
 }
 
@@ -16763,6 +17449,7 @@ function renderSignalDecisionPanel(report = {}) {
         <div class="signal-assurance-list" data-signal-operation-rows></div>
       </article>
     </section>
+    <div data-signal-pending-commands></div>
     <section class="signal-timeline">
       <div class="signal-section-heading">
         <div><span>เหตุการณ์ของรอบนี้</span><strong>Decision Trail จาก Backend</strong></div>
@@ -16771,6 +17458,7 @@ function renderSignalDecisionPanel(report = {}) {
     </section>
   `;
   container.querySelector("[data-signal-market-strip]")?.after(createSignalStreamContextBanner(report));
+  renderSignalPendingCommands(container.querySelector("[data-signal-pending-commands]"), report, council.tradeGateway?.orderHistory || {});
   renderSignalMarketStrip(container.querySelector("[data-signal-market-strip]"), report, runtime);
   renderSignalPipelineSteps(container.querySelector("[data-signal-pipeline]"), states);
   const qualityCard = container.querySelector("[data-signal-quality-card]");
@@ -16981,7 +17669,7 @@ function createSignalHistoryRow(entry) {
   type.textContent = signalHistoryTypeLabel(entry);
   title.textContent = safeDashboardDisplayText(item.title, item.id || "รายการจาก Backend");
   status.textContent = displayStatus(item.status || bucket);
-  result.textContent = safeDashboardDisplayText(item.result || item.summary || item.detail, "ยังไม่มีข้อความสรุป");
+  result.textContent = signalHistoryReadableText(item.result || item.summary || item.detail, "ยังไม่มีข้อความสรุป");
   detail.textContent = "ดูรายละเอียด";
   row.append(time, type, title, status, result, detail);
   row.addEventListener("click", () => openSignalHistoryEntry(entry, row));
@@ -17003,7 +17691,8 @@ function signalHistoryAttemptKey(item = {}, kind = "analysis", index = 0) {
     const commandId = safeDashboardDisplayText(item.commandId, "");
     if (commandId) return `legacy-command:${commandId}`;
     if (item.ticket !== null && item.ticket !== undefined && item.ticket !== "") {
-      return `legacy-ticket:${String(item.ticket)}`;
+      const ticket = signalTicketText(item);
+      if (ticket) return `legacy-ticket:${ticket}`;
     }
   }
   const recordId = safeDashboardDisplayText(
@@ -17052,7 +17741,15 @@ function signalHistoryMergedReadModel(report = {}, kind = "analysis") {
   const useLoadedPage = pageScopeMatches && pageState.initialized === true;
   return {
     ...base,
+    // A successfully validated history page has its own availability. A stale
+    // compact report must not hide durable Orders returned for this exact scope.
+    available: useLoadedPage ? true : base.available,
+    error: useLoadedPage ? null : base.error,
+    reasonCode: useLoadedPage ? null : base.reasonCode,
     items,
+    pendingCommands: useLoadedPage
+      ? (pageState.pendingCommands || [])
+      : baseMatchesRequestedScope ? (base.pendingCommands || []) : [],
     summary: useLoadedPage && pageState.summary && typeof pageState.summary === "object"
       ? pageState.summary
       : baseMatchesRequestedScope
@@ -17086,6 +17783,7 @@ function resetSignalHistoryPageCache(kind = null) {
     if (!pageState) return;
     Object.assign(pageState, {
       items: [],
+      pendingCommands: [],
       initialized: false,
       hasMore: false,
       nextCursor: "",
@@ -17163,6 +17861,7 @@ async function loadSignalHistoryPage(kind, report = {}, { firstPage = false } = 
       return true;
     });
     pageState.initialized = true;
+    pageState.pendingCommands = Array.isArray(history.pendingCommands) ? history.pendingCommands : [];
     pageState.hasMore = history.hasMore === true;
     pageState.nextCursor = nextCursor;
     pageState.summary = history.summary && typeof history.summary === "object"
@@ -17225,6 +17924,44 @@ function signalOrderHistoryEntries(report = {}, readModel = null) {
     : [];
 }
 
+function signalPendingCommandModels(report = {}, history = {}) {
+  if (history.available === false || history.scopePending === true) return [];
+  const gateway = signalCouncilModel(report)?.tradeGateway || {};
+  const events = Array.isArray(gateway.ackEvents) ? gateway.ackEvents : [];
+  return (Array.isArray(history.pendingCommands) ? history.pendingCommands : [])
+    .filter((command) => command?.outstanding === true && command.commandId)
+    .map((command) => {
+      const rejection = events.find((event) => event?.commandId === command.commandId && event.code);
+      const reasonCode = rejection?.code || command.reasonCode || command.status || "single_outstanding_command";
+      return {
+        ...command,
+        reasonCode,
+        detail: `${signalExecutionGuardReasonLabel(reasonCode)} (${reasonCode})`,
+      };
+    });
+}
+
+function renderSignalPendingCommands(container, report = {}, history = {}) {
+  if (!container) return;
+  container.replaceChildren();
+  const commands = signalPendingCommandModels(report, history);
+  container.hidden = commands.length === 0;
+  commands.forEach((command) => {
+    const row = document.createElement("section");
+    row.className = "signal-history-read-state";
+    row.dataset.tone = "error";
+    row.setAttribute("role", "status");
+    const content = document.createElement("div");
+    const title = document.createElement("strong");
+    const detail = document.createElement("span");
+    title.textContent = `คำสั่งค้าง • ยังไม่ยืนยันเป็น Order • ${safeDashboardDisplayText(command.side, "")} ${safeDashboardDisplayText(command.symbol, "")} ${safeDashboardDisplayText(command.timeframe, "")}`;
+    detail.textContent = `${command.detail} • Command ${safeDashboardDisplayText(command.commandId, "—")} • บันทึก ${signalThaiDateTime(command.updatedAt || command.createdAt)}`;
+    content.append(title, detail);
+    row.append(content);
+    container.append(row);
+  });
+}
+
 function signalOrderNumber(value, maximumFractionDigits = 5) {
   if (value === null || value === undefined || value === "") return "—";
   const number = Number(value);
@@ -17240,6 +17977,16 @@ function signalOrderSignedPnl(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "—";
   return `${number > 0 ? "+" : ""}${signalOrderNumber(number, 2)}`;
+}
+
+function signalOrderClosedFinancialText(order = {}) {
+  if (order.status !== "closed" || order.executionState !== "CLOSED"
+      || order.outcomeIdentityVerified !== true || order.verificationStatus !== "VERIFIED_CLOSED"
+      || order.ackStatus !== "EXECUTED") return "";
+  const fields = ["closePrice", "grossProfit", "commission", "swap", "fee"];
+  if (!fields.every((field) => typeof order[field] === "number" && Number.isFinite(order[field]))
+      || order.closePrice <= 0) return "รายละเอียดราคาปิดและต้นทุนยังไม่มีหลักฐาน";
+  return `ราคาปิด ${signalOrderNumber(order.closePrice)} • กำไรก่อนต้นทุน ${signalOrderSignedPnl(order.grossProfit)} • Commission ${signalOrderSignedPnl(order.commission)} • Swap ${signalOrderSignedPnl(order.swap)} • Fee ${signalOrderSignedPnl(order.fee)}`;
 }
 
 function signalThaiDateTime(value) {
@@ -17278,6 +18025,75 @@ function signalOrderOpenedTime(order = {}) {
   const value = order.openedAt || order.createdAt || order.updatedAt || "";
   const parsed = value ? new Date(value).getTime() : Number.NaN;
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function signalHistoryReadableText(value, fallback = "") {
+  // Display-only projection: never recover a vote, confidence or order state
+  // from abbreviated result text. The canonical history remains authoritative.
+  const lines = [];
+  const seen = new Set();
+  let partial = false;
+  let structured = false;
+  const add = (text) => {
+    const clean = safeDashboardDisplayText(text, "", { limit: 1200, markTruncated: true });
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      lines.push(clean);
+    }
+  };
+  const visit = (input, depth = 0) => {
+    if (depth > 5 || input === null || input === undefined) return;
+    if (Array.isArray(input)) {
+      structured = true;
+      input.slice(0, 30).forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (typeof input === "object") {
+      structured = true;
+      // Use prose fields only; IDs, source URLs and machine states are not a summary.
+      ["reasonTh", "reason", "summary", "messageTh", "message", "observations"].forEach((key) => {
+        if (Object.hasOwn(input, key)) visit(input[key], depth + 1);
+      });
+      if (Array.isArray(input.evidence)) {
+        input.evidence.slice(0, 30).forEach((entry) => visit(
+          typeof entry === "string" ? entry : entry?.label, depth + 1,
+        ));
+      }
+      return;
+    }
+    if (typeof input !== "string") return;
+    const text = input.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    if (!text) return;
+    // Bracketed diagnostics such as [ERROR] and [TRUNCATED] are prose, not JSON.
+    if (!/^(?:\{|"|\[\s*(?:[\[{"\]\d-]|true\b|false\b|null\b|$))/.test(text)) {
+      add(text);
+      return;
+    }
+    structured = true;
+    try {
+      visit(JSON.parse(text), depth + 1);
+      return;
+    } catch {
+      // Old compact responses can end mid-JSON. Only complete quoted prose
+      // values are usable; never finish a cut-off sentence or infer missing data.
+      partial = true;
+      const prefix = text.slice(0, 24000);
+      const tokens = [...prefix.matchAll(/"(?:\\.|[^"\\])*"/g)];
+      const proseKeys = new Set(["reasonTh", "reason", "summary", "messageTh", "message", "label"]);
+      tokens.forEach((token, index) => {
+        const next = tokens[index + 1];
+        if (!next || !/^\s*:\s*$/.test(prefix.slice(token.index + token[0].length, next.index))) return;
+        try {
+          if (proseKeys.has(JSON.parse(token[0]))) visit(JSON.parse(next[0]), depth + 1);
+        } catch { /* An incomplete or invalid string is not display evidence. */ }
+      });
+    }
+  };
+  visit(value);
+  const summary = safeDashboardDisplayText(lines.join(" • "), "", { limit: 600, markTruncated: true });
+  if (summary) return partial ? `${summary} • แสดงเฉพาะข้อความที่อ่านได้จากข้อมูลสรุปบางส่วน` : summary;
+  if (structured) return "มีข้อมูลวิเคราะห์เดิม แต่ไม่พบข้อความเหตุผลที่อ่านได้ในข้อมูลสรุปนี้";
+  return fallback;
 }
 
 function signalHistoryObject(value) {
@@ -17330,8 +18146,49 @@ function signalHistorySkipReasonLabel(value) {
     bar_time_regression_baseline: "ข้ามเพราะเวลาแท่งย้อนกลับ",
     snapshot_not_captured_during_gap: "ไม่มี Snapshot ของแท่งนี้ในช่วงที่ระบบเว้นห่าง",
     snapshot_artifact_capture_failed: "บันทึก Snapshot สำหรับแท่งนี้ไม่สำเร็จ",
-    durable_snapshot_unavailable: "ไม่พบ Snapshot ถาวรสำหรับวิเคราะห์ย้อนหลัง",
+    durable_snapshot_unavailable: "ไม่พบ Snapshot ของแท่งนี้ • ข้ามโดยไม่เรียก AI",
+    analysis_snapshot_expired_before_start: "Snapshot หมดอายุก่อนเริ่ม • ข้ามโดยไม่เรียก AI",
+    analysis_snapshot_time_invalid_before_start: "ยืนยันเวลาจับ Snapshot ไม่ได้ • ข้ามโดยไม่เรียก AI",
+    new_bar_only_backlog_cancelled: "ยกเลิกคิวย้อนหลังตามนโยบายใหม่ • ไม่เรียก AI",
+    new_bar_only_trigger_not_admitted: "ไม่ผ่านเงื่อนไขตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    new_bar_only_trigger_window_expired: "พ้นช่วงเริ่มวิเคราะห์ของแท่งนี้แล้ว • ข้ามโดยไม่เรียก AI",
+    new_bar_only_missed_trigger: "พลาดช่วงแท่งปิด • ไม่วิเคราะห์ย้อนหลัง",
+    new_bar_only_wait_next_bar: "รอแท่งปิดถัดไป • ไม่เรียก AI ย้อนหลัง",
+    new_bar_only_restart_baseline: "ข้ามคิวเดิมหลังเริ่มระบบใหม่ • ไม่เรียก AI",
+    new_bar_only_stream_change_baseline: "ข้ามคิวเดิมหลังเปลี่ยนกราฟ • ไม่เรียก AI",
+    council_legacy_automatic_backlog_skipped: "ยกเลิกงานอัตโนมัติจากคิวเก่า • ไม่เรียก AI",
+    council_new_bar_all_votes_skipped: "Agent ทั้ง 3 ตัวถูกข้ามก่อนเริ่ม • ไม่เรียก AI",
+    council_new_bar_previous_startup_skipped: "ข้ามงานเดิมหลังเริ่มระบบใหม่ • ไม่เรียก AI",
+    council_new_bar_historical_snapshot_skipped: "Snapshot ไม่ใช่รอบปัจจุบันที่รับไว้ • ไม่เรียก AI",
+    council_new_bar_admission_invalid: "ยืนยันสิทธิ์เริ่มงานของแท่งนี้ไม่ได้ • ไม่เรียก AI",
+    council_new_bar_start_window_expired: "หมดช่วงเริ่มงานก่อน Agent ทำงาน • ไม่เรียก AI",
+    council_new_bar_current_snapshot_unavailable: "ยืนยัน Snapshot ปัจจุบันไม่ได้ก่อนเริ่ม Agent • ไม่เรียก AI",
+    council_new_bar_no_longer_current: "มีแท่งใหม่หรือเปลี่ยนกราฟก่อนเริ่ม Agent • ข้ามรอบเดิม",
+    council_new_bar_analysis_snapshot_expired_before_start: "Snapshot หมดอายุก่อน Agent เริ่มงาน • ไม่เรียก AI",
+    council_new_bar_analysis_snapshot_time_invalid_before_start: "ยืนยันเวลา Snapshot ไม่ได้ก่อน Agent เริ่มงาน • ไม่เรียก AI",
+    council_new_bar_execution_age_limit_unavailable_before_start: "อ่านเกณฑ์อายุ Snapshot จาก EA ไม่ได้ก่อน Agent เริ่มงาน • ไม่เรียก AI",
+    quota_limit_reached: "โควตา Codex เต็มตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_below_reserve: "โควตาคงเหลือต่ำกว่าเกณฑ์ตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_unavailable: "อ่านโควตาไม่ได้ตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_stale: "ข้อมูลโควตาเก่าเกินไปตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_incomplete: "ข้อมูลโควตาไม่ครบตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_provider_hard_stop: "ผู้ให้บริการพักการใช้งานตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    codex_runner_not_ready: "Codex Runner ไม่พร้อมตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    codex_runner_unavailable: "Codex Runner ใช้งานไม่ได้ตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    mission_running: "รอบก่อนหน้ายังทำงานตอนแท่งปิด • ข้ามรอบนี้",
+    council_round_already_active: "รอบก่อนหน้ายังทำงานตอนแท่งปิด • ข้ามรอบนี้",
+    daily_cap_reached: "ครบเพดานรอบรายวันตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    daily_round_limit_reached: "ครบเพดานรอบรายวันตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    daily_limit_reached: "ครบเพดานรอบรายวันตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    execution_age_limit_unavailable_before_start: "รอเกณฑ์อายุ Snapshot จาก EA ก่อนเริ่ม AI",
+    restart_pending_recovered: "กู้คิวที่รอไว้หลังเริ่มระบบใหม่แล้ว",
+    stream_cursor_restored: "คืนตำแหน่งกราฟที่ติดตามไว้แล้ว",
+    gap_history_unavailable: "อ่านประวัติแท่งช่วงที่ขาดหายไม่ได้ จึงยังยืนยันจำนวนแท่งไม่ได้",
   };
+  if (code.startsWith("council_new_bar_gate_skipped_")) {
+    const gate = code.slice("council_new_bar_gate_skipped_".length);
+    return `${labels[gate] || "ระบบไม่พร้อมก่อน Agent เริ่มงาน • ข้ามโดยไม่เรียก AI"} (${code})`;
+  }
   return labels[code] ? `${labels[code]} (${code})` : code;
 }
 
@@ -17398,7 +18255,7 @@ function signalHistoryVote(value = {}, fallbackRole = "") {
     source.score,
     source.probability,
   );
-  const reason = safeDashboardDisplayText(
+  const reason = signalHistoryReadableText(
     source.reasonTh
       || source.reason
       || source.messageTh
@@ -17406,7 +18263,8 @@ function signalHistoryVote(value = {}, fallbackRole = "") {
       || source.reasonCode
       || source.errorCode
       || source.blocker?.causeTh
-      || source.blocker,
+      || source.blocker
+      || (source.observations || source.evidence ? source : null),
     "",
   );
   return {
@@ -17628,6 +18486,14 @@ function signalHistoryPipelineGroups(pipelineItems = []) {
   return { parents, childrenByParent };
 }
 
+function signalSnapshotAgeDetail(preflight = {}) {
+  const age = preflight?.analysisSnapshotAgeSeconds;
+  const limit = preflight?.maximumSnapshotAgeSeconds;
+  if (!Number.isFinite(age) || age < 0 || !Number.isFinite(limit) || limit <= 0) return "";
+  const format = (value) => Math.round(value * 10) / 10;
+  return `อายุ Snapshot ${format(age)} วินาที / เกณฑ์ EA ${format(limit)} วินาที`;
+}
+
 function signalHistoryOrderState(source, identity, orderItems = []) {
   const metrics = signalHistoryMetricObject(source);
   const gateway = signalHistoryObject(source.tradeGateway || metrics.tradeGateway || metrics.execution);
@@ -17644,14 +18510,13 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
     && safeDashboardDisplayText(order.snapshotId, "") === identity.snapshotId
   ));
   const linkageCommandId = safeDashboardDisplayText(linkage.commandId, "");
-  const linkageTicket = Number(linkage.ticket);
+  const linkageTicket = signalTicketText(linkage);
   const exactLinkedOrders = linkage.available === true
     && linkageCommandId
-    && Number.isInteger(linkageTicket)
-    && linkageTicket > 0
+    && linkageTicket
     ? orderItems.filter((order) => (
         safeDashboardDisplayText(order.commandId, "") === linkageCommandId
-        && Number(order.ticket) === linkageTicket
+        && signalTicketText(order) === linkageTicket
       ))
     : [];
   const matchedOrder = linkage.available === true
@@ -17670,7 +18535,7 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
         tone: "attention",
         label: "ผลคำสั่งยังไม่ชัดเจน • ต้องตรวจสถานะ",
         detail: [
-          matchedOrder.ticket ? `Ticket ที่ต้องตรวจ ${matchedOrder.ticket}` : "ไม่พบ Ticket ที่ยืนยันได้",
+          signalTicketText(matchedOrder) ? `Ticket ที่ต้องตรวจ ${signalTicketText(matchedOrder)}` : "ไม่พบ Ticket ที่ยืนยันได้",
           signalExecutionGuardReasonLabel(matchedOrder.ackReasonCode || "EXECUTION_UNKNOWN"),
         ].join(" • "),
       };
@@ -17682,15 +18547,18 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
       && String(matchedOrder.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED";
     const closedAtBroker = closed ? signalBrokerDateTime(matchedOrder.closedAtBroker) : "";
     const details = [
-      matchedOrder.ticket ? `Ticket ${matchedOrder.ticket}` : "EA ยืนยันการเปิดแล้ว",
-      closed && Number.isFinite(Number(matchedOrder.closedPnl))
+      signalTicketText(matchedOrder) ? `Ticket ${signalTicketText(matchedOrder)}` : "EA ยืนยันการเปิดแล้ว",
+      closed && Number.isFinite(matchedOrder.closedPnl)
         ? `P/L ${signalOrderSignedPnl(matchedOrder.closedPnl)}`
         : "",
       closedAtBroker ? `ปิดเวลา Broker ${closedAtBroker}` : "",
     ].filter(Boolean);
     return {
       tone: matchedOrder.verified === true ? "confirmed" : "attention",
-      label: `${closed ? "ปิด" : "เปิด"} ${side || "Order"}`,
+      label: closed ? `ปิด ${side || "Order"}`
+        : matchedOrder.status === "open" && matchedOrder.executionState === "OPEN" && matchedOrder.outcomeIdentityVerified === true
+          ? `เปิด ${side || "Order"}`
+          : `เปิดสำเร็จ • ไม่ทราบสถานะล่าสุด`,
       detail: details.join(" • "),
     };
   }
@@ -17759,7 +18627,13 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
     return {
       tone: "blocked",
       label: "บล็อกก่อนส่ง • ไม่ได้เปิด Order",
-      detail: signalExecutionGuardReasonLabel(prepublishBlockReason),
+      detail: [signalExecutionGuardReasonLabel(prepublishBlockReason),
+        Number.isFinite(gateway.executionPricePreflight?.priceDriftPoints)
+          && Number.isFinite(gateway.executionPricePreflight?.maximumSignalDriftPoints)
+          ? `ราคาห่าง ${gateway.executionPricePreflight.priceDriftPoints} จุด / เกณฑ์ ${gateway.executionPricePreflight.maximumSignalDriftPoints} จุด` : "",
+        signalSnapshotAgeDetail(gateway.executionPricePreflight),
+        `(${prepublishBlockReason.toLowerCase()})`,
+      ].filter(Boolean).join(" • "),
     };
   }
   if (linkage.available === true) {
@@ -17771,7 +18645,7 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
       confirmed_unknown: "เปิดสำเร็จ • ไม่ทราบสถานะล่าสุด",
     };
     const details = [
-      linkage.ticket ? `Ticket ${safeDashboardDisplayText(linkage.ticket, "—")}` : "ไม่พบ Ticket",
+      signalTicketText(linkage) ? `Ticket ${signalTicketText(linkage)}` : "ไม่พบ Ticket",
       status ? `สถานะ ${statusLabels[status] || safeDashboardDisplayText(status, "ไม่ทราบ")}` : "ไม่พบสถานะล่าสุด",
       linkage.commandId ? `Command ${safeDashboardDisplayText(linkage.commandId, "—")}` : "",
     ].filter(Boolean);
@@ -17787,12 +18661,36 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
   if (gateway.commandPublished === true || gatewayStatus.includes("waiting_ack")) {
     return { tone: "pending", label: "ส่งคำสั่งแล้ว", detail: "กำลังรอ ACK จาก EA" };
   }
+  const analysisStartPreflight = signalHistoryObject(source.analysisStartPreflight || metrics.analysisStartPreflight
+    || source.analysisContext?.automation?.analysisStartPreflight);
   if (coverageStatus === "skipped" || source.skipReasonCode || metrics.skipReasonCode) {
     const reason = signalHistorySkipReasonLabel(source.skipReasonCode || metrics.skipReasonCode);
     return {
       tone: "none",
       label: "ข้ามรอบ • ไม่มีคำสั่ง",
-      detail: reason || "Backend ข้ามรอบนี้ก่อนการลงมติ",
+      detail: [reason || "Backend ข้ามรอบนี้ก่อนการลงมติ",
+        signalSnapshotAgeDetail(analysisStartPreflight),
+      ].filter(Boolean).join(" • "),
+    };
+  }
+  // Keep completed legacy audit rounds readable. A cancelled pending capture
+  // above is skipped even when it retains an older audit-only preflight.
+  if (analysisStartPreflight.status === "audit_only") {
+    return {
+      tone: "none",
+      label: "วิเคราะห์เก็บประวัติ • ไม่ส่งคำสั่ง",
+      detail: [analysisStartPreflight.reasonCode === "analysis_snapshot_time_invalid_before_start"
+        ? "ยืนยันเวลาจับ Snapshot ไม่ได้ จึงไม่ส่ง Order ย้อนหลัง"
+        : "Snapshot หมดอายุสำหรับส่งคำสั่ง จึงไม่ส่ง Order ย้อนหลัง",
+        signalSnapshotAgeDetail(analysisStartPreflight),
+      ].filter(Boolean).join(" • "),
+    };
+  }
+  if (coverageStatus === "pending" && source.queue?.deferred === true) {
+    return {
+      tone: "none",
+      label: "คิวเดิม • รอ Backend ยืนยันสถานะ",
+      detail: "ยังไม่มีคำสั่ง • นโยบายปัจจุบันไม่วิเคราะห์ย้อนหลัง",
     };
   }
   if (
@@ -17808,7 +18706,7 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
       label: running ? "กำลังวิเคราะห์ • ยังไม่มีคำสั่ง" : "รอวิเคราะห์ • ยังไม่มีคำสั่ง",
       detail: running
         ? "Specialist กำลังทำงานและ Backend ยังไม่มีมติสุดท้าย"
-        : "แท่งนี้อยู่ในคิว FIFO และยังไม่เริ่มลงมติ",
+        : "แท่งนี้อยู่ในคิววิเคราะห์และยังไม่เริ่มลงมติ",
     };
   }
   if (source.roundTerminalPartial === true || source.roundFailed === true) {
@@ -17833,8 +18731,9 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
     return {
       tone: "blocked",
       label: "ไม่ได้เปิด Order",
-      detail: reasonLabels[normalizedReason]
-        || (reasonCode ? signalExecutionGuardReasonLabel(reasonCode) : "ไม่พบหลักฐานการส่งคำสั่ง"),
+      detail: reasonCode
+        ? `${reasonLabels[normalizedReason] || signalExecutionGuardReasonLabel(reasonCode)} (${reasonCode})`
+        : "ไม่พบหลักฐานการส่งคำสั่ง",
     };
   }
   if (["HOLD", "NO_TRADE"].includes(finalDecision)) {
@@ -18153,18 +19052,22 @@ function createSignalAnalysisVoteCell(vote, labelTh) {
         : displayState === "skipped"
           ? "ข้าม"
           : "ไม่มีผล";
-  if (vote?.complete && Number.isFinite(vote.confidence)) {
-    detail.textContent = `ความมั่นใจ ${Math.round(vote.confidence * 10) / 10}%`;
+  const reason = signalHistoryReadableText(vote?.reason, "");
+  if (vote?.complete) {
+    detail.textContent = [
+      Number.isFinite(vote.confidence) ? `ความมั่นใจ ${Math.round(vote.confidence * 10) / 10}%` : "",
+      reason || "Agent ให้ผลแล้ว แต่ข้อมูลสรุปนี้ไม่มีข้อความเหตุผล",
+    ].filter(Boolean).join(" • ");
   } else if (vote?.skipped) {
-    detail.textContent = safeDashboardDisplayText(vote.reason, "Agent ข้ามรอบนี้เพราะข้อมูลไม่พอ");
+    detail.textContent = reason || "Agent ข้ามรอบนี้เพราะข้อมูลไม่พอ";
   } else if (displayState === "waiting") {
-    detail.textContent = "แท่งนี้ยังอยู่ในคิว FIFO";
+    detail.textContent = "แท่งนี้ยังอยู่ในคิววิเคราะห์";
   } else if (displayState === "running") {
     detail.textContent = "กำลังรอ Agent ตัวนี้ส่งผล";
   } else if (displayState === "skipped") {
     detail.textContent = "Backend ข้ามรอบนี้โดยไม่มีผลจาก Agent";
   } else if (vote) {
-    detail.textContent = safeDashboardDisplayText(vote.reason, "รอบสิ้นสุดโดยไม่มีผลที่ใช้ได้จาก Agent ตัวนี้");
+    detail.textContent = reason || "รอบสิ้นสุดโดยไม่มีผลที่ใช้ได้จาก Agent ตัวนี้";
   } else {
     detail.textContent = "รอบสิ้นสุดแล้วโดยไม่พบผลจาก Agent ตัวนี้";
   }
@@ -18203,7 +19106,9 @@ function createSignalAnalysisHistoryRow(round) {
     const queueText = queuePosition !== null
       ? ` • คิว ${Math.trunc(queuePosition)}${queueDepth !== null ? `/${Math.trunc(queueDepth)}` : ""}`
       : "";
-    timeDetail.textContent = `รอคิว FIFO${queueText} • ${round.completeCount}/3 ครบ`;
+    timeDetail.textContent = round.queue?.deferred === true
+      ? `เก็บไว้รอพื้นที่คิว • ยังไม่เริ่มวิเคราะห์ • ${round.completeCount}/3 ครบ`
+      : `รอคิววิเคราะห์${queueText} • ${round.completeCount}/3 ครบ`;
   } else if (round.roundRunning) {
     timeDetail.textContent = `กำลังวิเคราะห์ • ได้ผลแล้ว ${round.completeCount}/3`;
   } else if (round.roundFailed) {
@@ -18295,7 +19200,7 @@ function createSignalOrderHistoryRow(order) {
   row.setAttribute("role", "listitem");
   row.dataset.side = sideValue;
   row.dataset.verified = order.verified === true ? "true" : "false";
-  row.dataset.status = ["open", "closed", "confirmed_unknown"].includes(order.status)
+  row.dataset.status = ["open", "closed", "confirmed_unknown", "execution_unknown_unverified"].includes(order.status)
     ? order.status
     : "confirmed_unknown";
 
@@ -18328,7 +19233,10 @@ function createSignalOrderHistoryRow(order) {
   const mode = document.createElement("small");
   const mission = document.createElement("small");
   const outcome = document.createElement("small");
-  status.textContent = safeDashboardDisplayText(
+  const lifecycleConfirmed = order.outcomeIdentityVerified === true
+    && ((order.status === "open" && order.executionState === "OPEN" && order.verificationStatus === "VERIFIED_OPEN")
+      || (order.status === "closed" && order.executionState === "CLOSED" && order.verificationStatus === "VERIFIED_CLOSED"));
+  status.textContent = (lifecycleConfirmed ? `${order.executionState} • ` : "") + safeDashboardDisplayText(
     order.statusTh,
     order.status === "closed"
       ? "ปิดแล้ว"
@@ -18336,7 +19244,7 @@ function createSignalOrderHistoryRow(order) {
         ? "เปิดอยู่"
         : "เปิดสำเร็จ • ไม่ทราบสถานะล่าสุด",
   );
-  ticket.textContent = `Ticket ${safeDashboardDisplayText(order.ticket, "—")}`;
+  ticket.textContent = `Ticket ${signalTicketText(order) || "ไม่พบเลขที่ยืนยันได้"}`;
   mode.textContent = order.mode
     ? `โหมด ${safeDashboardDisplayText(String(order.mode).toUpperCase(), "ไม่ทราบ")}`
     : "ไม่พบโหมดบัญชีจาก ACK";
@@ -18348,7 +19256,7 @@ function createSignalOrderHistoryRow(order) {
     && order.outcomeIdentityVerified === true
     && String(order.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED";
   if (authoritativeClosedOutcome) {
-    const closedPnl = Number(order.closedPnl);
+    const closedPnl = order.closedPnl;
     const closedAtBroker = signalBrokerDateTime(order.closedAtBroker);
     outcome.textContent = [
       Number.isFinite(closedPnl) ? `P/L ${signalOrderSignedPnl(closedPnl)}` : "",
@@ -18357,6 +19265,12 @@ function createSignalOrderHistoryRow(order) {
   }
   evidence.append(status, ticket, mode, mission);
   if (outcome.textContent) evidence.append(outcome);
+  const financialText = signalOrderClosedFinancialText(order);
+  if (financialText) {
+    const financial = document.createElement("small");
+    financial.textContent = financialText;
+    evidence.append(financial);
+  }
 
   row.append(openedAt, side, market, lot, openPrice, stopLoss, takeProfit, reason, evidence);
   return row;
@@ -18375,7 +19289,7 @@ function renderSignalHistoryPanelLegacy(report = {}, { focusSearch = false } = {
   let filtered = allOrders.filter((order) => {
     if (!query) return true;
     return [
-      order.ticket,
+      signalTicketText(order),
       order.commandId,
       order.missionId,
       order.symbol,
@@ -18520,7 +19434,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
   let filtered = allOrders.filter((order) => {
     if (!query) return true;
     return [
-      order.ticket,
+      signalTicketText(order),
       order.commandId,
       order.missionId,
       order.symbol,
@@ -18620,6 +19534,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
       <div><strong data-signal-history-read-title></strong><span data-signal-history-read-detail></span></div>
       ${shouldOfferRetry ? '<button type="button" data-signal-history-retry>ตรวจใหม่</button>' : ""}
     </section>
+    <div data-signal-pending-commands></div>
     <div class="signal-history-subtabs" role="tablist" aria-label="เลือกประเภทประวัติ AI Trade">
       <button id="signalOrderHistoryTab" type="button" role="tab" data-signal-history-tab="orders" aria-controls="signalOrderHistoryPanel" aria-selected="${activeHistoryTab === "orders"}" tabindex="${activeHistoryTab === "orders" ? "0" : "-1"}">ประวัติการเปิดออเดอร์</button>
       <button id="signalAnalysisHistoryTab" type="button" role="tab" data-signal-history-tab="analysis" aria-controls="signalAnalysisHistoryPanel" aria-selected="${activeHistoryTab === "analysis"}" tabindex="${activeHistoryTab === "analysis" ? "0" : "-1"}">ประวัติการวิเคราะห์</button>
@@ -18629,7 +19544,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
         <div>
           <span>หลักฐานจาก EA และ Local Runner</span>
           <h3>ประวัติการเปิด Order</h3>
-          <p>แสดงเฉพาะ Order ที่ Backend ได้รับหลักฐานจาก EA พร้อม Ticket จริง แถวสีเหลืองหมายถึงเปิด Order แล้วแต่หลักฐานเชื่อม Mission หรือการยืนยันล่าสุดยังไม่ครบ</p>
+          <p>แสดงหลักฐานจาก EA พร้อม Ticket • OPEN/CLOSED ใช้ผลตรวจสถานะจริง แถวที่ยังไม่ยืนยันจะแสดงความไม่แน่นอน และคำสั่งค้างแสดงแยกด้านบน</p>
         </div>
         <small data-signal-history-count></small>
       </div>
@@ -18640,7 +19555,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
         </label>
       </div>
       <div class="signal-history-summary" aria-label="สรุปประวัติ Order">
-        <div><span>เปิดสำเร็จทั้งหมด</span><strong data-signal-history-total></strong></div>
+        <div><span>Order ที่มีหลักฐาน</span><strong data-signal-history-total></strong></div>
         <div><span>กำลังเปิดอยู่</span><strong data-signal-history-open></strong></div>
         <div><span>BUY</span><strong data-signal-history-buy></strong></div>
         <div><span>SELL</span><strong data-signal-history-sell></strong></div>
@@ -18671,7 +19586,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
       <div class="signal-analysis-history-summary" aria-label="สรุปประวัติการวิเคราะห์">
         <div><span>รอบที่บันทึก</span><strong data-signal-analysis-total></strong></div>
         <div><span>ครบ 3/3</span><strong data-signal-analysis-complete></strong></div>
-        <div data-tone="waiting"><span>รอคิว FIFO</span><strong data-signal-analysis-waiting></strong></div>
+        <div data-tone="waiting"><span>รอคิววิเคราะห์</span><strong data-signal-analysis-waiting></strong></div>
         <div data-tone="running"><span>กำลังวิเคราะห์</span><strong data-signal-analysis-running></strong></div>
         <div data-tone="skipped"><span>ข้ามโดย Backend</span><strong data-signal-analysis-skipped></strong></div>
         <div data-tone="attention"><span>จบบางส่วน / ล้มเหลว</span><strong data-signal-analysis-attention></strong></div>
@@ -18735,6 +19650,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
 
   const search = container.querySelector("[data-signal-history-search]");
   const orderList = container.querySelector("[data-signal-history-list]");
+  renderSignalPendingCommands(container.querySelector("[data-signal-pending-commands]"), report, orderHistory);
   const orderMore = container.querySelector("[data-signal-order-more]");
   const analysisMore = container.querySelector("[data-signal-analysis-more]");
   search.value = state.modal.signalHistoryQuery;
@@ -19617,6 +20533,10 @@ function getWorkflowSelectedTab(propId, dashboard) {
   if (propId === EA_FACTORY_PROP_ID) {
     const factoryDomain = dashboard?.domainData?.eaFactory || {};
     const preferredPageId = eaFactoryPreferredPageId(factoryDomain);
+    const explicitPage = tabs.find((tab) => tab.id === state.modal.eaFactory?.explicitPageId);
+    // Opening the Factory can default to the exact Run needing attention, but
+    // polling must never undo an operator's read-only page navigation.
+    if (explicitPage) return explicitPage;
     // Recovery/action-required states belong to the exact selected Build.
     // Keep that Build on page 2 after a refresh even when Backend busy=null;
     // otherwise a persisted page-1 selection hides the exact Resume action.
@@ -20704,6 +21624,98 @@ function filterIndicatorScoutRollingSevenDays(items, now = Date.now()) {
   });
 }
 
+function radarAttemptPresentation(item = {}) {
+  const status = String(item.status || "unknown").toLowerCase().replace(/[\s-]+/g, "_");
+  const signals = [item.workStatus, item.dispatchState, item.reasonCode, item.errorCode, item.blockedCapability, item.runnerStatus]
+    .map((value) => String(value || "").toLowerCase()).join(" ");
+  const terminal = ["failed", "blocked", "cancelled", "canceled", "rejected"].includes(status);
+  if (terminal) return { state: "failed", label: "รอบติดขัด", tone: "error" };
+  if (["completed", "ready", "succeeded"].includes(status)) {
+    return { state: "completed", label: "งานจบแล้ว • ผลเผยแพร่ขึ้นกับการตรวจหลักฐาน", tone: "ready" };
+  }
+  if (signals.includes("corrective_open_hourly_capacity_insufficient")) {
+    return { state: "hourly_capacity_waiting", label: "พักรอช่องรันรายชั่วโมงของ HQ", tone: "waiting" };
+  }
+  if (/quota|rate[_ -]?limit|credit|budget/.test(signals) || ["quota_deferred", "waiting_quota", "rate_limited"].includes(status)) {
+    return { state: "quota_waiting", label: "พักรอโควตา", tone: "waiting" };
+  }
+  if (status === "deferred" || /deferred|waiting_retry|retry_wait/.test(signals)) {
+    return { state: "deferred", label: "พักรอลองใหม่", tone: "waiting" };
+  }
+  if (["queued", "pending", "waiting", "waiting_approval"].includes(status)) {
+    return { state: "queued", label: "รอคิวเริ่มงาน", tone: "waiting" };
+  }
+  if (["running", "in_progress", "retrying"].includes(status)) {
+    return { state: "running", label: "กำลังทำงาน", tone: "running" };
+  }
+  return { state: "unknown", label: "รอ Backend ยืนยันสถานะ", tone: "waiting" };
+}
+
+function normalizeRadarAttempts(rows = []) {
+  const seen = new Set();
+  const reasons = {
+    mission_prompt_too_large: "ข้อความสำหรับวิเคราะห์ยาวเกินขอบเขต จึงยังเริ่มงานไม่ได้",
+    provider_rate_limited: "ผู้ให้บริการจำกัดการใช้งานชั่วคราว",
+    codex_rate_limited: "Codex ถึงขีดจำกัดการใช้งานชั่วคราว",
+    rate_limited: "รอบนี้ติดขีดจำกัดคำขอ (Rate limit) จึงหยุดก่อนมีผลที่ตรวจผ่าน",
+    radar_retry_quarantined: "ระบบหยุดลองซ้ำอัตโนมัติสำหรับรอบนี้แล้ว เพราะเกินขอบเขตการลองที่กำหนด และเก็บประวัติความล้มเหลวไว้",
+    corrective_open_hourly_capacity_insufficient: "ช่องรันรายชั่วโมงภายใน HQ ยังไม่พอสำหรับรอบค้นหาและตรวจหลักฐาน ระบบรอให้ช่องว่างก่อนลองต่อ",
+    radar_batch_attempt_incomplete: "ผลรอบนี้ยังไม่ผ่านเงื่อนไขการตรวจหลักฐาน",
+    radar_evidence_urls_not_all_opened: "ยังตรวจหน้าเว็บหลักฐานไม่ครบ",
+    invalid_output: "ผลลัพธ์ยังไม่ผ่านรูปแบบหรือหลักฐานที่กำหนด",
+  };
+  return (Array.isArray(rows) ? rows : []).filter((item) => item && typeof item === "object")
+    .map((item) => {
+      const id = String(item.missionId || item.id || "").trim();
+      if (!id || seen.has(id)) return null;
+      seen.add(id);
+      const reasonCode = safeDashboardDisplayText(item.reasonCode || item.errorCode || item.blocker?.code || item.runnerStatus, "");
+      let rawReason = item.reasonTh || reasons[reasonCode] || item.blocker?.causeTh || item.result || item.reason || "";
+      if (typeof rawReason === "string") {
+        const receiptSuffix = rawReason.match(/(?:^|[;•]\s*|\s+)workflowReceipt\s*=\s*(\{[\s\S]*\})\s*$/);
+        if (receiptSuffix) {
+          try {
+            const receipt = JSON.parse(receiptSuffix[1]);
+            if (receipt?.procedureId === "backend-readonly-indicator-scout"
+              && receipt.procedureKind === "backend_procedure"
+              && typeof receipt.loaded === "boolean" && typeof receipt.version === "string") {
+              rawReason = rawReason.slice(0, receiptSuffix.index).trim();
+            }
+          } catch { /* Preserve unrecognized diagnostics instead of guessing their boundaries. */ }
+        }
+      }
+      const reason = typeof rawReason === "string" && !/^[\s]*[\[{]/.test(rawReason)
+        ? safeDashboardDisplayText(rawReason, "") : "";
+      return {
+        id,
+        ...radarAttemptPresentation(item),
+        status: safeDashboardDisplayText(item.status, "unknown"),
+        reason: reason || reasons[reasonCode] || (reasonCode ? `สาเหตุจาก Backend: ${reasonCode}` : "Backend ยังไม่ส่งรายละเอียดของรอบนี้"),
+        reasonCode,
+        createdAt: item.createdAt || null,
+        startedAt: item.startedAt || null,
+        completedAt: item.completedAt || null,
+        updatedAt: Number.isFinite(Date.parse(item.updatedAt)) ? item.updatedAt : item.createdAt || null,
+        nextAttemptAt: item.nextAttemptAt || null,
+      };
+    }).filter(Boolean)
+    .sort((left, right) => (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0))
+    .slice(0, 50);
+}
+
+function radarReadStatusMessage(domain = {}) {
+  const readState = domain.readState;
+  if (!readState) return "";
+  if (!readState.hasData) return readState.status === "error"
+    ? "โหลดสถานะ Radar ไม่สำเร็จ จึงยังยืนยันเวลารันและจำนวนผลไม่ได้ ระบบจะลองโหลดข้อมูลใหม่"
+    : "กำลังโหลดสถานะ Radar และประวัติจาก Backend";
+  if (!["error", "loading"].includes(readState.status)) return "";
+  const observed = readState.updatedAt ? ` • ข้อมูล ณ ${formatThaiDateTime(readState.updatedAt)}` : "";
+  return readState.status === "error"
+    ? `กำลังแสดงข้อมูลเดิม${observed} • โหลดข้อมูลล่าสุดไม่สำเร็จ`
+    : `กำลังแสดงข้อมูลเดิม${observed} • กำลังโหลดข้อมูลล่าสุด`;
+}
+
 function normalizeRadarSchedule(rawSchedule = {}) {
   const schedule = rawSchedule && typeof rawSchedule === "object" && !Array.isArray(rawSchedule)
     ? rawSchedule
@@ -20840,23 +21852,79 @@ function radarBangkokMinuteOfDay(value = Date.now()) {
   }
 }
 
+function normalizeRadarPublicationPolicy(value = {}, fallbackMaximum = INDICATOR_SCOUT_EXPECTED_BATCH_SIZE) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const supplied = Object.keys(source).length > 0;
+  const version = supplied ? source.version : (fallbackMaximum === 6 ? 1 : 2);
+  const legacy = version === 1;
+  const maximumItemCount = legacy ? 6 : 3;
+  const minimumItemCount = legacy ? 6 : 0;
+  const valid = !supplied || ((version === 1 || version === 2)
+    && (source.maximumItemCount ?? source.maxItems) === maximumItemCount
+    && (source.minimumItemCount ?? source.minItems) === minimumItemCount
+    && (legacy || source.mode === undefined || source.mode === "up_to_maximum"));
+  return { version, mode: legacy ? "exact_count" : "up_to_maximum", maximumItemCount, minimumItemCount, legacy, valid };
+}
+
+function radarPublicationCountLabel(domain = {}, count = 0) {
+  const policy = normalizeRadarPublicationPolicy(
+    domain.todayPublicationPolicy || domain.publicationPolicy,
+    domain.expectedBatchSize,
+  );
+  return policy.legacy
+    ? `${count} รายการ • กติกาเดิม 6 รายการ`
+    : `${count} รายการ • สูงสุด ${policy.maximumItemCount} รายการต่อวัน`;
+}
+
 function getRadarTodayRunState(domain = {}, now = Date.now()) {
-  const expectedBatchSize = Number.isInteger(domain?.expectedBatchSize)
-    ? domain.expectedBatchSize
-    : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
+  if (domain.readState?.hasData === false) {
+    const failed = domain.readState.status === "error";
+    return {
+      state: failed ? "data_error" : "data_loading", tone: failed ? "error" : "waiting",
+      title: failed ? "ยังโหลดสถานะ Radar ไม่สำเร็จ" : "กำลังโหลดสถานะ Radar",
+      detail: radarReadStatusMessage(domain), lastRunAt: null, nextRunAt: null, error: "",
+    };
+  }
+  const publicationPolicy = normalizeRadarPublicationPolicy(
+    domain.todayPublicationPolicy || domain.publicationPolicy, domain.expectedBatchSize,
+  );
+  const expectedBatchSize = publicationPolicy.maximumItemCount;
   const suppliedTodayEntries = Array.isArray(domain?.todayEntries) ? domain.todayEntries : [];
-  const todayEntries = suppliedTodayEntries.length === expectedBatchSize
+  const invalidPublication = domain.publicationValidationError === true || !publicationPolicy.valid
+    || suppliedTodayEntries.length > expectedBatchSize;
+  if (invalidPublication) {
+    return {
+      state: "publication_invalid", tone: "error",
+      title: "จำนวนผลรายงานไม่ตรงกับกติกา จึงยังไม่แสดงรายการ",
+      detail: "รอข้อมูลที่ตรวจยืนยันจาก Backend อีกครั้ง ระบบไม่ตัดผลบางส่วนมาแสดงเป็นรายงานสำเร็จ",
+      lastRunAt: domain?.schedule?.lastRunAt || null, nextRunAt: domain?.schedule?.nextRunAt || null, error: "",
+    };
+  }
+  const todayEntries = (publicationPolicy.legacy ? suppliedTodayEntries.length === expectedBatchSize : suppliedTodayEntries.length <= expectedBatchSize)
     ? suppliedTodayEntries
     : [];
   if (todayEntries.length) {
     return {
       state: "verified_results",
       tone: "ready",
-      title: `รายงานวันนี้ผ่านการตรวจครบ ${todayEntries.length}/${expectedBatchSize}`,
-      detail: "แสดงเฉพาะรายการที่ Backend ยืนยันหลักฐานและผูกเข้ากับรอบวันนี้แล้ว",
+      title: publicationPolicy.legacy
+        ? `รายงานวันนี้ตรวจผ่าน ${todayEntries.length} รายการ (กติกาเดิม)`
+        : `รายงานวันนี้ตรวจผ่าน ${todayEntries.length} รายการ`,
+      detail: publicationPolicy.legacy
+        ? "เก็บรายงานเดิมครบ 6 รายการ • รอบใหม่เผยแพร่ตามที่ตรวจพบจริง สูงสุด 3 รายการต่อวัน"
+        : "แสดงตามจำนวนที่ตรวจผ่านจริง สูงสุด 3 รายการต่อวัน • EA, Indicator หรือเทคโนโลยีจาก GitHub คละประเภทได้",
       lastRunAt: domain?.schedule?.lastRunAt || domain?.serviceHealth?.lastRunAt || null,
       nextRunAt: domain?.schedule?.nextRunAt || null,
       error: "",
+    };
+  }
+  if (domain.verifiedEmpty === true && !publicationPolicy.legacy) {
+    return {
+      state: "verified_empty", tone: "ready",
+      title: "ตรวจเสร็จแล้ว วันนี้ไม่พบรายการใหม่ที่ผ่านเกณฑ์",
+      detail: "รอบวันนี้สำเร็จด้วย 0 รายการ ไม่ถือเป็นข้อผิดพลาด • ผลเดิมยังดูได้ในแท็บ ย้อนหลัง 7 วัน",
+      lastRunAt: domain?.schedule?.lastRunAt || domain?.serviceHealth?.lastRunAt || null,
+      nextRunAt: domain?.schedule?.nextRunAt || null, error: "",
     };
   }
   const schedule = normalizeRadarSchedule(domain?.schedule);
@@ -20916,15 +21984,48 @@ function getRadarTodayRunState(domain = {}, now = Date.now()) {
   )) || repairInProgress;
   if (running && !terminalBlockedToday) {
     const correctiveNextAttemptAt = repairInProgress ? repair.nextAttemptAt : null;
+    const activeAttempt = (domain.attemptHistory || []).find((item) => (
+      item.id === service.activeMissionId || item.id === schedule.lastMissionId
+    ));
+    if (activeAttempt?.state === "failed" || activeAttempt?.state === "completed") {
+      return {
+        state: activeAttempt.state === "failed" ? "corrective_failed" : "awaiting_result",
+        tone: activeAttempt.state === "failed" ? "error" : "waiting",
+        title: activeAttempt.state === "failed" ? "รอบล่าสุดติดขัด จึงยังไม่มีรายงาน" : "รอบจบแล้ว แต่ยังไม่พบผลที่ตรวจผ่าน",
+        detail: activeAttempt.reason, lastRunAt, nextRunAt: schedule.nextRunAt, error: "",
+      };
+    }
+    const queueState = activeAttempt?.state === "running" ? ""
+      : activeAttempt?.state === "hourly_capacity_waiting" ? "hourly_capacity_waiting"
+      : activeAttempt?.state === "quota_waiting" ? "quota_waiting"
+      : activeAttempt?.state === "deferred" || repair.status === "deferred" ? "deferred"
+      : activeAttempt?.state === "queued" || repair.status === "queued" || hasStatus("queued", "pending") ? "queued"
+      : "";
+    if (queueState) {
+      const nextAttemptAt = activeAttempt?.nextAttemptAt || correctiveNextAttemptAt;
+      return {
+        state: queueState, tone: "waiting",
+        title: queueState === "hourly_capacity_waiting" ? "พักรอช่องรันรายชั่วโมงของ HQ"
+          : queueState === "quota_waiting" ? "พักรอโควตาก่อนค้นหาต่อ"
+          : queueState === "deferred" ? "พักรอลองค้นหาอีกครั้ง"
+          : correctiveRunning ? (publicationPolicy.legacy ? `รอคิวค้นหาต่อให้ครบ ${expectedBatchSize} รายการ` : "รอคิวค้นหาและตรวจหลักฐานต่อ") : "รอคิวเริ่มค้นหา",
+        detail: activeAttempt?.reason || (queueState === "deferred"
+          ? "รอบเดิมยังไม่ถูกปิด ระบบพักตามขีดจำกัดชั่วคราวและรอลองใหม่ โดยยังไม่เผยแพร่ผลที่ยังไม่ผ่านการตรวจ"
+          : "Backend เก็บงานไว้ในคิวแล้ว แต่ยังไม่ยืนยันว่ากำลังประมวลผล จำนวนผลที่ตรวจผ่านอาจยังเป็น 0"),
+        lastRunAt, nextRunAt: nextAttemptAt || schedule.nextRunAt, nextAttemptAt, error: "",
+      };
+    }
     return {
       state: correctiveRunning ? "corrective_running" : "running",
       tone: "running",
       title: correctiveRunning
-        ? `กำลังหาให้ครบ ${expectedBatchSize} รายการ`
+        ? (publicationPolicy.legacy ? `กำลังหาให้ครบ ${expectedBatchSize} รายการ` : "กำลังค้นหาและตรวจหลักฐานต่อ")
         : "Backend กำลังค้นหาและตรวจหลักฐาน",
       detail: repairInProgress && repair.status === "deferred"
-        ? "รอบเดิมยังไม่ถูกปิด ระบบพักตามขีดจำกัดชั่วคราวและจะค้นหาต่ออัตโนมัติ โดยไม่ใช้ผลที่ยังไม่ครบแทนรายงาน"
-        : "ระบบจะเผยแพร่รายการพร้อมกันเมื่อจบรอบและหลักฐานผ่านครบ ระหว่างทำงานจำนวนรายการอาจยังแสดงเป็น 0",
+        ? "รอบเดิมยังไม่ถูกปิด ระบบพักตามขีดจำกัดชั่วคราวและจะค้นหาต่ออัตโนมัติ โดยยังไม่เผยแพร่ผลที่ยังไม่ผ่านการตรวจ"
+        : (publicationPolicy.legacy
+            ? "ระบบจะเผยแพร่รายการพร้อมกันเมื่อจบรอบและหลักฐานผ่านครบ ระหว่างทำงานจำนวนรายการอาจยังแสดงเป็น 0"
+            : "เผยแพร่ตามที่ตรวจผ่านจริงตั้งแต่ 0–3 รายการเมื่อจบรอบ ไม่ต้องหาให้ครบ 3 • ระหว่างทำงานยังไม่มีผลเผยแพร่"),
       lastRunAt,
       nextRunAt: correctiveNextAttemptAt || schedule.nextRunAt,
       nextAttemptAt: correctiveNextAttemptAt,
@@ -20980,15 +22081,23 @@ function getRadarTodayRunState(domain = {}, now = Date.now()) {
     "no_results",
     "no_new_results",
   );
-  if (completed && lastRunToday) {
+  if (publicationPolicy.legacy && completed && lastRunToday) {
     return {
       state: "verified_empty",
       tone: "ready",
-      title: "รอบวันนี้สำเร็จ แต่ไม่พบรายการใหม่ที่ผ่านการตรวจ",
-      detail: "Backend ทำรอบวันนี้เสร็จแล้ว และยืนยันว่าไม่มีรายการใหม่สำหรับเผยแพร่ ผลย้อนหลังยังดูได้จากแท็บ ย้อนหลัง 7 วัน",
+      title: "ตรวจเสร็จแล้ว วันนี้ไม่พบรายการใหม่ที่ผ่านเกณฑ์",
+      detail: "รอบวันนี้สำเร็จด้วย 0 รายการ ไม่ถือเป็นข้อผิดพลาด • ผลเดิมยังดูได้ในแท็บ ย้อนหลัง 7 วัน",
       lastRunAt,
       nextRunAt: schedule.nextRunAt,
       error: "",
+    };
+  }
+  if (completed && lastRunToday) {
+    return {
+      state: "awaiting_result", tone: "waiting",
+      title: "รอบจบแล้ว กำลังรอผลรายงานที่ยืนยัน",
+      detail: "ยังไม่มีหลักฐานยืนยันผลว่าง จึงยังไม่สรุปว่าวันนี้ไม่พบรายการใหม่",
+      lastRunAt, nextRunAt: schedule.nextRunAt, error: "",
     };
   }
   const nowMinute = radarBangkokMinuteOfDay(nowValue);
@@ -21026,7 +22135,7 @@ function getRadarTodayRunState(domain = {}, now = Date.now()) {
   };
 }
 
-function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
+function normalizeIndicatorScoutDomain(backend = {}, report = {}, loadState = {}) {
   const canonical = workflowDomainObject(
     backend.radarWebsiteTool,
     backend.domainData?.radarWebsiteTool,
@@ -21054,11 +22163,12 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
     || todaySummary.targetItemCount
     || INDICATOR_SCOUT_EXPECTED_BATCH_SIZE,
   );
-  const expectedBatchSize = Number.isInteger(requestedBatchSize)
-    && requestedBatchSize >= 1
-    && requestedBatchSize <= 20
-    ? requestedBatchSize
-    : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
+  const publicationPolicy = normalizeRadarPublicationPolicy(canonical.publicationPolicy || backend.publicationPolicy, requestedBatchSize);
+  const todayPublicationPolicy = normalizeRadarPublicationPolicy(
+    canonical.todayPublicationPolicy || todaySummary.publicationPolicy || todaySummary.batchPolicy || publicationPolicy,
+    requestedBatchSize,
+  );
+  const expectedBatchSize = todayPublicationPolicy.maximumItemCount;
   const hasCanonicalTruth = canonicalTodayRows !== null && canonicalSevenDayRows !== null;
   const candidates = hasCanonicalTruth
     ? [...canonicalSevenDayRows]
@@ -21159,6 +22269,7 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
       id: recordId,
       recordId,
       reportId,
+      publicationVersion: item?.publicationPolicy?.version || item?.publicationVersion || item?.radarPublicationVersion || null,
       title,
       summary: safeDashboardDisplayText(item?.summaryTh || item?.summary || item?.description, "ยังไม่มีบทสรุปเพิ่มเติมจาก Backend"),
       toolKind,
@@ -21224,9 +22335,15 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
   const projectedTodayEntries = hasCanonicalTruth
     ? projectCanonicalRows(canonicalTodayRows)
     : filterIndicatorScoutToday(discoveries);
-  const todayEntries = projectedTodayEntries.length === expectedBatchSize
+  const sourceTodayCount = hasCanonicalTruth ? canonicalTodayRows.length : projectedTodayEntries.length;
+  const publicationValidationError = !todayPublicationPolicy.valid || sourceTodayCount > expectedBatchSize
+    || sourceTodayCount !== projectedTodayEntries.length;
+  const todayEntries = !publicationValidationError
+    && (todayPublicationPolicy.legacy ? projectedTodayEntries.length === expectedBatchSize : projectedTodayEntries.length <= expectedBatchSize)
     ? projectedTodayEntries
     : [];
+  const verifiedEmpty = !publicationValidationError && !todayPublicationPolicy.legacy && todayEntries.length === 0
+    && todaySummary.verifiedEmpty === true && Number(todaySummary.verifiedReadyBatchCount) >= 1;
   const sevenDayEntries = hasCanonicalTruth
     ? discoveries
     : filterIndicatorScoutRollingSevenDays(discoveries);
@@ -21243,6 +22360,10 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
     canonical.serviceHealth,
     backend.serviceHealth,
   ));
+  const hasData = Object.keys(canonical).length > 0 || Object.keys(backend.indicatorScout || {}).length > 0
+    || ["lastRunAt", "lastRunStatus", "status"].some((key) => Object.hasOwn(backend.schedule || {}, key))
+    || reports.length > 0;
+  const attempts = Array.isArray(canonical.attemptHistory) ? canonical.attemptHistory : (report.missions || []);
   return {
     discoveries,
     todayEntries,
@@ -21250,7 +22371,17 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
     reports,
     schedule,
     serviceHealth,
+    readState: {
+      hasData,
+      status: ["loading", "error"].includes(loadState.status) ? loadState.status : (hasData ? "ready" : "loading"),
+      updatedAt: canonical.generatedAt || backend.updatedAt || report.updatedAt || null,
+    },
+    attemptHistory: attempts.length ? normalizeRadarAttempts(attempts) : [],
     expectedBatchSize,
+    publicationPolicy,
+    todayPublicationPolicy,
+    publicationValidationError,
+    verifiedEmpty,
     googleSheet: workflowDomainObject(root.googleSheet, backend.googleSheet),
     screenshotAdapter: hasScreenshot
       ? {
@@ -21654,6 +22785,12 @@ function resetTradingResearchConfirmationStatus(session = state.modal.tradingRes
   session.confirmationInFlight = false;
   session.confirmationMessage = "";
   session.confirmationTone = "neutral";
+  session.confirmationReportKey = "";
+  session.confirmationReportSource = null;
+  session.confirmationSheetKey = "";
+  session.confirmationReceipt = null;
+  session.confirmationRequest = null;
+  session.confirmationRefreshMessage = "";
 }
 
 function getTradingResearchLabSession(domain = {}) {
@@ -23093,6 +24230,7 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     dangerWindows,
     pairBias,
     pairAssessmentSummary,
+    fxTrend: workflowDomainObject(backend.fxTrend, backend.domainData?.fxTrend, legacyRoot.fxTrend),
     freshness: {
       marketNews: marketNewsFreshness,
       fxBias: fxBiasFreshness,
@@ -24067,6 +25205,12 @@ function normalizeEaFactoryOneClickRun(item = {}) {
     resumeKind,
     canRetry: raw.canRetry === true && !unsupportedResumeKind,
     canRestartBacktest: raw.canRestartBacktest === true,
+    canResumeCancelled: raw.canResumeCancelled === true,
+    resumeCancelledEndpoint: String(raw.resumeCancelledEndpoint || "").trim(),
+    resumeCancelledRunDigest: String(raw.resumeCancelledRunDigest || "").trim(),
+    resumeCancelledReasonCode: safeDashboardDisplayText(raw.resumeCancelledReasonCode, ""),
+    resumeCancelledStageId: String(raw.resumeCancelledStageId || "").trim(),
+    resumeCancelledMissionId: String(raw.resumeCancelledMissionId || "").trim(),
     restartBacktestEndpoint: String(raw.restartBacktestEndpoint || "").trim(),
     restartOfRunId: String(raw.restartOfRunId || "").trim(),
     restartArchiveDigest: String(raw.restartArchiveDigest || "").trim(),
@@ -24152,8 +25296,8 @@ function normalizeEaFactoryDomain(backend = {}) {
   const activeBuildRaw = workflowDomainObject(
     busyBuild,
     backendBusyActive ? matchingBusyRootBuild : requestedBuild,
-    backendBusyActive ? null : rootActiveBuild,
-    backendBusyActive ? null : builds[0],
+    backendBusyActive || requestedBuildId ? null : rootActiveBuild,
+    backendBusyActive || requestedBuildId ? null : builds[0],
   );
   const buildId = String(activeBuildRaw?.id || activeBuildRaw?.buildId || "").trim();
   const buildVersions = eaFactoryFirstArray(activeBuildRaw?.versions);
@@ -24163,6 +25307,7 @@ function normalizeEaFactoryDomain(backend = {}) {
   }, 0);
   const activeBuild = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(buildId) ? {
     id: buildId,
+    sourceDisplayName: safeDashboardDisplayText(activeBuildRaw?.sourceDisplayName || activeBuildRaw?.systemName, "Strategy Build", { limit: 180 }),
     status: safeDashboardDisplayText(activeBuildRaw?.status, "รอสถานะ"),
     sourceRecordId: String(activeBuildRaw?.sourceRecordId || activeBuildRaw?.source_record_id || "").trim(),
     artifactKind: normalizeEaFactoryArtifactKind(activeBuildRaw?.artifactKind),
@@ -24194,6 +25339,9 @@ function normalizeEaFactoryDomain(backend = {}) {
       .map(normalizeEaFactoryArtifact).filter(Boolean),
     audit: normalizeEaFactoryAudit(activeBuildRaw, root),
     oneClickRun: normalizeEaFactoryOneClickRun(activeBuildRaw?.oneClickRun),
+    existingCreditAuthorized: activeBuildRaw?.existingCreditPermission?.allowed === true
+      && activeBuildRaw?.existingCreditPermission?.scope === "this_build_only"
+      && activeBuildRaw?.existingCreditPermission?.purchasesAllowed === false,
     raw: activeBuildRaw,
   } : null;
   const oneClickOwnsBuild = ["queued", "running", "waiting_ai", "awaiting_visible_terminal", "cancelling"]
@@ -25949,7 +27097,9 @@ function normalizeWorkflowDomainData(propId, backend = {}, report = {}) {
       ),
     };
   }
-  if (propId === "left_audit_crystals") return { indicatorScout: normalizeIndicatorScoutDomain(backend, report) };
+  if (propId === "left_audit_crystals") return {
+    indicatorScout: normalizeIndicatorScoutDomain(backend, report, state.propReportLoadState?.[propId] || {}),
+  };
   if (propId === "left_signal_cube") return { fxNewsBias: normalizeFxNewsBiasDomain(backend, report) };
   if (propId === EA_FACTORY_PROP_ID) {
     return { eaFactory: normalizeEaFactoryDomain(state.eaFactoryReadModel.payload || {}) };
@@ -25986,6 +27136,40 @@ function createWorkflowTruthEmpty(message = "ยังไม่มีข้อ�
   return note;
 }
 
+function createRadarAttemptHistory(domain = {}, now = Date.now()) {
+  const section = document.createElement("section");
+  const heading = document.createElement("h4");
+  const explanation = document.createElement("p");
+  section.className = "workflow-radar-attempt-history";
+  heading.textContent = "ประวัติการทำงานและรอบที่ติดขัดใน 7 วันล่าสุด";
+  explanation.textContent = "นับย้อนหลัง 7 วันตามเวลาอัปเดตล่าสุดของรอบ หรือเวลาเข้าคิวเมื่อไม่มีเวลาอัปเดต • จำนวนรายการด้านบนแสดงเฉพาะผลที่ตรวจผ่านแล้ว";
+  section.append(heading, explanation);
+  const attempts = filterIndicatorScoutRollingSevenDays(domain.attemptHistory || [], now);
+  if (!attempts.length) {
+    section.appendChild(createWorkflowTruthEmpty(domain.readState?.hasData === false
+      ? "ยังโหลดประวัติการทำงานไม่ได้" : "ไม่พบรอบการทำงานที่มีเวลายืนยันในช่วง 7 วันล่าสุด"));
+  }
+  attempts.forEach((attempt) => {
+    const row = document.createElement("article");
+    const title = document.createElement("strong");
+    const time = document.createElement("small");
+    const reason = document.createElement("p");
+    row.className = "workflow-result-card";
+    row.dataset.status = attempt.state;
+    title.textContent = attempt.label;
+    time.textContent = [
+      attempt.createdAt ? `เข้าคิว ${formatThaiDateTime(attempt.createdAt)}` : "",
+      attempt.startedAt ? `เริ่ม ${formatThaiDateTime(attempt.startedAt)}` : "",
+      attempt.completedAt ? `สิ้นสุด ${formatThaiDateTime(attempt.completedAt)}` : "",
+      attempt.nextAttemptAt ? `ลองใหม่ ${formatThaiDateTime(attempt.nextAttemptAt)}` : "",
+    ].filter(Boolean).join(" • ") || "Backend ยังไม่ส่งเวลา";
+    reason.textContent = attempt.reason;
+    row.append(title, time, reason);
+    section.appendChild(row);
+  });
+  return section;
+}
+
 function createRadarTodayRunNotice(domain = {}) {
   const runState = getRadarTodayRunState(domain);
   const notice = document.createElement("aside");
@@ -25994,9 +27178,6 @@ function createRadarTodayRunNotice(domain = {}) {
   const progress = document.createElement("span");
   const detail = document.createElement("p");
   const facts = document.createElement("dl");
-  const expectedBatchSize = Number.isInteger(domain?.expectedBatchSize)
-    ? domain.expectedBatchSize
-    : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
   const todayCount = Array.isArray(domain?.todayEntries) ? domain.todayEntries.length : 0;
   notice.className = "workflow-radar-run-state";
   notice.dataset.state = runState.state;
@@ -26004,13 +27185,15 @@ function createRadarTodayRunNotice(domain = {}) {
   notice.setAttribute("role", runState.tone === "error" ? "alert" : "status");
   heading.className = "workflow-radar-run-state-heading";
   title.textContent = runState.title;
-  progress.textContent = `${todayCount}/${expectedBatchSize}`;
+  progress.textContent = domain.readState?.hasData === false ? "รอข้อมูล"
+    : domain.publicationValidationError ? "รอข้อมูลที่ยืนยัน" : radarPublicationCountLabel(domain, todayCount);
   heading.append(title, progress);
   detail.textContent = runState.detail;
   [
-    ["รันล่าสุด", runState.lastRunAt ? formatThaiDateTime(runState.lastRunAt) : "วันนี้ยังไม่เริ่ม"],
+    ["รันล่าสุด", runState.lastRunAt ? formatThaiDateTime(runState.lastRunAt)
+      : domain.readState?.hasData === false ? "ยังยืนยันไม่ได้" : "วันนี้ยังไม่เริ่ม"],
     [
-      runState.nextAttemptAt ? "ลองหาให้ครบอีกครั้ง" : "รอบถัดไป",
+      runState.nextAttemptAt ? "ลองค้นหาอีกครั้ง" : "รอบถัดไป",
       runState.nextRunAt ? formatThaiDateTime(runState.nextRunAt) : "รอเวลา Backend",
     ],
     ...(runState.error ? [["สาเหตุจาก Backend", runState.error]] : []),
@@ -26163,12 +27346,10 @@ function renderIndicatorScoutPanel(container, tabId, domain) {
   kicker.textContent = "RADAR WEBSITE TOOL";
   title.textContent = isToday ? "รายการใหม่วันนี้" : "ประวัติย้อนหลัง 7 วัน";
   description.textContent = isToday
-    ? "แสดงเฉพาะรายการที่ Backend ตรวจพบในวันปัจจุบันตามเวลา Asia/Bangkok"
-    : "รวม Indicator, EA และ Tool ในช่วง 7 วันล่าสุด โดยไม่แสดงรายการเก่าหรือข้อมูลจำลอง";
-  const expectedBatchSize = Number.isInteger(domain?.expectedBatchSize)
-    ? domain.expectedBatchSize
-    : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
-  count.textContent = isToday ? `${entries.length}/${expectedBatchSize} รายการ` : `${entries.length} รายการ`;
+    ? "เผยแพร่ตามที่ตรวจผ่านจริง 0–3 รายการต่อวัน • EA, Indicator และเทคโนโลยีจาก GitHub คละประเภทได้"
+    : "รวม Indicator, EA และเทคโนโลยีจาก GitHub ในช่วง 7 วันล่าสุด • เก็บรายงานเดิมตามจำนวนที่เผยแพร่ไว้";
+  count.textContent = domain.readState?.hasData === false ? "รอข้อมูล"
+    : isToday ? (domain.publicationValidationError ? "รอข้อมูลที่ยืนยัน" : radarPublicationCountLabel(domain, entries.length)) : `${entries.length} รายการ`;
   headingCopy.append(kicker, title, description);
   heading.append(headingCopy, count);
   const executionTruth = document.createElement("aside");
@@ -26180,9 +27361,18 @@ function renderIndicatorScoutPanel(container, tabId, domain) {
   executionTruthCopy.textContent = "Radar เปิดเฉพาะหน้าเว็บเพื่ออ่านข้อความและหลักฐาน • ไม่ดาวน์โหลด ไม่ติดตั้ง และไม่รัน Indicator, EA หรือ Tool • ไม่เปิดหรือสั่ง MT4/MT5";
   executionTruth.append(executionTruthTitle, executionTruthCopy);
   section.append(heading, executionTruth);
+  const readMessage = radarReadStatusMessage(domain);
+  if (readMessage) {
+    const readNotice = createWorkflowTruthEmpty(readMessage);
+    readNotice.setAttribute("role", domain.readState?.status === "error" ? "alert" : "status");
+    section.appendChild(readNotice);
+  }
   if (isToday) section.appendChild(createRadarTodayRunNotice(domain));
+  if (!isToday) section.appendChild(createRadarAttemptHistory(domain));
   if (!entries.length) {
-    if (!isToday) section.appendChild(createWorkflowTruthEmpty("ยังไม่มีรายการที่มีเวลาตรวจสอบจริงภายใน 7 วันล่าสุด"));
+    if (!isToday && domain.readState?.hasData !== false) {
+      section.appendChild(createWorkflowTruthEmpty("ยังไม่มีรายการที่ตรวจผ่านสำหรับเผยแพร่ภายใน 7 วันล่าสุด • ดูสถานะรอบที่ติดขัดด้านบน"));
+    }
     container.appendChild(section);
     return;
   }
@@ -26214,7 +27404,7 @@ function renderIndicatorScoutPanel(container, tabId, domain) {
       const grid = document.createElement("div");
       day.className = "workflow-radar-history-day";
       dayTitle.textContent = formatIndicatorScoutHistoryDay(items[0]);
-      dayCount.textContent = `${items.length} รายการ`;
+      dayCount.textContent = `${items.length} รายการ${items.some((item) => item.publicationVersion === 1) ? " • มีรายงานตามกติกาเดิม" : ""}`;
       dayHeading.append(dayTitle, dayCount);
       grid.className = "workflow-indicator-grid workflow-radar-grid";
       items.forEach((item) => grid.appendChild(createIndicatorScoutCard(item, domain.screenshotAdapter)));
@@ -26222,6 +27412,380 @@ function renderIndicatorScoutPanel(container, tabId, domain) {
       section.appendChild(day);
     });
   }
+  container.appendChild(section);
+}
+
+function fx28TrendText(value, fallback = "", limit = 240) {
+  if (typeof value !== "string" || /^[\s]*[\[{]/.test(value)) return fallback;
+  return safeDashboardDisplayText(value, fallback, { limit, markTruncated: true });
+}
+
+function fx28TrendInstant(value) {
+  return typeof value === "string" && /(?:Z|[+-]\d{2}:\d{2})$/i.test(value.trim())
+    && Number.isFinite(Date.parse(value)) ? value.trim() : null;
+}
+
+function fx28DailyAiAnalysis(ai = {}) {
+  const analysis = ai.analysis;
+  if (ai.status !== "completed" || !analysis || typeof analysis !== "object" || Array.isArray(analysis)
+    || !/^\d{4}-\d{2}-\d{2}$/.test(String(ai.marketDate || "")) || analysis.marketDate !== ai.marketDate
+    || analysis.snapshotId !== ai.snapshotId || !/^[0-9a-f]{64}$/.test(String(analysis.snapshotDigest || ""))
+    || analysis.snapshotId !== `fx28-${analysis.snapshotDigest.slice(0, 24)}`) return null;
+  const rows = analysis.pairExplanations;
+  if (!Array.isArray(rows) || rows.length !== 28) return null;
+  const pairExplanations = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || !FX_BIAS_PAIR_UNIVERSE.includes(row.pair) || pairExplanations.has(row.pair)) return null;
+    const reasons = {};
+    for (const key of ["short", "medium", "long"]) {
+      const reason = fx28TrendText(row[key]?.reasonTh, "", 120);
+      if (!reason || !Array.isArray(row[key]?.sourceRefs)) return null;
+      reasons[key] = reason;
+    }
+    pairExplanations.set(row.pair, reasons);
+  }
+  const sources = new Map();
+  (Array.isArray(ai.newsSources) ? ai.newsSources : []).slice(0, 3).forEach((source) => {
+    const url = getSafeExternalHttpUrl(source?.url);
+    if (typeof source?.id === "string" && url && !sources.has(source.id)) sources.set(source.id, {
+      url, title: fx28TrendText(source.title, "เปิดแหล่งข่าวต้นทาง", 160),
+    });
+  });
+  const newsContext = (Array.isArray(analysis.newsContext) ? analysis.newsContext : []).slice(0, 3)
+    .filter((item) => item && sources.has(item.sourceRef) && fx28TrendText(item.summaryTh))
+    .map((item) => ({ summaryTh: fx28TrendText(item.summaryTh, "", 300), ...sources.get(item.sourceRef) }));
+  return { marketDate: ai.marketDate, snapshotId: analysis.snapshotId,
+    collectedAt: fx28TrendInstant(ai.collectedAt), pairExplanations, newsContext };
+}
+
+function normalizeFx28Trend(raw = {}) {
+  const root = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const supported = root.schemaVersion === "fx28-trend-read-model-v1";
+  const stale = root.stale === true;
+  const dataAsOf = fx28TrendInstant(root.dataAsOf);
+  const rowMap = new Map();
+  const duplicates = new Set();
+  if (supported) (Array.isArray(root.rows) ? root.rows : []).slice(0, 100).forEach((row) => {
+    const pair = String(row?.pair || "").trim().toUpperCase();
+    if (!FX_BIAS_PAIR_UNIVERSE.includes(pair)) return;
+    if (rowMap.has(pair)) duplicates.add(pair);
+    else rowMap.set(pair, row);
+  });
+  const rows = FX_BIAS_PAIR_UNIVERSE.map((pair) => {
+    const duplicate = duplicates.has(pair);
+    const row = duplicate ? {} : (rowMap.get(pair) || {});
+    const horizons = {};
+    ["short", "medium", "long"].forEach((key) => {
+      const supplied = row.horizons?.[key] || {};
+      const observedAt = fx28TrendInstant(supplied.dataAsOf);
+      const knownBias = ["BULLISH", "BEARISH", "SIDEWAY"].includes(supplied.bias);
+      const allowedTimeframes = { short: ["M15", "M30", "H1"], medium: ["H1", "H4", "D1"], long: ["D1", "W1"] }[key];
+      const timeframes = (Array.isArray(supplied.timeframes) ? supplied.timeframes : [])
+        .filter((value) => allowedTimeframes.includes(value)).slice(0, 3);
+      const ready = supported && ["ready", "partial"].includes(root.status) && !stale && !duplicate
+        && ["ready", "partial"].includes(row.status) && Boolean(root.snapshotId)
+        && supplied.status === "ready" && knownBias && Boolean(observedAt) && timeframes.length > 0;
+      const status = stale ? "stale" : duplicate || row.status === "error" ? "error"
+        : ready ? "ready" : ["stale", "error"].includes(supplied.status) ? supplied.status : "insufficient_data";
+      const defaultReason = status === "stale" ? "ข้อมูลราคาเก่า รอรอบอัปเดตใหม่"
+        : duplicate ? "คู่เงินซ้ำในข้อมูลที่ได้รับ รอผลที่ยืนยัน"
+        : status === "error" ? "ข้อมูลคู่เงินนี้ตรวจไม่ผ่าน"
+        : !observedAt && knownBias ? "ยังยืนยันเวลาของข้อมูลราคาไม่ได้"
+        : "ข้อมูลแท่งราคายังไม่เพียงพอสำหรับระยะนี้";
+      horizons[key] = {
+        bias: ready ? supplied.bias : "INSUFFICIENT_DATA", status,
+        reasonTh: fx28TrendText(supplied.reasonTh, defaultReason, 500),
+        timeframes,
+        dataAsOf: observedAt,
+      };
+    });
+    const readyCount = Object.values(horizons).filter((item) => item.status === "ready").length;
+    return {
+      pair, brokerSymbol: fx28TrendText(row.brokerSymbol, "", 80),
+      status: readyCount === 3 ? "ready" : readyCount ? "partial" : (duplicate || row.status === "error" ? "error" : "waiting"),
+      horizons,
+      priceSummaryTh: fx28TrendText(row.priceSummaryTh, "ยังไม่มีสรุปราคาที่ตรวจยืนยัน", 220),
+      tickVolumeSummaryTh: fx28TrendText(row.tickVolumeSummaryTh, "ยังไม่มีสรุป Tick Volume ที่ตรวจยืนยัน", 220),
+      newsSummaryTh: fx28TrendText(row.newsSummaryTh, "ยังไม่มีบริบทข่าวที่ตรวจยืนยัน", 220),
+      dataAsOf: fx28TrendInstant(row.dataAsOf) || dataAsOf,
+      sourceRefs: (Array.isArray(row.sourceRefs) ? row.sourceRefs : []).slice(0, 12)
+        .filter((item) => item && typeof item === "object" && ["closed_bars", "news"].includes(item.kind))
+        .map((item) => ({
+          kind: item.kind,
+          title: fx28TrendText(item.title, item.kind === "news" ? "หลักฐานข่าว" : "แท่งราคาปิดจาก Broker", 160),
+          timeframe: ["M15", "M30", "H1", "H4", "D1", "W1"].includes(item.timeframe) ? item.timeframe : "",
+          dataAsOf: fx28TrendInstant(item.dataAsOf), url: getSafeExternalHttpUrl(item.url),
+        })),
+    };
+  });
+  const schedule = supported && root.schedule && typeof root.schedule === "object" ? root.schedule : {};
+  const ai = supported && root.ai && typeof root.ai === "object" ? root.ai : {};
+  const quota = ai.quota && typeof ai.quota === "object" ? ai.quota : {};
+  const validCount = (value) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 28 ? value : null;
+  return {
+    supported, status: supported && ["ready", "partial", "waiting", "error"].includes(root.status) ? root.status : "waiting",
+    snapshotId: supported ? fx28TrendText(root.snapshotId, "", 120) : "",
+    updatedAt: fx28TrendInstant(root.updatedAt), dataAsOf, stale,
+    rows,
+    readyPairCount: rows.filter((row) => row.status === "ready").length,
+    partialPairCount: rows.filter((row) => row.status === "partial").length,
+    evaluatedPairCount: supported ? validCount(root.summary?.evaluatedPairCount) : null,
+    schedule: {
+      priceRefreshMinutes: typeof schedule.priceRefreshMinutes === "number" && schedule.priceRefreshMinutes > 0
+        && schedule.priceRefreshMinutes <= 1440 ? schedule.priceRefreshMinutes : null,
+      priceNextRunAt: fx28TrendInstant(schedule.priceNextRunAt),
+      aiTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(schedule.aiTime || "")) ? schedule.aiTime : "",
+      timezone: schedule.timezone === "Asia/Bangkok" ? "Asia/Bangkok" : "",
+      aiNextRunAt: fx28TrendInstant(schedule.aiNextRunAt),
+    },
+    ai: {
+      status: ["waiting", "queued", "running", "completed", "deferred", "failed"].includes(ai.status) ? ai.status : "waiting",
+      updatedAt: fx28TrendInstant(ai.updatedAt), reasonTh: fx28TrendText(ai.reasonTh,
+        ai.status === "completed" ? "บทวิเคราะห์รายวันเสร็จแล้ว" : "ยังไม่มีผลวิเคราะห์จาก Codex"),
+      summaryTh: ai.status === "completed" ? fx28TrendText(ai.summaryTh, "", 700) : "",
+      marketDate: /^\d{4}-\d{2}-\d{2}$/.test(String(ai.marketDate || "")) ? ai.marketDate : "",
+      daily: fx28DailyAiAnalysis(ai),
+      attemptCount: Number.isInteger(ai.attemptCount) && ai.attemptCount >= 0 && ai.attemptCount <= 2 ? ai.attemptCount : null,
+      maximumAttempts: ai.maximumAttempts === 2 || schedule.maximumAttempts === 2 ? 2 : null,
+      nextAttemptAt: fx28TrendInstant(ai.nextAttemptAt),
+      quota: {
+        status: fx28TrendText(quota.status, "unknown", 80),
+        remainingPercent: typeof quota.remainingPercent === "number" && Number.isFinite(quota.remainingPercent)
+          && quota.remainingPercent >= 0 && quota.remainingPercent <= 100 ? quota.remainingPercent : null,
+        reasonTh: fx28TrendText(quota.reasonTh), nextAttemptAt: fx28TrendInstant(quota.nextAttemptAt),
+      },
+    },
+    history: supported ? (Array.isArray(root.history) ? root.history : []).slice(0, 14)
+      .filter((item) => item && typeof item === "object")
+      .map((item) => ({
+        snapshotId: fx28TrendText(item.snapshotId, "", 120),
+        updatedAt: fx28TrendInstant(item.updatedAt), dataAsOf: fx28TrendInstant(item.dataAsOf),
+        evaluatedPairCount: validCount(item.evaluatedPairCount),
+        status: ["ready", "partial", "waiting", "error"].includes(item.status) ? item.status : "waiting",
+      })) : [],
+  };
+}
+
+function fx28TrendStatusLabel(status) {
+  return {
+    ready: "ข้อมูลพร้อม", partial: "พร้อมบางคู่หรือบางระยะ", waiting: "รอข้อมูลราคา", error: "ข้อมูลตรวจไม่ผ่าน",
+    stale: "ข้อมูลเก่า", insufficient_data: "ข้อมูลไม่พอ", queued: "รอคิว", running: "กำลังวิเคราะห์",
+    completed: "วิเคราะห์แล้ว", deferred: "พักรอโควตาหรือรอบถัดไป", failed: "วิเคราะห์ไม่สำเร็จ",
+  }[status] || "รอยืนยันสถานะ";
+}
+
+function fx28AiStatusLabel(status) {
+  return { waiting: "รอรอบวิเคราะห์", queued: "รอคิว", running: "กำลังวิเคราะห์", completed: "วิเคราะห์แล้ว",
+    deferred: "พักรอโควตาหรือรอบถัดไป", failed: "วิเคราะห์ไม่สำเร็จ" }[status] || "รอยืนยันสถานะ";
+}
+
+function createFx28TrendMethod() {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  details.className = "fx28-trend-method";
+  summary.textContent = "วิธีอ่านแนวโน้มและข้อมูลที่ใช้";
+  details.appendChild(summary);
+  [
+    "ระยะสั้น M15–H1 • ระยะกลาง H1–D1 • ระยะยาว D1–W1 ใช้แท่งราคาที่ปิดแล้วตามกรอบเวลาที่มีหลักฐาน",
+    "Tick Volume คือความถี่การเปลี่ยนแปลงราคาที่ Broker บันทึก ไม่ใช่ยอดซื้อขายสุทธิหรือปริมาณซื้อขายรวมทั้งตลาด",
+    "แนวโน้มราคากับสถานะ Codex แสดงแยกกัน ราคาอาจพร้อมก่อนบทวิเคราะห์รายวัน ข่าวเป็นบริบทประกอบและไม่ได้แทนข้อมูลราคา",
+    "ไซด์เวย์ / ยังไม่สอดคล้อง หมายถึงกรอบเวลายังไม่ยืนยันทิศทางเดียวกัน หรือราคาแกว่งในกรอบ ไม่ได้ยืนยันว่าตลาดนิ่ง",
+    "ข้อมูลไม่พอหรือเก่าจะแสดงเหตุผลตามจริง ไม่แปลงเป็นแนวโน้มแกว่งตัวโดยอัตโนมัติ เวลาทั้งหมดแสดงเป็นเวลาไทย",
+    "เวลาอัปเดตคือรอบที่อ่านข้อมูล ส่วนวันที่แท่งปิดขึ้นกับกรอบเวลา เช่น W1 ใช้สัปดาห์ที่ปิดแล้ว จึงอาจเก่ากว่าวันอัปเดต",
+  ].forEach((text) => { const line = document.createElement("p"); line.textContent = text; details.appendChild(line); });
+  return details;
+}
+
+function renderFx28TrendTable(container, raw = {}, loadState = {}) {
+  const model = normalizeFx28Trend(raw);
+  const section = document.createElement("section");
+  const header = document.createElement("header");
+  const title = document.createElement("h4");
+  const summary = document.createElement("p");
+  const times = document.createElement("p");
+  section.className = "fx28-trend-panel";
+  section.dataset.status = model.stale ? "stale" : model.status;
+  title.textContent = "แนวโน้ม 28 คู่เงิน";
+  summary.textContent = `พร้อมครบ 3 ระยะ ${model.readyPairCount}/28 คู่ • พร้อมบางระยะ ${model.partialPairCount} คู่ • Codex ${fx28AiStatusLabel(model.ai.status)}`;
+  times.textContent = `อัปเดตข้อมูลล่าสุด ${fxNewsBangkokDateTimeLabel(model.updatedAt, "ยังไม่มีรอบสำเร็จ")} • เวลาไทย • วันที่แท่งปิดแสดงแยกในแต่ละระยะ`;
+  header.className = "fx28-trend-header";
+  header.append(title, summary, times);
+  section.appendChild(header);
+  if (loadState.status === "loading" || loadState.status === "error") {
+    const known = Boolean(model.snapshotId);
+    section.appendChild(createFxNewsCalendarBanner(loadState.status === "error" ? "error" : "loading",
+      loadState.status === "error" ? "โหลดแนวโน้มล่าสุดไม่สำเร็จ" : "กำลังโหลดแนวโน้ม 28 คู่เงิน",
+      known ? "กำลังแสดงผลจากรอบก่อน โปรดดูเวลาข้อมูลก่อนใช้งาน" : "ยังยืนยันข้อมูลราคาไม่ได้ ระบบไม่สร้างทิศทางระหว่างรอ"));
+  }
+  if (model.stale) section.appendChild(createFxNewsCalendarBanner("warning", "ข้อมูลราคาเก่า",
+    "ยังไม่ใช้ผลเก่าเป็นทิศทางปัจจุบัน รอข้อมูลแท่งราคาปิดรอบใหม่ • ดูสรุปเดิมได้พร้อมเวลาที่ระบุ"));
+  else if (!model.supported || ["waiting", "error"].includes(model.status)) section.appendChild(createFxNewsCalendarBanner(
+    model.status === "error" ? "error" : "waiting", model.status === "error" ? "ข้อมูลราคาไม่ผ่านการตรวจ" : "รอข้อมูลราคาจาก Broker",
+    "ตารางจะแสดงผลแต่ละคู่และแต่ละระยะเมื่อมีข้อมูลที่ตรวจผ่าน โดยไม่ต้องรอให้ข่าวมีตัวเลข Actual"));
+  const scroll = document.createElement("div");
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const body = document.createElement("tbody");
+  const headRow = document.createElement("tr");
+  scroll.className = "fx28-trend-scroll";
+  scroll.tabIndex = 0;
+  scroll.setAttribute("role", "region");
+  scroll.setAttribute("aria-label", "ตารางแนวโน้ม 28 คู่เงิน เลื่อนแนวนอนเพื่ออ่านทุกคอลัมน์");
+  table.className = "fx28-trend-table";
+  ["คู่เงิน", "ระยะสั้น\nM15–H1", "ระยะกลาง\nH1–D1", "ระยะยาว\nD1–W1", "เหตุผลจากราคา • Tick Volume • ข่าว", "อัปเดตข้อมูล (ไทย)"]
+    .forEach((label) => { const cell = document.createElement("th"); cell.scope = "col"; cell.textContent = label; headRow.appendChild(cell); });
+  head.appendChild(headRow);
+  model.rows.forEach((row) => {
+    const tr = document.createElement("tr");
+    const pair = document.createElement("th");
+    pair.scope = "row";
+    pair.textContent = row.pair;
+    if (row.brokerSymbol && row.brokerSymbol !== row.pair) {
+      const brokerSymbol = document.createElement("small"); brokerSymbol.textContent = row.brokerSymbol; pair.appendChild(brokerSymbol);
+    }
+    tr.dataset.pair = row.pair;
+    tr.appendChild(pair);
+    ["short", "medium", "long"].forEach((key) => {
+      const horizon = row.horizons[key];
+      const cell = document.createElement("td");
+      const badge = document.createElement("strong");
+      badge.className = "fx28-trend-badge";
+      badge.dataset.bias = horizon.bias;
+      badge.textContent = { BULLISH: "↑ ขาขึ้น", BEARISH: "↓ ขาลง", SIDEWAY: "↔ ไซด์เวย์" }[horizon.bias]
+        || fx28TrendStatusLabel(horizon.status);
+      badge.title = horizon.reasonTh;
+      cell.appendChild(badge);
+      const barTime = document.createElement("small");
+      barTime.className = "fx28-trend-bar-time";
+      barTime.textContent = `แท่งปิด ${fxNewsBangkokDateTimeLabel(horizon.dataAsOf, "ยังไม่ยืนยันเวลา")}`;
+      cell.appendChild(barTime);
+      tr.appendChild(cell);
+    });
+    const rationale = document.createElement("td");
+    rationale.className = "fx28-trend-rationale";
+    [["ราคา", row.priceSummaryTh], ["Tick Volume", row.tickVolumeSummaryTh], ["ข่าว", row.newsSummaryTh]].forEach(([label, text]) => {
+      const line = document.createElement("p"); const name = document.createElement("strong"); const content = document.createElement("span");
+      name.textContent = `${label}: `; content.textContent = text; line.append(name, content); rationale.appendChild(line);
+    });
+    const detail = document.createElement("details");
+    const detailLabel = document.createElement("summary");
+    detailLabel.textContent = "รายละเอียดแต่ละระยะและหลักฐาน";
+    detail.appendChild(detailLabel);
+    [["สั้น", "short"], ["กลาง", "medium"], ["ยาว", "long"]].forEach(([label, key]) => {
+      const horizon = row.horizons[key]; const line = document.createElement("p");
+      line.textContent = `${label}${horizon.timeframes.length ? ` (${horizon.timeframes.join(" / ")})` : ""}: ${horizon.reasonTh} • แท่งปิดอ้างอิง ${fxNewsBangkokDateTimeLabel(horizon.dataAsOf, "ยังไม่ยืนยันเวลา")}`;
+      detail.appendChild(line);
+    });
+    row.sourceRefs.forEach((source) => {
+      const line = document.createElement("p");
+      const label = `${source.title}${source.timeframe ? ` • ${source.timeframe}` : ""}${source.dataAsOf ? ` • ${fxNewsBangkokDateTimeLabel(source.dataAsOf)}` : ""}`;
+      const link = source.url ? createWorkflowExternalSource(source.url, label) : null;
+      if (link) line.appendChild(link); else line.textContent = label;
+      detail.appendChild(line);
+    });
+    rationale.appendChild(detail);
+    const daily = model.ai.daily;
+    const dailyReasons = daily?.pairExplanations.get(row.pair);
+    if (dailyReasons) {
+      const explanation = document.createElement("details");
+      const label = document.createElement("summary");
+      const note = document.createElement("p");
+      explanation.className = "fx28-ai-pair-explanation";
+      label.textContent = `คำอธิบาย Codex รายวัน • ${daily.marketDate}`;
+      note.textContent = `อิงชุดข้อมูล${daily.collectedAt ? ` ณ ${fxNewsBangkokDateTimeLabel(daily.collectedAt)} เวลาไทย` : `ของรอบวันที่ ${daily.marketDate}`} • แยกจากแนวโน้มราคาปัจจุบันที่อัปเดตด้านบน`;
+      explanation.append(label, note);
+      [["สั้น M15–H1", "short"], ["กลาง H1–D1", "medium"], ["ยาว D1–W1", "long"]].forEach(([name, key]) => {
+        const line = document.createElement("p"); const heading = document.createElement("strong"); const text = document.createElement("span");
+        heading.textContent = `${name}: `; text.textContent = dailyReasons[key]; line.append(heading, text); explanation.appendChild(line);
+      });
+      rationale.appendChild(explanation);
+    }
+    const time = document.createElement("td");
+    time.className = "fx28-trend-time";
+    time.textContent = fxNewsBangkokDateTimeLabel(model.updatedAt, "ยังไม่ยืนยันเวลา");
+    tr.append(rationale, time);
+    body.appendChild(tr);
+  });
+  table.append(head, body); scroll.appendChild(table); section.append(scroll, createFx28TrendMethod()); container.appendChild(section);
+}
+
+function createFx28TrendRail(raw = {}) {
+  const model = normalizeFx28Trend(raw);
+  const card = document.createElement("section");
+  const title = document.createElement("h4");
+  const facts = document.createElement("dl");
+  card.className = "fx28-trend-rail";
+  title.textContent = "รอบราคาและบทวิเคราะห์ Codex";
+  const quota = model.ai.quota;
+  const quotaKnown = !["unknown", "stale", "error", "unavailable"].includes(quota.status);
+  const quotaText = quotaKnown && quota.remainingPercent !== null
+    ? `คงเหลือ ${quota.remainingPercent.toFixed(0)}%` : "รอยืนยันโควตาปัจจุบัน";
+  [
+    ["ข้อมูลราคา", model.stale ? "ข้อมูลเก่า รออัปเดต" : fx28TrendStatusLabel(model.status)],
+    ["รอบอัปเดตราคา", model.schedule.priceRefreshMinutes ? `ทุก ${model.schedule.priceRefreshMinutes} นาที` : "ยังไม่ยืนยันรอบ"],
+    ["อัปเดตราคาล่าสุด", fxNewsBangkokDateTimeLabel(model.updatedAt, "ยังไม่มีข้อมูล")],
+    ["ราคาครั้งถัดไป", fxNewsBangkokDateTimeLabel(model.schedule.priceNextRunAt, "รอเวลารอบถัดไป")],
+    ["Codex รายวัน", model.schedule.aiTime && model.schedule.timezone ? `${model.schedule.aiTime} น. เวลาไทย` : "รอยืนยันเวลา"],
+    ["สถานะ Codex", fx28AiStatusLabel(model.ai.status)],
+    ["Codex ล่าสุด", fxNewsBangkokDateTimeLabel(model.ai.updatedAt, "ยังไม่มีผล")],
+    ["Codex ครั้งถัดไป", fxNewsBangkokDateTimeLabel(model.schedule.aiNextRunAt, "รอเวลารอบถัดไป")],
+    [["completed", "running", "queued"].includes(model.ai.status) ? "โควตาตอนรับงานนี้" : "โควตาที่ตรวจล่าสุด", quotaText],
+  ].forEach(([label, value]) => facts.appendChild(createFxNewsRailFact(label, value)));
+  const reason = document.createElement("p");
+  reason.textContent = model.ai.reasonTh;
+  card.append(title, facts, reason);
+  if (model.ai.summaryTh) {
+    const daily = document.createElement("section");
+    const heading = document.createElement("strong");
+    const summary = document.createElement("p");
+    daily.className = "fx28-ai-daily-summary";
+    heading.textContent = `บทวิเคราะห์รายวัน${model.ai.marketDate ? ` • ${model.ai.marketDate}` : ""}`;
+    summary.textContent = model.ai.summaryTh;
+    const note = document.createElement("small");
+    note.textContent = "บริบทจากรอบรายวัน • แนวโน้มราคาในตารางอัปเดตแยกตามรอบราคา";
+    daily.append(heading, summary, note);
+    card.appendChild(daily);
+  }
+  if (model.ai.daily?.newsContext.length) {
+    const news = document.createElement("section");
+    const heading = document.createElement("strong");
+    news.className = "fx28-ai-daily-news";
+    heading.textContent = `ข่าวประกอบบทวิเคราะห์รายวัน • ${model.ai.daily.marketDate}`;
+    news.appendChild(heading);
+    model.ai.daily.newsContext.forEach((item) => {
+      const story = document.createElement("article"); const text = document.createElement("p");
+      text.textContent = item.summaryTh; story.appendChild(text);
+      const link = createWorkflowExternalSource(item.url, item.title);
+      if (link) story.appendChild(link);
+      news.appendChild(story);
+    });
+    card.appendChild(news);
+  }
+  if (["failed", "deferred"].includes(model.ai.status)) {
+    if (model.ai.attemptCount !== null && model.ai.maximumAttempts !== null) {
+      facts.appendChild(createFxNewsRailFact("ความพยายามรอบรายวัน", `${model.ai.attemptCount}/${model.ai.maximumAttempts} ครั้ง`));
+    }
+    if (model.ai.nextAttemptAt) facts.appendChild(createFxNewsRailFact("ลองรอบรายวันใหม่", fxNewsBangkokDateTimeLabel(model.ai.nextAttemptAt)));
+  }
+  if (quota.reasonTh) { const line = document.createElement("p"); line.textContent = quota.reasonTh; card.appendChild(line); }
+  if (quota.nextAttemptAt) facts.appendChild(createFxNewsRailFact("ลองใหม่", fxNewsBangkokDateTimeLabel(quota.nextAttemptAt)));
+  return card;
+}
+
+function renderFx28TrendHistory(container, raw = {}) {
+  const model = normalizeFx28Trend(raw);
+  if (!model.history.length) return;
+  const section = document.createElement("section");
+  const title = document.createElement("h4");
+  section.className = "fx28-trend-history";
+  title.textContent = "ประวัติรอบวิเคราะห์ราคา";
+  section.appendChild(title);
+  model.history.forEach((item) => {
+    const row = document.createElement("article"); const time = document.createElement("strong"); const detail = document.createElement("p");
+    time.textContent = fxNewsBangkokDateTimeLabel(item.updatedAt, "ยังไม่ยืนยันเวลาอัปเดต");
+    detail.textContent = `${fx28TrendStatusLabel(item.status)} • ${item.evaluatedPairCount === null ? "ยังไม่ยืนยันจำนวนคู่" : `ประเมิน ${item.evaluatedPairCount}/28 คู่`} • แท่งปิดอ้างอิงเก่าสุด ${fxNewsBangkokDateTimeLabel(item.dataAsOf, "ยังไม่ยืนยันเวลา")}`;
+    row.append(time, detail); section.appendChild(row);
+  });
   container.appendChild(section);
 }
 
@@ -27005,7 +28569,7 @@ function renderFxNewsHistory(container, domain = {}) {
 function renderFxNewsBiasPanel(container, tabId, domain) {
   const section = document.createElement("section");
   section.className = "workflow-domain-panel workflow-fx-news-bias";
-  const freshness = tabId === "today"
+  const freshness = tabId === "pair_bias" && domain.fxTrend ? null : tabId === "today"
     ? domain?.freshness?.marketNews
     : domain?.freshness?.fxBias;
   const freshnessBanner = createFxFreshnessBanner(freshness);
@@ -27051,9 +28615,14 @@ function renderFxNewsBiasPanel(container, tabId, domain) {
       if (unconfirmedNews.length) renderFxNewsGroup(section, "รอ Backend ยืนยันสถานะ", unconfirmedNews, "ไม่มีรายการที่รอยืนยัน");
     }
   } else if (tabId === "pair_bias") {
-    appendFxNewsBackendState(section, domain, { view: "pairs" });
-    renderFxBiasGrid(section, domain.pairBias, domain.pairAssessmentSummary);
+    if (domain.fxTrend) {
+      renderFx28TrendTable(section, domain.fxTrend, state.propReportLoadState?.[FX_NEWS_BIAS_PROP_ID] || {});
+    } else {
+      appendFxNewsBackendState(section, domain, { view: "pairs" });
+      renderFxBiasGrid(section, domain.pairBias, domain.pairAssessmentSummary);
+    }
   } else if (tabId === "history") {
+    if (domain.fxTrend) renderFx28TrendHistory(section, domain.fxTrend);
     renderFxNewsHistory(section, domain);
   } else if (tabId === "horizons") {
     renderFxBiasTable(section, domain.pairBias, { horizons: true });
@@ -27934,7 +29503,10 @@ function clearEaFactoryGoogleSheetImport(factory = state.modal.eaFactory, { clea
   factory.importedRecordDigest = "";
   factory.importedCatalogDigest = "";
   factory.importedSnapshotDigest = "";
-  if (clearSelection) factory.sheetRecordId = "";
+  if (clearSelection) {
+    factory.sheetRecordId = "";
+    factory.pendingGoogleSheetImport = null;
+  }
 }
 
 function reconcileEaFactoryGoogleSheetSelection(
@@ -28065,6 +29637,7 @@ function invalidateEaFactoryGoogleSheetCatalogAfterActivation() {
   // when a test transport or browser cannot cancel the underlying fetch.
   eaFactoryGoogleSheetCatalogInFlight = null;
   factory.sheetRecordId = "";
+  factory.pendingGoogleSheetImport = null;
   factory.importedSourceId = "";
   factory.importedRecordDigest = "";
   factory.importedCatalogDigest = "";
@@ -28229,6 +29802,7 @@ function scheduleEaFactoryGoogleSheetCatalogAutoRefresh(delayMs = EA_FACTORY_GOO
 }
 
 function renderEaFactorySourceStage(section, domain) {
+  renderEaFactoryExistingBuildPicker(section, domain);
   const intake = document.createElement("div");
   const hero = document.createElement("header");
   const kicker = document.createElement("span");
@@ -28472,6 +30046,7 @@ function renderEaFactoryRecordImport(container, domain, { platform, artifactKind
   });
   select.addEventListener("change", () => {
     catalog.lastInteractionAt = Date.now();
+    factory.pendingGoogleSheetImport = null;
     clearEaFactoryGoogleSheetImport(factory);
     factory.sheetRecordId = select.value;
     catalog.selectedRecord = null;
@@ -28488,7 +30063,7 @@ function renderEaFactoryRecordImport(container, domain, { platform, artifactKind
     || !catalogFresh
     || !selectedCatalogRecord
     || String(selectedCatalogRecord.sourceRecordId || "") === "";
-  submit.textContent = factory.inFlight && factory.stageId === "sheet_import"
+  submit.textContent = factory.inFlight && ["sheet_import", "sheet_sync"].includes(factory.stageId)
     ? "กำลัง Import..."
     : "Import ข้อมูล";
   refresh.type = "button";
@@ -28956,12 +30531,68 @@ function rejectEaFactoryMissingTopHeaderLocks(stageId, platform = "") {
   return true;
 }
 
+async function waitForEaFactoryAuthoritativeReceipt({ factory, isCurrent, matches, message,
+  messageKind, maxWaitMs = 45000 } = {}) {
+  if (!isCurrent()) return null;
+  const controller = new AbortController();
+  const deadline = Date.now() + maxWaitMs;
+  const abortResult = new Promise((resolve) => controller.signal.addEventListener("abort", () => resolve(null), { once: true }));
+  const timer = window.setTimeout(() => controller.abort(), maxWaitMs);
+  eaFactoryActiveActionAbortController = controller;
+  let confirmed = null;
+  setEaFactoryActionState({ inFlight: true, stageId: "awaiting_fresh_read", message, messageKind, tone: "working" });
+  try {
+    while (isCurrent() && !controller.signal.aborted && Date.now() < deadline) {
+      // Retry only reads of this durable receipt. Never repeat Source/Create/Run
+      // mutations or infer permission from a receipt, elapsed time or old model.
+      const payload = await Promise.race([
+        loadEaFactoryReadModel({ signal: controller.signal, forceFresh: true }), abortResult,
+      ]);
+      if (!isCurrent() || controller.signal.aborted || Date.now() >= deadline) break;
+      const model = payload?.eaFactory || payload;
+      const fresh = model?.schemaVersion === "ea-factory-v1"
+        && EA_FACTORY_SUPPORTED_MODES.has(model.mode) && model.scheduled === false
+        && model.snapshotStale !== true && state.eaFactoryReadModel.stale !== true
+        && state.eaFactoryReadModel.payload === model;
+      if (fresh) {
+        if (matches(model)) confirmed = model;
+        break;
+      }
+      if (state.eaFactoryReadModel.lastError?.kind !== "refreshing") break;
+      await Promise.race([
+        new Promise((resolve) => window.setTimeout(resolve, Math.min(1000, Math.max(0, deadline - Date.now())))),
+        abortResult,
+      ]);
+    }
+    return confirmed;
+  } finally {
+    window.clearTimeout(timer);
+    const ownsWait = eaFactoryActiveActionAbortController === controller;
+    if (ownsWait) eaFactoryActiveActionAbortController = null;
+    if (ownsWait && state.modal.eaFactory === factory) {
+      const current = isCurrent();
+      const readError = state.eaFactoryReadModel.lastError;
+      setEaFactoryActionState({ inFlight: false, stageId: confirmed && current ? "" : "read_model",
+        tone: confirmed && current ? "ready" : "warning", messageKind,
+        message: confirmed && current ? "Backend ยืนยันข้อมูลล่าสุดแล้ว"
+          : current && readError?.kind && readError.kind !== "refreshing" && readError.message ? readError.message
+          : "บันทึกคำขอเดิมไว้แล้ว • ยังไม่เริ่มขั้นถัดไป กรุณาตรวจสถานะอีกครั้ง โดยไม่สร้างคำขอซ้ำ" });
+    }
+  }
+}
+
 async function createEaFactoryCustomSourceAndStart({ platform, artifactKind } = {}) {
+  const factory = state.modal.eaFactory;
+  if (factory.inFlight) return null;
   if (
     typeof rejectEaFactoryMissingTopHeaderLocks === "function"
     && rejectEaFactoryMissingTopHeaderLocks("custom_source", platform)
   ) return null;
-  const factory = state.modal.eaFactory;
+  const revision = Number(factory.readContextRevision || 0);
+  let contextSignature = eaFactoryCreateContextSignature(factory);
+  const isCurrent = () => state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+    && state.modal.eaFactory === factory && Number(factory.readContextRevision || 0) === revision
+    && eaFactoryCreateContextSignature(factory) === contextSignature;
   const payload = eaFactoryCustomSourcePayload({
     platform,
     artifactKind,
@@ -28973,11 +30604,23 @@ async function createEaFactoryCustomSourceAndStart({ platform, artifactKind } = 
     EA_FACTORY_CUSTOM_SOURCE_ENDPOINT,
     payload,
     { signal },
-  ), "สร้าง Strategy Source แบบตรวจสอบย้อนหลังได้แล้ว");
+  ), "สร้าง Strategy Source แบบตรวจสอบย้อนหลังได้แล้ว", { refreshReadModel: false, isCurrent });
   const sourceRecordId = String(response?.sourceRecordId || "").trim();
-  if (!sourceRecordId) return response;
+  const recordDigest = String(response?.source?.recordDigest || "");
+  if (!isCurrent()) return null;
+  if (response?.ok !== true || response.kind !== "ea_factory_custom_source"
+    || !sourceRecordId || response?.source?.sourceRecordId !== sourceRecordId
+    || !/^[0-9a-f]{64}$/.test(recordDigest)) return response;
   factory.selectedSourceId = sourceRecordId;
-  await loadEaFactoryReadModel({ forceFresh: true });
+  contextSignature = eaFactoryCreateContextSignature(factory);
+  const confirmed = await waitForEaFactoryAuthoritativeReceipt({ factory, isCurrent,
+    message: "บันทึก Strategy Source แล้ว • กำลังรอข้อมูลล่าสุดก่อนสร้าง Build",
+    messageKind: "source_receipt_confirmed",
+    matches: (model) => Array.isArray(model?.sourceCatalog?.records)
+      && model.sourceCatalog.records.some((source) => source.sourceRecordId === sourceRecordId
+        && source.recordDigest === recordDigest),
+  });
+  if (!confirmed || !isCurrent()) return response;
   if (
     normalizeEaFactoryArtifactKind(artifactKind) === "expert_advisor"
     && ["mt4", "mt5"].includes(normalizeEaFactoryPlatform(platform))
@@ -28997,21 +30640,29 @@ function renderEaFactoryCustomSourcePreview(container, domain, { platform, artif
   const smoke = document.createElement("button");
   const start = document.createElement("button");
   const factory = state.modal.eaFactory;
+  const readModel = state.eaFactoryReadModel.payload;
+  const revision = Number(factory.readContextRevision || 0);
   const normalizedPlatform = normalizeEaFactoryPlatform(platform);
   const normalizedArtifactKind = normalizeEaFactoryArtifactKind(artifactKind);
-  const globalLocksReady = typeof eaFactoryTopHeaderLockPreflight !== "function"
-    || eaFactoryTopHeaderLockPreflight(normalizedPlatform).ready;
-  const canStart = Boolean(
-    domain?.authoritative === true
-    && domain?.canStartNewBuild === true
-    && !domain?.backendBusy
-    && !factory.inFlight
-    && normalizedPlatform
-    && normalizedArtifactKind
-    && globalLocksReady
-    && String(factory.customSystemName || "").trim().length >= 3
-    && String(factory.customConditions || "").trim().length >= 20
-  );
+  const updateStartAvailability = () => {
+    const globalLocksReady = typeof eaFactoryTopHeaderLockPreflight !== "function"
+      || eaFactoryTopHeaderLockPreflight(normalizedPlatform).ready;
+    start.disabled = !Boolean(
+      domain?.authoritative === true
+      && domain?.canStartNewBuild === true
+      && !domain?.backendBusy
+      && !factory.inFlight
+      && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+      && state.modal.eaFactory === factory && Number(factory.readContextRevision || 0) === revision
+      && state.eaFactoryReadModel.payload === readModel && readModel
+      && state.eaFactoryReadModel.stale !== true && readModel.snapshotStale !== true
+      && normalizedPlatform
+      && normalizedArtifactKind
+      && globalLocksReady
+      && String(factory.customSystemName || "").trim().length >= 3
+      && String(factory.customConditions || "").trim().length >= 20
+    );
+  };
   block.className = "ea-factory-source-form";
   nameLabel.textContent = "ชื่อระบบ";
   nameInput.type = "text";
@@ -29022,6 +30673,7 @@ function renderEaFactoryCustomSourcePreview(container, domain, { platform, artif
   nameInput.addEventListener("input", () => {
     factory.customSystemName = nameInput.value;
     factory.customTemplateId = "";
+    updateStartAvailability();
   });
   nameLabel.appendChild(nameInput);
   label.textContent = "เขียนเงื่อนไข Entry, Exit, Stop Loss, Take Profit และ Money Management";
@@ -29033,6 +30685,7 @@ function renderEaFactoryCustomSourcePreview(container, domain, { platform, artif
   textarea.addEventListener("input", () => {
     factory.customConditions = textarea.value;
     factory.customTemplateId = "";
+    updateStartAvailability();
   });
   label.appendChild(textarea);
   actions.className = "ea-factory-intake-actions";
@@ -29055,11 +30708,12 @@ function renderEaFactoryCustomSourcePreview(container, domain, { platform, artif
   });
   start.type = "button";
   start.className = "modal-action primary ea-factory-start-button";
-  start.disabled = !canStart;
+  updateStartAvailability();
   start.textContent = normalizedArtifactKind === "expert_advisor" && ["mt4", "mt5"].includes(normalizedPlatform)
     ? "สร้าง Source และเริ่มเขียน EA"
     : "สร้าง Strategy Source";
   start.addEventListener("click", () => {
+    updateStartAvailability();
     if (!start.disabled) void createEaFactoryCustomSourceAndStart({ platform, artifactKind });
   });
   actions.append(smoke, start);
@@ -29314,16 +30968,18 @@ function eaFactoryPhaseGateProgress(domain = {}) {
     ? Math.max(0, Math.min(100, Math.round(backendPercent)))
     : completedPercent;
   const status = String(run.status || "idle").trim().toLowerCase();
+  const sheetSyncOnly = state.modal.eaFactory.inFlight === true
+    && ["sheet_sync", "create_build"].includes(state.modal.eaFactory.stageId) && !domain.backendBusy;
   const actionInFlight = state.modal.eaFactory.inFlight === true;
-  const waiting = !actionInFlight && ["queued", "awaiting_visible_terminal"].includes(status);
-  const active = !waiting && (
+  const waiting = !sheetSyncOnly && !actionInFlight && ["queued", "awaiting_visible_terminal"].includes(status);
+  const active = !sheetSyncOnly && !waiting && (
     actionInFlight
     || Boolean(domain.backendBusy)
     || ["running", "waiting_ai", "cancelling"].includes(status)
   );
-  const shouldPoll = active
+  const shouldPoll = !sheetSyncOnly && (active
     || waiting
-    || ["queued", "awaiting_visible_terminal"].includes(status);
+    || ["queued", "awaiting_visible_terminal"].includes(status));
   const currentStageId = run.currentStageId
     || domain.currentStageId
     || "";
@@ -29351,37 +31007,80 @@ function eaFactoryPhaseGateProgress(domain = {}) {
   };
 }
 
-function stopEaFactoryActiveProgressPolling() {
+function stopEaFactoryActiveProgressPolling({ resetRefresh = false } = {}) {
   if (eaFactoryActiveProgressPollTimer !== null) {
     window.clearTimeout(eaFactoryActiveProgressPollTimer);
     eaFactoryActiveProgressPollTimer = null;
   }
+  eaFactoryDeferredReadPollingContext?.controller?.abort();
+  if (eaFactoryDeferredReadPollingContext) eaFactoryDeferredReadPollingContext.controller = null;
+  if (resetRefresh) eaFactoryDeferredReadPollingContext = null;
 }
 
 function scheduleEaFactoryActiveProgressPolling(domain = {}) {
   const progress = eaFactoryPhaseGateProgress(domain);
-  const shouldPoll = progress.shouldPoll
-    && state.modal.open
+  const visible = state.modal.open
     && state.modal.id === EA_FACTORY_PROP_ID
     && document.visibilityState === "visible";
-  if (!shouldPoll) {
-    stopEaFactoryActiveProgressPolling();
+  const factory = state.modal.eaFactory;
+  const revision = Number(factory.readContextRevision || 0);
+  const refreshPending = !progress.shouldPoll && !factory.inFlight
+    && state.eaFactoryReadModel.lastError?.kind === "refreshing";
+  if (!visible || (!progress.shouldPoll && !refreshPending)) {
+    stopEaFactoryActiveProgressPolling({ resetRefresh: true });
     return;
   }
+  if (refreshPending) {
+    if (!eaFactoryDeferredReadPollingContext
+      || eaFactoryDeferredReadPollingContext.factory !== factory
+      || eaFactoryDeferredReadPollingContext.revision !== revision) {
+      stopEaFactoryActiveProgressPolling({ resetRefresh: true });
+      eaFactoryDeferredReadPollingContext = { factory, revision, deadline: Date.now() + 45000, controller: null };
+    }
+    // Retain the expired context across renders. Only an explicit refresh or a
+    // new modal context starts another bounded read-only window.
+    if (Date.now() >= eaFactoryDeferredReadPollingContext.deadline) {
+      stopEaFactoryActiveProgressPolling();
+      return;
+    }
+    if (eaFactoryDeferredReadPollingContext.controller) return;
+  } else if (eaFactoryDeferredReadPollingContext) {
+    stopEaFactoryActiveProgressPolling({ resetRefresh: true });
+  }
   if (eaFactoryActiveProgressPollTimer !== null) return;
+  const refreshContext = refreshPending ? eaFactoryDeferredReadPollingContext : null;
+  const current = () => state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+    && document.visibilityState === "visible" && state.modal.eaFactory === factory
+    && Number(factory.readContextRevision || 0) === revision;
   eaFactoryActiveProgressPollTimer = window.setTimeout(async () => {
     eaFactoryActiveProgressPollTimer = null;
-    if (
-      !state.modal.open
-      || state.modal.id !== EA_FACTORY_PROP_ID
-      || document.visibilityState !== "visible"
-    ) return;
-    await loadEaFactoryReadModel({ forceFresh: true });
-    if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) renderGameModal();
-  }, EA_FACTORY_ACTIVE_POLL_MS);
+    if (!current()) {
+      stopEaFactoryActiveProgressPolling({ resetRefresh: true });
+      return;
+    }
+    if (refreshContext) {
+      if (eaFactoryDeferredReadPollingContext !== refreshContext
+        || Date.now() >= refreshContext.deadline || factory.inFlight
+        || state.eaFactoryReadModel.lastError?.kind !== "refreshing") return;
+      const controller = new AbortController();
+      refreshContext.controller = controller;
+      const abortTimer = window.setTimeout(() => controller.abort(), Math.max(1, refreshContext.deadline - Date.now()));
+      try {
+        await loadEaFactoryReadModel({ forceFresh: true, signal: controller.signal });
+      } finally {
+        window.clearTimeout(abortTimer);
+        if (refreshContext.controller === controller) refreshContext.controller = null;
+      }
+    } else {
+      await loadEaFactoryReadModel({ forceFresh: true });
+    }
+    if (current()) renderGameModal();
+  }, refreshContext ? Math.min(EA_FACTORY_ACTIVE_POLL_MS, refreshContext.deadline - Date.now()) : EA_FACTORY_ACTIVE_POLL_MS);
 }
 
 async function refreshEaFactoryProgressStatus() {
+  if (state.eaFactoryReadModel.inFlight) return;
+  stopEaFactoryActiveProgressPolling({ resetRefresh: true });
   await loadEaFactoryReadModel({ forceFresh: true });
   if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) renderGameModal();
 }
@@ -29494,7 +31193,7 @@ function eaFactoryOneClickStepCopy(stageId, platform = "") {
     },
     backtest_recheck: {
       title: `4 เปิด ${platformLabel} ทำ Visual Backtest`,
-      detail: `ต้องเห็น ${platformLabel} Strategy Tester และ Visual mode; 0 ออเดอร์ถือว่ารันทดสอบจบ แต่ยังประเมินประสิทธิภาพไม่ได้และระบบจะขึ้นคำเตือน`,
+      detail: `ต้องเห็น ${platformLabel} Strategy Tester และ Visual mode; ถ้าได้ 0 ออเดอร์หรือคุณภาพข้อมูลไม่ผ่าน Backend จะหยุดก่อน Final Report และยังไม่ถือว่างานสำเร็จ`,
     },
     artifacts_report: {
       title: "5 จัดทำ Final Report",
@@ -29516,6 +31215,8 @@ function eaFactoryExistingOneClickAdmission(domain = {}) {
   const active = ["queued", "running", "waiting_ai", "cancelling"].includes(status);
   const resumable = status === "awaiting_visible_terminal" && capability.canResume === true;
   const retryable = ["failed", "blocked"].includes(status) && capability.canRetry === true;
+  const recovery = eaFactoryRecoveredSourceState(domain);
+  const recoveredSource = recovery?.canContinue === true;
   const currentStage = domain.stages?.find((item) => item.id === domain.currentStageId);
   const initial = status === "idle"
     && capability.canRun === true
@@ -29542,14 +31243,66 @@ function eaFactoryExistingOneClickAdmission(domain = {}) {
     && globalLocksReady
     && !active
     && status !== "completed"
-    && (initial || resumable || retryable);
+    && (initial || resumable || retryable || recoveredSource);
   return {
     active,
     resumable,
     retryable,
+    recoveredSource,
+    recoverySignature: recoveredSource ? recovery.continuationSignature : "",
     terminalMatchesBuild,
     requestInFlight,
     canSubmit,
+  };
+}
+
+function eaFactoryRecoveredSourceState(domain = {}) {
+  const build = domain.activeBuild;
+  const raw = build?.raw || {};
+  const recovery = raw.sourceRecovery || {};
+  const history = recovery.history;
+  const run = domain.oneClick?.run || {};
+  const factory = state.modal.eaFactory;
+  if (domain.authoritative !== true || state.eaFactoryReadModel?.stale === true
+    || state.eaFactoryReadModel?.payload?.snapshotStale === true
+    || !build || raw.id !== build.id || !/^ea-build-[a-zA-Z0-9._:-]+$/.test(build.id)
+    || build.artifactKind !== "expert_advisor" || !["mt4", "mt5"].includes(build.platform)
+    || recovery.reasonCode !== "source_recovery_already_recorded"
+    || !/^[0-9a-f]{64}$/.test(recovery.strategySpecDigest || "")
+    || !Array.isArray(history) || history.length !== 1) return null;
+  const receipt = history[0];
+  const generation = raw.stages?.find((stage) => stage.id === "generate_source");
+  const review = raw.stages?.find((stage) => stage.id === "source_review");
+  const version = Array.isArray(raw.versions) && raw.versions.length === 1 ? raw.versions[0] : null;
+  if (!/^ea-source-recovery-[0-9a-f]{24}$/.test(receipt?.recoveryId || "")
+    || receipt.sourceOrigin !== "operator_recovery" || receipt.aiExecuted !== false
+    || receipt.nextStageId !== "source_review"
+    || !/^[0-9a-f]{64}$/.test(receipt.sourceDigest || "")
+    || !/^[0-9a-f]{64}$/.test(receipt.previousRunDigest || "")
+    || generation?.status !== "completed" || generation.evidenceVerified !== true
+    || generation.missionId !== receipt.recoveryMissionId || generation.reportId !== receipt.reportId
+    || !/^mission-eaf-recovery-[0-9a-f]{24}$/.test(receipt.recoveryMissionId || "")
+    || !/^report-eaf-recovery-[0-9a-f]{24}$/.test(receipt.reportId || "")
+    || version?.immutable !== true || version.sourceDigest !== receipt.sourceDigest
+    || version.sourceReportId !== receipt.reportId) return null;
+  const canContinue = ["failed", "blocked"].includes(run.status)
+    && ["generate", "generate_source"].includes(run.currentStageId)
+    && /^ea-run-[a-zA-Z0-9._:-]+$/.test(run.runId || "")
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,199}$/.test(run.idempotencyKey || "")
+    && raw.oneClickRun?.runId === run.runId && raw.oneClickRun?.idempotencyKey === run.idempotencyKey
+    && raw.oneClickRun?.status === run.status && raw.oneClickRun?.currentStageId === "generate_source"
+    && !raw.oneClickRun?.visibleAction && review?.status === "pending" && review.canAdvance === true
+    && !domain.backendBusy && !factory.inFlight
+    && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID && factory.selectedBuildId === build.id
+    && typeof eaFactoryTopHeaderLockPreflight === "function"
+    && eaFactoryTopHeaderLockPreflight(build.platform).ready === true
+    && domain.oneClick?.terminalProcessLaunchAllowed === false;
+  return {
+    accepted: true,
+    canContinue: Boolean(canContinue),
+    continuationSignature: JSON.stringify([build.id, run.runId, run.idempotencyKey,
+      recovery.strategySpecDigest, receipt.recoveryId, receipt.sourceDigest,
+      Number(factory.readContextRevision || 0)]),
   };
 }
 
@@ -29653,7 +31406,9 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
     panel.appendChild(createEaFactoryNotice(
       "error",
       `หยุดที่ ${run.currentStageId ? eaFactoryOneClickStepCopy(run.currentStageId, platform).title : "ขั้นที่ Backend ระบุ"}`,
-      `${run.failureCode ? `${run.failureCode} • ` : ""}${run.message || "Backend ยังไม่ส่งรายละเอียดข้อผิดพลาด"}`,
+      `${run.failureCode ? `${run.failureCode} • ` : ""}${run.failureCode === "mt5_tester_pane_collapsed"
+        ? eaFactoryBacktestAttentionPresentation({}, run).message
+        : (run.message || "Backend ยังไม่ส่งรายละเอียดข้อผิดพลาด")}`,
     ));
   } else if (run.message) {
     panel.appendChild(createEaFactoryNotice(
@@ -29670,9 +31425,12 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
     terminalMatchesBuild,
     requestInFlight,
     canSubmit,
+    recoveredSource,
+    recoverySignature,
   } = eaFactoryExistingOneClickAdmission(domain);
   const actionLabel = active
     ? "กำลังทำงาน • รอผลจาก Backend"
+    : recoveredSource ? "ตรวจ Source ที่แก้แล้วและทำต่อ"
     : (status === "awaiting_visible_terminal"
       ? (capability.visibleAdapterConnected
         ? `เปิด MetaEditor / ${platformLabel} แล้วทำต่อ`
@@ -29687,7 +31445,7 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
   const action = createEaFactoryActionButton(
     "one_click_run",
     actionLabel,
-    () => void runEaFactoryOneClick(domain.activeBuild.id),
+    () => void runEaFactoryOneClick(domain.activeBuild.id, { recoveredSourceSignature: recoverySignature || "" }),
     { disabled: !canSubmit },
   );
   action.dataset.eaFactoryOneClickAction = status;
@@ -29737,9 +31495,13 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
 }
 
 function eaFactoryCurrentVisualStageId(domain = {}) {
+  if (typeof eaFactoryRecoveredSourceState === "function"
+    && eaFactoryRecoveredSourceState(domain)?.canContinue === true) return "review";
   const run = domain.oneClick?.run || {};
   const rawStageId = String(
-    run.currentStageId
+    (run.status === "cancelled" && domain.authoritative === true
+      ? domain.backendBusy?.stageId || domain.currentStageId : "")
+      || run.currentStageId
       || domain.backendBusy?.stageId
       || domain.currentStageId
       || "",
@@ -29757,8 +31519,13 @@ function eaFactoryVisualStageStatus(domain = {}, stageId = "", currentStageId = 
   if (domain.authoritative !== true) return "unknown";
   const runStatus = String(domain.oneClick?.run?.status || "").trim().toLowerCase();
   if (stageId === currentStageId) {
+    if (typeof eaFactoryRecoveredSourceState === "function"
+      && eaFactoryRecoveredSourceState(domain)?.canContinue === true) return backendStatus;
     if (runStatus === "failed") return "failed";
     if (runStatus === "blocked") return "blocked";
+    if (runStatus === "cancelled" && ["generate", "review"].includes(stageId)
+      && domain.stages?.some((stage) => stage.id === stageId
+        && stage.missionId && ["queued", "running"].includes(stage.status))) return backendStatus;
     if (["cancelled", "cancelling"].includes(runStatus)) return runStatus;
   }
   if (
@@ -29801,8 +31568,53 @@ function createEaFactoryGameAction(label, handler, className = "") {
   return button;
 }
 
+function eaFactoryCancelledContinuationAdmission(domain = {}) {
+  const factory = state.modal.eaFactory;
+  const build = domain.activeBuild;
+  const run = domain.oneClick?.run || {};
+  const buildId = String(build?.id || "");
+  const previousRunId = String(run.runId || "");
+  const previousRunDigest = String(run.resumeCancelledRunDigest || "");
+  const endpoint = `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/resume-cancelled`;
+  const capability = domain.oneClick || {};
+  const busy = domain.backendBusy;
+  const adoptedBusy = Boolean(busy && run.resumeCancelledMissionId
+    && busy.buildId === buildId && busy.missionId === run.resumeCancelledMissionId
+    && busy.stageId === run.resumeCancelledStageId);
+  const headerReady = typeof eaFactoryTopHeaderLockPreflight !== "function"
+    || eaFactoryTopHeaderLockPreflight(build?.platform).ready === true;
+  const eligible = domain.authoritative === true
+    && state.eaFactoryReadModel.stale !== true
+    && state.eaFactoryReadModel.payload?.snapshotStale !== true
+    && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+    && !factory.inFlight
+    && /^ea-build-[a-zA-Z0-9._:-]+$/.test(buildId)
+    && /^ea-run-[a-zA-Z0-9._:-]+$/.test(previousRunId)
+    && /^[0-9a-f]{64}$/.test(previousRunDigest)
+    && run.status === "cancelled" && run.canResumeCancelled === true
+    && ["generate_source", "source_review", "compile_validate"].includes(run.resumeCancelledStageId)
+    && run.resumeCancelledEndpoint === endpoint && !run.resumeCancelledReasonCode
+    && (!busy || adoptedBusy) && headerReady
+    && build.artifactKind === "expert_advisor" && ["mt4", "mt5"].includes(build.platform)
+    && capability.enabled === true && capability.selectedPlatform === build.platform
+    && capability.selectedPlatformSupported === true
+    && capability.supportedVisiblePlatforms?.includes(build.platform)
+    && Boolean(capability.selectedTerminalId || domain.selectedTerminalId)
+    && capability.terminalReady === true && capability.terminalRunning === true
+    && capability.visibleAdapterConnected === true && capability.terminalProcessLaunchAllowed === false;
+  return {
+    canSubmit: Boolean(eligible && factory.selectedBuildId === buildId),
+    canSelect: Boolean(eligible && !factory.selectedBuildId),
+    buildId, previousRunId, previousRunDigest, endpoint,
+  };
+}
+
 function renderEaFactoryGameProgressPanel(container, domain = {}) {
   if (!domain.activeBuild) return;
+  const admission = eaFactoryExistingOneClickAdmission(domain);
+  const recoveredSource = admission.recoveredSource === true;
+  const recoveryAccepted = typeof eaFactoryRecoveredSourceState === "function"
+    && eaFactoryRecoveredSourceState(domain)?.accepted === true;
   const run = domain.oneClick?.run || {};
   const progressState = eaFactoryPhaseGateProgress(domain);
   const currentStageId = eaFactoryCurrentVisualStageId(domain);
@@ -29831,6 +31643,15 @@ function renderEaFactoryGameProgressPanel(container, domain = {}) {
   const actions = document.createElement("div");
   const live = domain.authoritative === true;
   const status = String(run.status || "idle").toLowerCase();
+  const completedDelivery = live && eaFactoryCertifiedDeliveryCompleted(domain);
+  const awaitingStart = status === "idle" && !progressState.active && !completedDelivery;
+  const independentSource = live && status === "cancelled"
+    ? domain.stages?.find((stage) => stage.id === currentStageId
+      && ["generate_source", "source_review"].includes(stage.backendId)
+      && stage.missionId && ["queued", "running"].includes(stage.status)) : null;
+  const continuationReceipt = Object.values(state.modal.eaFactory.cancelledContinuationIntents || {})
+    .find((intent) => intent.buildId === domain.activeBuild.id && intent.receipt
+      && [intent.previousRunId, intent.receipt.runId].includes(run.runId))?.receipt;
   const systemName = safeDashboardDisplayText(
     domain.activeBuild.sourceDisplayName || domain.activeBuild.systemName,
     "ระบบที่เลือกจากหน้า 1",
@@ -29844,14 +31665,15 @@ function renderEaFactoryGameProgressPanel(container, domain = {}) {
 
   heading.className = "ea-factory-game-progress-heading";
   eyebrow.textContent = `${artifactLabel} • ${platformLabel}`;
-  title.textContent = progressState.status === "completed"
-    && eaFactoryCertifiedDeliveryCompleted(domain)
+  title.textContent = !live ? "กำลังตรวจสถานะ Build" : completedDelivery
     ? "สร้างงานเสร็จแล้ว"
+    : recoveredSource ? "รับ Source ที่แก้แล้ว • พร้อมตรวจโค้ดต่อ"
     : (["failed", "blocked"].includes(status)
       ? "งานหยุดที่ขั้นที่ต้องตรวจสอบ"
       : (status === "cancelled"
-        ? "ยกเลิกงานแล้ว"
-        : (progressState.waiting ? "งานกำลังรอให้ดำเนินการต่อ" : "ระบบกำลังสร้างงานของคุณ")));
+        ? (independentSource ? "รอบเดิมยกเลิกแล้ว • ยังมีงาน AI ให้ติดตาม" : "ยกเลิกงานแล้ว")
+        : (awaitingStart ? "Build รอเริ่มขั้นถัดไป"
+          : (progressState.waiting ? "งานกำลังรอให้ดำเนินการต่อ" : "ระบบกำลังสร้างงานของคุณ"))));
   subtitle.textContent = systemName;
   percentage.textContent = live && progressState.determinate
     ? `${progressState.approximate ? "ประมาณ " : ""}${progressState.percent}%`
@@ -29869,10 +31691,18 @@ function renderEaFactoryGameProgressPanel(container, domain = {}) {
   stageCounter.textContent = `ขั้น ${Math.max(1, currentStageNumber)} จาก ${EA_FACTORY_VISUAL_STAGE_IDS.length}`;
   stageTitle.textContent = currentVisual.shortTitleTh;
   stageDetail.textContent = !live
-    ? "กำลังขอสถานะล่าสุดจาก Local Runner ระบบจะไม่เดาความคืบหน้าแทน Backend"
-    : (run.message
+    ? (continuationReceipt
+      ? `Backend รับคำขอทำงานต่อของ Build ${domain.activeBuild.id} แล้ว • รอบใหม่ ${continuationReceipt.runId} • ยังรอสถานะปัจจุบัน ไม่ใช้ใบรับคำขอแทนความคืบหน้า`
+      : "กำลังขอสถานะล่าสุดจาก Local Runner ระบบจะไม่เดาความคืบหน้าแทน Backend")
+    : recoveredSource
+      ? "Backend รับ Source ที่ผู้พัฒนาแก้ไขแล้ว • เก็บผล AI ที่ไม่ผ่านและ Retry เดิม • ทำต่อด้วย Run เดิมเพื่อตรวจโค้ด Compile และ Backtest"
+    : (independentSource
+      ? `รอบอัตโนมัติเดิมถูกยกเลิกแล้ว • Mission ${independentSource.missionId} ของขั้นนี้ยังอยู่ระหว่างดำเนินการ ตรวจรายละเอียดงานล่าสุดก่อนทำต่อ`
+      : awaitingStart
+      ? `Backend รับ Build ${domain.activeBuild.id} แล้ว • ขั้นนี้ยังไม่เริ่มทำงาน ตรวจความพร้อมแล้วกดเริ่มงานต่อจาก Build เดิม`
+      : (run.message
       ? safeDashboardDisplayText(run.message, EA_FACTORY_STAGE_COPY[currentStageId]?.descriptionTh, { limit: 260 })
-      : (EA_FACTORY_STAGE_COPY[currentStageId]?.descriptionTh || progressState.currentStageLabel));
+      : (EA_FACTORY_STAGE_COPY[currentStageId]?.descriptionTh || progressState.currentStageLabel)));
   progress.max = 100;
   if (live && progressState.determinate) progress.value = progressState.percent;
   progress.setAttribute("aria-label", "เปอร์เซ็นต์ความคืบหน้าการสร้าง EA");
@@ -29883,6 +31713,11 @@ function renderEaFactoryGameProgressPanel(container, domain = {}) {
       : "กำลังรอสถานะล่าสุดจาก Backend",
   );
   stageCopy.append(stageCounter, stageTitle, stageDetail, progress);
+  if (live && domain.activeBuild.existingCreditAuthorized === true) {
+    const creditStatus = document.createElement("p");
+    creditStatus.textContent = "ใช้เครดิตคงเหลือที่ได้รับอนุญาตเฉพาะ Build นี้";
+    stageCopy.appendChild(creditStatus);
+  }
   hero.append(visual, stageCopy);
 
   track.className = "ea-factory-game-stage-track";
@@ -29904,8 +31739,8 @@ function renderEaFactoryGameProgressPanel(container, domain = {}) {
     stageImage.setAttribute("aria-hidden", "true");
     stageImage.decoding = "async";
     number.textContent = String(index + 1);
-    label.textContent = stageVisual.shortTitleTh;
-    stageStatus.textContent = eaFactoryVisualStageStatusLabel(visualStatus, current);
+    label.textContent = recoveryAccepted && stageId === "generate" ? "Source ที่ผู้พัฒนาแก้ไข" : stageVisual.shortTitleTh;
+    stageStatus.textContent = recoveryAccepted && stageId === "generate" ? "Backend รับ Source แล้ว • เก็บผล AI เดิม" : eaFactoryVisualStageStatusLabel(visualStatus, current);
     stageText.append(number, label, stageStatus);
     item.append(stageImage, stageText);
     track.appendChild(item);
@@ -29918,17 +31753,48 @@ function renderEaFactoryGameProgressPanel(container, domain = {}) {
       : "อัปเดตจาก Local Runner ทุก 3 วินาที • ไม่เรียก AI เพิ่มและไม่หักโควตาโมเดล")
     : "กำลังรอสถานะที่ยืนยันจาก Backend";
   actions.className = "ea-factory-game-progress-actions";
-  const admission = eaFactoryExistingOneClickAdmission(domain);
-  const canResumeOrRetry = admission.canSubmit
-    && (admission.resumable || admission.retryable);
+  const canResumeOrRetry = !completedDelivery && admission.canSubmit
+    && (admission.resumable || admission.retryable || recoveredSource);
+  const canStartExisting = admission.canSubmit && awaitingStart
+    && domain.activeBuild.artifactKind === "expert_advisor"
+    && ["mt4", "mt5"].includes(domain.activeBuild.platform);
   const canRestartBacktest = live
     && run.canRestartBacktest === true
     && !domain.backendBusy
     && !state.modal.eaFactory.inFlight;
+  const cancelledContinuation = eaFactoryCancelledContinuationAdmission(domain);
+  if (cancelledContinuation.canSelect) {
+    const factory = state.modal.eaFactory;
+    const revision = Number(factory.readContextRevision || 0);
+    const { buildId, previousRunId, previousRunDigest } = cancelledContinuation;
+    actions.appendChild(createEaFactoryGameAction("เลือก Build นี้เพื่อทำต่อ", () => {
+      if (state.modal.eaFactory !== factory || !state.modal.open || state.modal.id !== EA_FACTORY_PROP_ID
+        || Number(factory.readContextRevision || 0) !== revision) return;
+      const current = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()),
+        state.propReports[EA_FACTORY_PROP_ID] || {}).domainData.eaFactory;
+      const selection = eaFactoryCancelledContinuationAdmission(current);
+      if (!selection.canSelect || selection.buildId !== buildId
+        || selection.previousRunId !== previousRunId || selection.previousRunDigest !== previousRunDigest) return;
+      // Choosing the displayed busy Build is read-only. Execution still needs
+      // a separate explicit click through the unchanged continuation admission.
+      factory.selectedBuildId = buildId;
+      renderWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()),
+        state.propReports[EA_FACTORY_PROP_ID] || {});
+    }));
+  }
+  if (independentSource) {
+    const missionId = independentSource.missionId;
+    const detailButton = createEaFactoryGameAction("ดู Mission ของงานล่าสุด", () => {
+      if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) {
+        openTaskDetail(missionId, detailButton, { source: "kanban" });
+      }
+    });
+    actions.appendChild(detailButton);
+  }
   if (progressState.active || status === "cancelling") {
     actions.appendChild(createEaFactoryStopButton(domain));
   }
-  if (progressState.waiting) {
+  if (progressState.waiting || awaitingStart || !live || status === "cancelled") {
     actions.appendChild(createEaFactoryGameAction(
       "ตรวจสถานะล่าสุด",
       () => void refreshEaFactoryProgressStatus(),
@@ -29941,14 +31807,25 @@ function renderEaFactoryGameProgressPanel(container, domain = {}) {
       "ea-factory-game-action-primary",
     ));
   }
-  if (canResumeOrRetry) {
-    const continueLabel = admission.retryable ? "ลองใหม่จากขั้นที่ติดขัด" : "ทำขั้นนี้ต่อ";
+  if (cancelledContinuation.canSubmit) {
+    const { buildId, previousRunId, previousRunDigest } = cancelledContinuation;
+    actions.appendChild(createEaFactoryGameAction(
+      "ทำงานต่อจาก Build เดิม",
+      () => void resumeEaFactoryCancelledRun(buildId, previousRunId, previousRunDigest),
+      "ea-factory-game-action-primary",
+    ));
+  }
+  if (canResumeOrRetry || canStartExisting) {
+    const actionBuildId = domain.activeBuild.id;
+    const continueLabel = recoveredSource ? "ตรวจ Source ที่แก้แล้วและทำต่อ" : canStartExisting ? "เริ่มงานต่อจาก Build นี้"
+      : (admission.retryable ? "ลองใหม่จากขั้นที่ติดขัด" : "ทำขั้นนี้ต่อ");
+    const recoverySignature = admission.recoverySignature || "";
     actions.appendChild(createEaFactoryGameAction(
       continueLabel,
-      () => void runEaFactoryOneClick(domain.activeBuild.id),
+      () => void runEaFactoryOneClick(actionBuildId, { recoveredSourceSignature: recoverySignature }),
       canRestartBacktest ? "" : "ea-factory-game-action-primary",
     ));
-  } else if (status === "completed" && eaFactoryCertifiedDeliveryCompleted(domain)) {
+  } else if (completedDelivery) {
     actions.appendChild(createEaFactoryPageNavigation("ดูผลลัพธ์และไฟล์", "result"));
   } else if (status === "completed") {
     actions.appendChild(createEaFactoryGameAction(
@@ -29959,6 +31836,8 @@ function renderEaFactoryGameProgressPanel(container, domain = {}) {
   } else if (
     !progressState.active
     && !canRestartBacktest
+    && !cancelledContinuation.canSubmit
+    && !cancelledContinuation.canSelect
     && !["completed", "cancelling"].includes(status)
   ) {
     actions.appendChild(createEaFactoryPageNavigation("กลับไปตั้งค่างานหน้า 1", "source"));
@@ -30071,7 +31950,49 @@ function eaFactoryRetryableInvalidOutput(domain = {}, stage = {}) {
   return !build.version && versions.length === 0 && !hasSourceArtifact;
 }
 
+function eaFactoryBacktestAttentionPresentation(stage = {}, run = {}) {
+  const attentionReason = stage.attentionRequired === true ? String(stage.attentionReasonCode || "") : "";
+  const failureCodes = [String(stage.failureCode || ""), String(run.failureCode || "")];
+  if (failureCodes.includes("mt5_tester_pane_collapsed")) {
+    return {
+      tone: "warning",
+      title: "กรุณาขยายแผง Strategy Tester",
+      message: "แผง Strategy Tester เปิดอยู่แต่ยุบจนมองไม่เห็นเนื้อหา ให้ลากขอบบนของแผงขึ้นจนเห็น Settings และปุ่ม Start ชัดเจน โดยไม่กด Start แล้วกลับมากดทำขั้นนี้ต่อในโรงงาน EA ระบบหยุดรอตรวจหน้าต่าง และไม่เปิดแผงซ้ำอัตโนมัติ",
+    };
+  }
+  const acceptanceBlocked = failureCodes.some((code) => [
+    "backtest_acceptance_zero_trades",
+    "backtest_acceptance_history_quality_issue",
+  ].includes(code));
+  const zeroTrade = failureCodes.includes("backtest_acceptance_zero_trades")
+    || ["backtest_zero_trades", "backtest_zero_trades_and_history_quality_errors"].includes(attentionReason);
+  const historyQuality = failureCodes.includes("backtest_acceptance_history_quality_issue")
+    || ["backtest_history_quality_errors", "backtest_zero_trades_and_history_quality_errors"].includes(attentionReason);
+  if (!zeroTrade && !historyQuality) return null;
+  const reason = zeroTrade && historyQuality
+    ? "ได้ 0 ออเดอร์และคุณภาพข้อมูลย้อนหลังไม่ผ่าน"
+    : (zeroTrade ? "ได้ 0 ออเดอร์" : "คุณภาพข้อมูลย้อนหลังไม่ผ่าน");
+  const guidance = historyQuality
+    ? "ตรวจคุณภาพ History / Mismatched chart errors และช่วงทดสอบก่อนลองใหม่"
+    : "ตรวจข้อมูลย้อนหลัง ช่วงทดสอบ Symbol และเงื่อนไขเข้าเทรดก่อนลองใหม่";
+  return {
+    tone: acceptanceBlocked ? "error" : "warning",
+    title: `Backtest ${reason}`,
+    message: `${acceptanceBlocked
+      ? "Backend หยุดก่อน Final Report และยังไม่ถือว่างานสำเร็จ"
+      : "รายงานนี้มีจุดที่ต้องตรวจสอบ ให้ยึดสถานะและสิทธิ์ทำต่อจาก Backend"} • เก็บหลักฐานรอบนี้ไว้และไม่กด Start ซ้ำอัตโนมัติ • งดการประเมินประสิทธิภาพ • ${guidance}`,
+  };
+}
+
 function eaFactoryActionPresentation(domain = {}, session = state.modal.eaFactory) {
+  const readError = state.eaFactoryReadModel?.lastError;
+  if (domain.authoritative !== true && readError?.kind === "integrity_blocked") {
+    return {
+      tone: "error",
+      title: readError.title || "EA Factory ยังไม่ผ่านการตรวจสอบ",
+      message: safeDashboardDisplayText(readError.message, "กรุณาตรวจเหตุผลล่าสุดจาก Backend ก่อนเริ่มงาน"),
+    };
+  }
   const baseTone = ["neutral", "working", "success", "error", "ready", "warning"].includes(session?.tone)
     ? session.tone
     : "neutral";
@@ -30085,6 +32006,7 @@ function eaFactoryActionPresentation(domain = {}, session = state.modal.eaFactor
     const run = domain?.oneClick?.run || {};
     const status = run.status || "idle";
     const platformLabel = eaFactoryPlatformLabel(domain?.activeBuild?.platform) || "MT4 / MT5";
+    if (run.failureCode === "mt5_tester_pane_collapsed") return eaFactoryBacktestAttentionPresentation({}, run);
     if (["failed", "blocked"].includes(status)) {
       return {
         tone: "error",
@@ -30125,6 +32047,10 @@ function eaFactoryActionPresentation(domain = {}, session = state.modal.eaFactor
   if (!EA_FACTORY_STAGE_IDS.includes(stageId) || ["source", "spec"].includes(stageId)) return base;
   const stage = domain?.stages?.find((item) => item.id === stageId);
   if (!stage) return base;
+  const backtestAttention = stageId === "backtest_recheck"
+    ? eaFactoryBacktestAttentionPresentation(stage, domain.oneClick?.run || {})
+    : null;
+  if (backtestAttention) return backtestAttention;
   const mission = eaFactoryMissionForStage(stage);
   if (["failed", "blocked"].includes(stage.status)) {
     const failureCode = safeDashboardDisplayText(
@@ -30213,38 +32139,13 @@ function renderEaFactoryOperationalStage(section, stageId, domain, report) {
     ));
   }
   if (stageId === "backtest_recheck" && domain.activeBuild.platform !== "tradingview" && !indicatorBuild) {
-    const attentionReason = String(stage?.attentionReasonCode || "");
-    const zeroTradeAttention = stage?.attentionRequired === true
-      && [
-        "backtest_zero_trades",
-        "backtest_zero_trades_and_history_quality_errors",
-      ].includes(attentionReason);
-    const historyQualityAttention = stage?.attentionRequired === true
-      && [
-        "backtest_history_quality_errors",
-        "backtest_zero_trades_and_history_quality_errors",
-      ].includes(attentionReason);
-    const backtestAttention = zeroTradeAttention || historyQualityAttention;
+    const backtestAttention = eaFactoryBacktestAttentionPresentation(stage, domain.oneClick?.run || {});
     section.appendChild(createEaFactoryNotice(
-      backtestAttention
-        ? "warning"
-        : (stage?.status === "completed" && stage?.reportId ? "ready" : "neutral"),
-      zeroTradeAttention && historyQualityAttention
-        ? "Backtest รันจบ แต่ได้ 0 ออเดอร์และข้อมูลย้อนหลังมีข้อผิดพลาด"
-        : zeroTradeAttention
-        ? "Backtest รันจบ แต่ได้ 0 ออเดอร์"
-        : historyQualityAttention
-        ? "Backtest รันจบ แต่คุณภาพข้อมูลย้อนหลังยังไม่ผ่าน"
-        : stage?.status === "completed" && stage?.reportId
+      backtestAttention?.tone || (stage?.status === "completed" && stage?.reportId ? "ready" : "neutral"),
+      backtestAttention?.title || (stage?.status === "completed" && stage?.reportId
         ? "ผล Backtest ผูกกับ Report จาก Backend แล้ว"
-        : "ยังไม่มีผล Visual Backtest จริง",
-      zeroTradeAttention && historyQualityAttention
-        ? "ระบบเก็บหลักฐานการรันไว้ครบและจะไม่กด Start ซ้ำ แต่ยังไม่อนุญาตให้ประเมินประสิทธิภาพ กรุณาแก้ Mismatched chart errors แล้วตรวจช่วงทดสอบ Symbol และเงื่อนไขเข้าเทรด"
-        : zeroTradeAttention
-        ? "ระบบเก็บหลักฐานการรันไว้ครบและจะไม่กด Start ซ้ำ กรุณาตรวจคุณภาพข้อมูลย้อนหลัง ช่วงทดสอบ Symbol และเงื่อนไขเข้าเทรดก่อนนำ Build ไปเริ่ม Session ใหม่ด้วยตนเองใน Optimization Lab แยกต่างหาก"
-        : historyQualityAttention
-        ? "รายงานพบ Mismatched chart errors ระบบจึงเก็บงานเป็นสำเร็จแบบต้องตรวจสอบ และงดการประเมินประสิทธิภาพจนกว่าจะแก้ข้อมูลย้อนหลัง"
-        : "ค่าผลทดสอบจะแสดงผ่าน Report และ Evidence ที่ผูก Mission, Terminal และ Stage นี้เท่านั้น ระบบไม่อ่าน metric นอกสัญญา และระบบจะไม่แสดง Win Rate, Profit Factor หรือ Drawdown จากข้อมูลจำลอง",
+        : "ยังไม่มีผล Visual Backtest จริง"),
+      backtestAttention?.message || "ค่าผลทดสอบจะแสดงผ่าน Report และ Evidence ที่ผูก Mission, Terminal และ Stage นี้เท่านั้น ระบบไม่อ่าน metric นอกสัญญา และระบบจะไม่แสดง Win Rate, Profit Factor หรือ Drawdown จากข้อมูลจำลอง",
     ));
   }
   if (stageId === "artifacts_report") {
@@ -30370,31 +32271,221 @@ function createEaFactoryPageNavigation(label, pageId) {
   return button;
 }
 
+function renderEaFactoryExistingBuildPicker(container, domain = {}) {
+  const factory = state.modal.eaFactory;
+  const contextRevision = Number(factory.readContextRevision || 0);
+  const records = Array.isArray(domain.builds) ? domain.builds : [];
+  const label = document.createElement("label");
+  const select = document.createElement("select");
+  const placeholder = document.createElement("option");
+  label.className = "ea-factory-existing-build-picker";
+  label.textContent = "เลือก Build ที่มีอยู่";
+  select.dataset.eaFactoryExistingBuild = "true";
+  placeholder.value = "";
+  placeholder.textContent = "เลือกงานเดิมที่ต้องการติดตาม";
+  select.appendChild(placeholder);
+  const offeredIds = new Set();
+  records.forEach((build) => {
+    const buildId = String(build?.id || build?.buildId || "").trim();
+    if (!/^ea-build-[a-zA-Z0-9._:-]+$/.test(buildId) || offeredIds.has(buildId)) return;
+    offeredIds.add(buildId);
+    const option = document.createElement("option");
+    option.value = buildId;
+    const name = safeDashboardDisplayText(build?.sourceDisplayName || build?.systemName, "Build", { limit: 120 });
+    const platform = eaFactoryPlatformLabel(build?.platform) || "รอแพลตฟอร์ม";
+    const status = safeDashboardDisplayText(build?.status, "รอสถานะ", { limit: 80 });
+    option.textContent = `${name} • ${buildId} • ${platform} • ${status}`;
+    select.appendChild(option);
+  });
+  if (!offeredIds.size) return;
+  select.value = offeredIds.has(domain.activeBuild?.id) ? domain.activeBuild.id : "";
+  select.disabled = domain.authoritative !== true || Boolean(domain.backendBusy) || factory.inFlight
+    || state.eaFactoryReadModel.stale === true || state.eaFactoryReadModel.payload?.snapshotStale === true;
+  select.addEventListener("change", (event) => {
+    const buildId = String(event.target?.value || "").trim();
+    if (!offeredIds.has(buildId) || state.modal.eaFactory !== factory
+      || !state.modal.open || state.modal.id !== EA_FACTORY_PROP_ID
+      || Number(factory.readContextRevision || 0) !== contextRevision || factory.inFlight
+      || state.eaFactoryReadModel.stale === true || state.eaFactoryReadModel.payload?.snapshotStale === true) return;
+    const current = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()),
+      state.propReports[EA_FACTORY_PROP_ID] || {}).domainData.eaFactory;
+    if (current.authoritative !== true || current.backendBusy || !Array.isArray(current.builds)
+      || !current.builds.some((build) => String(build?.id || build?.buildId || "").trim() === buildId)) return;
+    factory.selectedBuildId = buildId;
+    renderWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()),
+      state.propReports[EA_FACTORY_PROP_ID] || {});
+  });
+  label.appendChild(select);
+  container.appendChild(label);
+}
+
+function eaFactorySourceRecoveryAdmission(domain = {}) {
+  const build = domain.activeBuild;
+  const recovery = build?.raw?.sourceRecovery || {};
+  const buildId = String(build?.id || "");
+  const endpoint = `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/recover-source`;
+  const eligible = domain.authoritative === true && !domain.backendBusy
+    && state.eaFactoryReadModel.stale !== true && state.eaFactoryReadModel.payload?.snapshotStale !== true
+    && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID && !state.modal.eaFactory.inFlight
+    && state.modal.eaFactory.selectedBuildId === buildId
+    && /^ea-build-[a-zA-Z0-9._:-]+$/.test(buildId)
+    && recovery.eligible === true && recovery.endpoint === endpoint
+    && /^[0-9a-f]{64}$/.test(String(recovery.strategySpecDigest || ""))
+    && /^mission-[a-zA-Z0-9._:-]+$/.test(String(recovery.failedMissionId || ""))
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(String(recovery.failureReportId || ""))
+    && ["mt4", "mt5"].includes(build.platform) && build.artifactKind === "expert_advisor";
+  return { canSubmit: Boolean(eligible), buildId, endpoint,
+    strategySpecDigest: recovery.strategySpecDigest, failedMissionId: recovery.failedMissionId,
+    failureReportId: recovery.failureReportId, platform: build?.platform };
+}
+
+async function submitEaFactorySourceRecovery(expected, file) {
+  const factory = state.modal.eaFactory;
+  const revision = Number(factory.readContextRevision || 0);
+  const currentAdmission = () => eaFactorySourceRecoveryAdmission(normalizeWorkflowDashboard(
+    getModalSubject(), getPropertyRole(getModalSubject()), state.propReports[EA_FACTORY_PROP_ID] || {},
+  ).domainData.eaFactory);
+  const sameContext = () => state.modal.eaFactory === factory && state.modal.open
+    && state.modal.id === EA_FACTORY_PROP_ID && factory.selectedBuildId === expected.buildId
+    && Number(factory.readContextRevision || 0) === revision;
+  const sameAdmission = () => {
+    const current = currentAdmission();
+    return sameContext() && current.canSubmit && ["buildId", "endpoint", "strategySpecDigest", "failedMissionId", "failureReportId", "platform"]
+      .every((key) => current[key] === expected[key]);
+  };
+  if (!sameAdmission() || !file) return null;
+  try {
+    const suffix = expected.platform === "mt5" ? ".mq5" : ".mq4";
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,100}\.mq[45]$/.test(file.name) || !file.name.endsWith(suffix)
+      || file.size < 1 || file.size > 48 * 1024) throw new Error("เลือกไฟล์ Source ชื่อภาษาอังกฤษที่ตรงกับแพลตฟอร์ม ขนาดไม่เกิน 48 KB");
+    const content = await file.text();
+    if (!sameAdmission()) return null;
+    const identity = JSON.stringify([expected.buildId, expected.strategySpecDigest, expected.failedMissionId,
+      expected.failureReportId, file.name, content]);
+    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
+    const idempotencyKey = "source-recovery-" + Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const payload = { idempotencyKey, strategySpecDigest: expected.strategySpecDigest,
+      failedMissionId: expected.failedMissionId, failureReportId: expected.failureReportId, fileName: file.name, content };
+    if (new TextEncoder().encode(JSON.stringify(payload)).length > 65536) throw new Error("ไฟล์นี้เกินขนาดคำขอที่ Backend รองรับ");
+    if (!sameAdmission()) return null;
+    const receipt = await runEaFactoryRequest("source_recovery", async (signal) => {
+      const response = await postEaFactoryJson(expected.endpoint, payload, { signal });
+      if (response?.ok !== true || response.buildId !== expected.buildId
+        || response.requestIdempotencyKey !== idempotencyKey
+        || response.strategySpecDigest !== expected.strategySpecDigest
+        || response.failedMissionId !== expected.failedMissionId || response.failureReportId !== expected.failureReportId
+        || !["ea_factory_source_recovered", "ea_factory_source_recovery_replayed"].includes(response.kind)
+        || response.workerStarted !== false || typeof response.idempotentReplay !== "boolean"
+        || !/^[0-9a-f]{64}$/.test(String(response.sourceDigest || ""))) {
+        throw new Error("ยังยืนยันใบรับการกู้ Source ไม่ได้ กรุณาตรวจสถานะ Build เดิม");
+      }
+      // Receipt proves admission only; fresh Backend evidence owns all stage readiness.
+      return { ok: true, kind: response.kind, buildId: response.buildId,
+        sourceDigest: response.sourceDigest, idempotentReplay: response.idempotentReplay };
+    }, "รับ Source ที่แก้แล้วใน Build เดิม • ยังต้องตรวจโค้ด Compile และ Backtest", {
+      refreshReadModel: false, isCurrent: sameContext,
+    });
+    if (!sameContext()) return null;
+    state.eaFactoryReadModel.stale = true;
+    await loadEaFactoryReadModel({ forceFresh: true });
+    return receipt;
+  } catch (error) {
+    if (sameContext()) setEaFactoryActionState({ stageId: "source_recovery", tone: "warning",
+      message: safeDashboardDisplayText(error.message, "ยังรับ Source ไม่สำเร็จ กรุณาตรวจสถานะก่อนส่งอีกครั้ง") });
+    return null;
+  }
+}
+
+function renderEaFactorySourceRecovery(section, domain = {}) {
+  const admission = eaFactorySourceRecoveryAdmission(domain);
+  const history = domain.activeBuild?.raw?.sourceRecovery?.history;
+  if (Array.isArray(history) && history.length) {
+    const latest = history[history.length - 1];
+    section.appendChild(createEaFactoryNotice("neutral", "ประวัติกู้คืน Source ใน Build เดิม",
+      `รับ Source ที่ผู้พัฒนาแก้ไขแล้ว • เก็บ Mission และ Retry เดิม • ${safeDashboardDisplayText(latest.recoveryId, "")}`));
+  }
+  if (state.modal.eaFactory.stageId === "source_recovery" && state.modal.eaFactory.message) {
+    section.appendChild(createEaFactoryNotice(state.modal.eaFactory.tone, "สถานะการกู้ Source", state.modal.eaFactory.message));
+  }
+  if (!admission.canSubmit) return;
+  const form = document.createElement("form");
+  form.className = "ea-factory-one-click ea-factory-one-click-setup";
+  const heading = document.createElement("h4");
+  heading.textContent = "กู้คืน Source ที่แก้แล้วใน Build นี้";
+  const detail = document.createElement("p");
+  detail.textContent = "รับไฟล์ที่ผู้พัฒนาแก้ตามกลยุทธ์เดิมหนึ่งครั้ง เก็บผลล้มเหลวและ Retry เดิม จากนั้นต้องผ่านการตรวจโค้ด Compile และ Backtest";
+  const label = document.createElement("label");
+  label.textContent = "ไฟล์ Source ที่แก้ไข (สูงสุด 48 KB)";
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = admission.platform === "mt5" ? ".mq5" : ".mq4";
+  input.required = true;
+  input.setAttribute("aria-label", "ไฟล์ Source สำหรับกู้คืน Build เดิม");
+  label.appendChild(input);
+  const button = document.createElement("button");
+  button.type = "submit";
+  button.className = "modal-action";
+  button.textContent = "ตรวจและรับ Source เข้า Build เดิม";
+  form.append(heading, detail, label, button);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    void submitEaFactorySourceRecovery(admission, input.files?.[0]);
+  });
+  section.appendChild(form);
+}
+
 function renderEaFactoryProgressPage(section, domain = {}, report = {}) {
   if (!domain.activeBuild) {
     const empty = document.createElement("div");
     const title = document.createElement("h4");
     const detail = document.createElement("p");
+    const action = state.modal.eaFactory;
+    const confirmedBuildId = String(action.confirmedCreateBuildId || "");
+    const receiptKnown = /^ea-build-[a-zA-Z0-9._:-]+$/.test(confirmedBuildId)
+      && action.selectedBuildId === confirmedBuildId;
+    const createPending = action.stageId === "create_build" && Boolean(action.message);
+    const existingBuilds = !receiptKnown && !createPending && Array.isArray(domain.builds)
+      && domain.builds.some((build) => /^ea-build-[a-zA-Z0-9._:-]+$/.test(String(build?.id || build?.buildId || "").trim()));
     empty.className = "ea-factory-game-empty";
-    title.textContent = domain.backendBusy
+    title.textContent = receiptKnown ? "Backend รับ Build แล้ว" : createPending
+      ? (action.messageKind === "create_receipt_confirmed" ? "Backend รับ Build แล้ว"
+        : (action.inFlight || action.messageKind === "create_outcome_unconfirmed"
+          ? "กำลังตรวจคำขอสร้าง Build" : "คำขอสร้าง Build ยังไม่พร้อม"))
+      : domain.backendBusy
       ? (domain.authoritative ? "กำลังรับข้อมูลงานจาก Local Runner" : "กำลังตรวจสอบงานล่าสุด")
-      : "ยังไม่มีงานที่กำลังสร้าง";
-    detail.textContent = domain.backendBusy
+      : (existingBuilds ? "เลือก Build เดิมเพื่อติดตามงาน" : "ยังไม่มีงานที่กำลังสร้าง");
+    detail.textContent = receiptKnown
+      ? `Build ${confirmedBuildId} • ยังยืนยันสถานะปัจจุบันไม่ได้ จึงยังไม่เริ่มงาน กรุณาตรวจสถานะ Build เดิม${state.eaFactoryReadModel.lastError?.message ? ` • ${safeDashboardDisplayText(state.eaFactoryReadModel.lastError.message, "")}` : ""}`
+      : createPending ? action.message : domain.backendBusy
       ? (domain.authoritative
         ? "Backend ยืนยันว่ามีงานอยู่ แต่รายละเอียด Build ยังซิงก์มาไม่ครบ หน้านี้จะอัปเดตให้อัตโนมัติ"
         : "มีข้อมูลสถานะเดิมที่เคยได้รับ แต่ยังยืนยันสถานะสดไม่ได้ หน้านี้จะตรวจ Local Runner ซ้ำโดยไม่เดาความคืบหน้า")
-      : "เลือกแพลตฟอร์ม ประเภทงาน และระบบเทรดให้ครบจากหน้า 1 แล้วกดเริ่มเพียงครั้งเดียว";
+      : (existingBuilds
+        ? "มี Build ที่ Backend บันทึกไว้แล้ว เลือกงานเดิมจากรายการด้านล่างเพื่อดูสถานะและทำต่อเมื่อผ่านการตรวจความพร้อม"
+        : "เลือกแพลตฟอร์ม ประเภทงาน และระบบเทรดให้ครบจากหน้า 1 แล้วกดเริ่มเพียงครั้งเดียว");
     empty.append(title, detail);
-    if (!domain.backendBusy) {
+    if (receiptKnown) {
+      empty.appendChild(createEaFactoryGameAction(
+        "ตรวจสถานะ Build นี้",
+        () => void refreshEaFactoryProgressStatus(),
+      ));
+    } else if (existingBuilds) {
+      renderEaFactoryExistingBuildPicker(empty, domain);
+      empty.appendChild(createEaFactoryGameAction("ตรวจสถานะล่าสุด", () => void refreshEaFactoryProgressStatus()));
+    } else if (!domain.backendBusy && !createPending) {
       empty.appendChild(createEaFactoryPageNavigation("กลับไปเลือกงานหน้า 1", "source"));
     }
     section.appendChild(empty);
     return;
   }
+  renderEaFactoryExistingBuildPicker(section, domain);
   renderEaFactoryGameProgressPanel(section, domain);
+  renderEaFactorySourceRecovery(section, domain);
 }
 
 function renderEaFactoryResultPage(section, domain = {}, report = {}) {
+  renderEaFactoryExistingBuildPicker(section, domain);
   if (!domain.activeBuild) {
     const empty = document.createElement("div");
     const title = document.createElement("h4");
@@ -30409,6 +32500,7 @@ function renderEaFactoryResultPage(section, domain = {}, report = {}) {
   const live = domain.authoritative === true;
   const attention = live && domain.stages.some((stage) => stage.attentionRequired === true);
   const completed = live && eaFactoryCertifiedDeliveryCompleted(domain);
+  const recoveryAccepted = eaFactoryRecoveredSourceState(domain)?.accepted === true;
   const failed = live && domain.stages.some((stage) => ["failed", "blocked"].includes(stage.status));
   const result = document.createElement("section");
   const hero = document.createElement("header");
@@ -30433,7 +32525,7 @@ function renderEaFactoryResultPage(section, domain = {}, report = {}) {
   hero.className = "ea-factory-result-hero";
   visual.className = "ea-factory-result-visual";
   image.src = visualConfig.image;
-  image.alt = visualConfig.imageAltTh;
+  image.alt = completed ? "ไฟล์และรายงานจาก Build ที่ตรวจสอบเสร็จแล้ว" : visualConfig.imageAltTh;
   image.decoding = "async";
   visual.appendChild(image);
   copy.className = "ea-factory-result-copy";
@@ -30470,7 +32562,9 @@ function renderEaFactoryResultPage(section, domain = {}, report = {}) {
     const status = document.createElement("small");
     item.dataset.status = stageStatusValue;
     number.textContent = String(index + 1);
-    label.textContent = EA_FACTORY_STAGE_VISUALS[stageId].shortTitleTh;
+    label.textContent = recoveryAccepted && stageId === "generate"
+      ? "Source ที่ผู้พัฒนาแก้ไข"
+      : EA_FACTORY_STAGE_VISUALS[stageId].shortTitleTh;
     status.textContent = eaFactoryVisualStageStatusLabel(stageStatusValue);
     item.append(number, label, status);
     summary.appendChild(item);
@@ -30484,7 +32578,7 @@ function renderEaFactoryResultPage(section, domain = {}, report = {}) {
       ? "เลือกเปิดหรือดาวน์โหลดเฉพาะไฟล์ที่ Backend ผูกกับ Build นี้"
       : "ไฟล์จะครบเมื่อทุกขั้นผ่าน Gate แล้ว");
   artifacts.append(artifactTitle, artifactHint);
-  if (!appendDashboardArtifactLinks(artifacts, domain.activeBuild.artifacts, { limit: 12 })) {
+  if (!appendDashboardArtifactLinks(artifacts, domain.activeBuild.artifacts, { limit: 200 })) {
     artifacts.appendChild(createWorkflowTruthEmpty("ยังไม่มีไฟล์ที่ Backend อนุญาตให้ดาวน์โหลด"));
   }
 
@@ -30503,9 +32597,8 @@ function renderEaFactoryPanel(container, tabId, domain = {}, report = {}) {
   section.className = "workflow-domain-panel ea-factory-panel";
   section.dataset.page = tabId;
   scheduleEaFactoryActiveProgressPolling(domain);
-  let readModelNoticeMessage = "";
+  const readModelNoticeMessage = renderEaFactoryReadModelNotice(section);
   if (tabId === "source") {
-    readModelNoticeMessage = renderEaFactoryReadModelNotice(section);
     if (!domain.authoritative) {
       section.appendChild(createEaFactoryNotice(
         "warning",
@@ -30542,6 +32635,10 @@ function validateEaFactoryBusyModel(value) {
   const stageId = String(value.stageId || "").trim();
   const status = String(value.status || "").trim().toLowerCase();
   const activeOperation = String(value.activeOperation || "").trim().toLowerCase();
+  const missionId = typeof value.missionId === "string" ? value.missionId.trim() : "";
+  const validMissionId = value.missionId === null || value.missionId === undefined
+    || (typeof value.missionId === "string"
+      && (!missionId || /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(missionId)));
   const supportedStageIds = new Set([
     ...EA_FACTORY_STAGE_IDS,
     ...Object.values(EA_FACTORY_BACKEND_STAGE_BY_UI),
@@ -30561,10 +32658,12 @@ function validateEaFactoryBusyModel(value) {
   const valid = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(buildId)
     && (stageId === "" || supportedStageIds.has(stageId))
     && supportedStatuses.has(status)
-    && supportedOperations.has(activeOperation);
+    && supportedOperations.has(activeOperation)
+    && validMissionId;
   return {
     valid,
-    busy: valid ? { buildId, displayName, stageId, status, activeOperation } : null,
+    busy: valid ? { buildId, displayName, stageId, status, activeOperation,
+      ...(missionId ? { missionId } : {}) } : null,
   };
 }
 
@@ -30683,7 +32782,8 @@ function eaFactoryReadModelFailurePresentation(error = {}, { hasLastGood = false
   }
   if (structuredFactoryRejection) {
     return {
-      kind: "request_rejected",
+      kind: kind === "ea_factory_integrity_blocked" || body.kind === "ea_factory_integrity_blocked"
+        ? "integrity_blocked" : "request_rejected",
       tone: "error",
       title: "EA Factory แจ้งเหตุผลที่ยังเริ่มงานไม่ได้",
       message: `${messageTh}${staleNote}`,
@@ -30731,6 +32831,9 @@ function renderEaFactoryReadModelNotice(section) {
     presentation.title || "สถานะ EA Factory ต้องตรวจซ้ำ",
     `${presentation.message}${lastGood}`,
   ));
+  const refresh = createEaFactoryGameAction("ตรวจสถานะล่าสุด", () => void refreshEaFactoryProgressStatus());
+  refresh.disabled = readModelState.inFlight || state.modal.eaFactory.inFlight;
+  section.appendChild(refresh);
   return presentation.message;
 }
 
@@ -30760,6 +32863,9 @@ function eaFactoryReadModelStateKey(payload = {}) {
       String(build?.currentStageId || ""),
       String(build?.sourceRecordId || build?.source_record_id || ""),
       String(build?.platform || build?.targetPlatform || ""),
+      build?.existingCreditPermission?.allowed === true,
+      String(build?.existingCreditPermission?.scope || ""),
+      build?.existingCreditPermission?.purchasesAllowed === false,
       String(run.runId || ""),
       String(run.status || ""),
       String(run.currentStageId || ""),
@@ -30769,6 +32875,20 @@ function eaFactoryReadModelStateKey(payload = {}) {
       run.canRetry === true,
       String(run.resumeKind || ""),
       run.canCancel === true,
+      run.canResumeCancelled === true,
+      String(run.resumeCancelledRunDigest || ""),
+      String(run.resumeCancelledReasonCode || ""),
+      String(run.resumeCancelledStageId || ""),
+      String(run.resumeCancelledMissionId || ""),
+      build?.sourceRecovery?.eligible === true,
+      String(build?.sourceRecovery?.endpoint || ""),
+      String(build?.sourceRecovery?.reasonCode || ""),
+      String(build?.sourceRecovery?.strategySpecDigest || ""),
+      String(build?.sourceRecovery?.failedMissionId || ""),
+      String(build?.sourceRecovery?.failureReportId || ""),
+      eaFactoryFirstArray(build?.sourceRecovery?.history).map((entry) => [
+        String(entry?.recoveryId || ""), String(entry?.sourceDigest || ""), String(entry?.reportId || ""),
+      ]),
       run.progressPercent ?? null,
       [
         terminalGate.ready === true,
@@ -30818,7 +32938,7 @@ function eaFactoryReadModelStateKey(payload = {}) {
       model.scheduled === true,
       String(model.currentStageId || ""),
     ],
-    busy: [busy.buildId || "", busy.stageId || "", busy.status || "", busy.activeOperation || ""],
+    busy: [busy.buildId || "", busy.stageId || "", busy.status || "", busy.activeOperation || "", busy.missionId || ""],
     builds,
     sources,
     terminal: [
@@ -30909,6 +33029,7 @@ function mergeEaFactoryReadModel(payload = {}) {
       actionState.googleSheetCatalog || {},
       actionState,
     );
+    reconcileEaFactoryPendingGoogleSheetImport();
   }
   return true;
 }
@@ -30933,6 +33054,10 @@ function mergeEaFactoryResponseReport(response = {}) {
 
 async function loadEaFactoryReadModel({ signal = null, forceFresh = false } = {}) {
   if (signal?.aborted) return null;
+  // A Sheet read is not a running Build. Let its durable receipt finish before
+  // queued/background projections compete for the same Backend validation lock.
+  if (state.modal.eaFactory.inFlight && ["sheet_sync", "create_build"].includes(state.modal.eaFactory.stageId)
+    && !state.eaFactoryReadModel.busy) return null;
   const existing = eaFactoryReadModelInFlight;
   if (existing) {
     const existingResult = await existing;
@@ -30942,11 +33067,60 @@ async function loadEaFactoryReadModel({ signal = null, forceFresh = false } = {}
   }
   state.eaFactoryReadModel.inFlight = true;
   const request = (async () => {
+    let retryContext = null;
+    const retryContextCurrent = () => !retryContext || (
+      !signal?.aborted && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+      && state.modal.eaFactory === retryContext.factory
+      && Number(state.modal.eaFactory.readContextRevision || 0) === retryContext.revision
+    );
     try {
-      const payload = await fetchJson("/api/props/right_server_racks/ea-factory", {
-        timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS,
-        signal,
-      });
+      let payload;
+      try {
+        payload = await fetchJson("/api/props/right_server_racks/ea-factory", {
+          timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS,
+          signal,
+        });
+      } catch (error) {
+        if (error?.kind !== "fetch_timeout" || signal?.aborted
+          || !state.modal.open || state.modal.id !== EA_FACTORY_PROP_ID
+          || (state.modal.eaFactory.inFlight && ["sheet_sync", "create_build"].includes(state.modal.eaFactory.stageId)
+            && !state.eaFactoryReadModel.busy)) throw error;
+        retryContext = {
+          factory: state.modal.eaFactory,
+          revision: Number(state.modal.eaFactory.readContextRevision || 0),
+        };
+        state.eaFactoryReadModel.stale = true;
+        const message = "กำลังตรวจประวัติ Build • ตรวจสถานะซ้ำอีกหนึ่งครั้ง โดยยังปิดการเริ่มงานไว้";
+        state.eaFactoryReadModel.lastError = { kind: "refreshing", tone: "working", message };
+        if (!state.modal.eaFactory.inFlight) {
+          setEaFactoryActionState({ stageId: "read_model", tone: "working", message });
+        }
+        // Cold validation can finish just after the first bounded request. Retry
+        // this read only once; never interpret elapsed time as fresh authority.
+        payload = await fetchJson("/api/props/right_server_racks/ea-factory", {
+          timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS,
+          signal,
+        });
+      }
+      if (signal?.aborted || !retryContextCurrent()) return null;
+      if (payload?.kind === "ea_factory_refresh_deferred") {
+        if (payload.ok !== true || payload.status !== "deferred" || payload.readinessConfirmed !== false) {
+          const schemaError = new Error("EA Factory Deferred Receipt ไม่ตรงรุ่นที่รองรับ");
+          schemaError.kind = "ea_factory_schema_mismatch";
+          throw schemaError;
+        }
+        // A bounded read receipt contains no authority. Keep the last display
+        // and selection, but disable actions until a validated model arrives.
+        const message = "กำลังตรวจสอบหลักฐานและสถานะ EA Factory • งานเดิมยังทำงานต่อได้";
+        state.eaFactoryReadModel.stale = true;
+        state.eaFactoryReadModel.lastError = {
+          kind: "refreshing", tone: "working", message, at: new Date().toISOString(),
+        };
+        if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID && !state.modal.eaFactory.inFlight) {
+          setEaFactoryActionState({ stageId: "read_model", tone: "working", message });
+        }
+        return null;
+      }
       const merged = mergeEaFactoryReadModel(payload);
       if (!merged) {
         const schemaError = new Error("EA Factory Read Model ไม่ตรงรุ่นที่รองรับ");
@@ -30955,7 +33129,7 @@ async function loadEaFactoryReadModel({ signal = null, forceFresh = false } = {}
       }
       return payload;
     } catch (error) {
-      if (signal?.aborted || error?.kind === "parent_abort") return null;
+      if (signal?.aborted || error?.kind === "parent_abort" || !retryContextCurrent()) return null;
       const hasLastGood = Boolean(state.eaFactoryReadModel.payload);
       const presentation = eaFactoryReadModelFailurePresentation(error, { hasLastGood });
       if (presentation.kind === "schema") {
@@ -30974,7 +33148,8 @@ async function loadEaFactoryReadModel({ signal = null, forceFresh = false } = {}
         message: presentation.message,
         at: new Date().toISOString(),
       };
-      if (!signal?.aborted && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) {
+      if (!signal?.aborted && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+        && !state.modal.eaFactory.inFlight) {
         setEaFactoryActionState({
           inFlight: false,
           stageId: "read_model",
@@ -31057,16 +33232,27 @@ async function postEaFactoryJson(path, payload = {}, {
   }
 }
 
-async function runEaFactoryRequest(stageId, request, successMessage, { terminalAware = false } = {}) {
-  if (state.modal.eaFactory.inFlight) return null;
+async function runEaFactoryRequest(stageId, request, successMessage, {
+  terminalAware = false,
+  refreshReadModel = true,
+  isCurrent = () => true,
+} = {}) {
+  if (state.modal.eaFactory.inFlight || !isCurrent()) return null;
+  const actionFactory = state.modal.eaFactory;
   const actionController = new AbortController();
   eaFactoryActiveActionAbortController = actionController;
-  setEaFactoryActionState({ inFlight: true, stageId, message: "กำลังส่งคำขอไปยัง Local Runner", tone: "working" });
+  setEaFactoryActionState({ inFlight: true, stageId,
+    message: stageId === "sheet_sync" ? "กำลัง Import ข้อมูลจาก Google Sheet • ยังไม่ได้สร้าง Build"
+      : "กำลังส่งคำขอไปยัง Local Runner", tone: "working" });
   try {
     const response = await request(actionController.signal);
+    if (!isCurrent()) return null;
     if (response?.mission) mergeBackendMission(response.mission);
     mergeEaFactoryResponseReport(response);
-    if (!mergeEaFactoryReadModel(response)) await loadEaFactoryReadModel({ forceFresh: true });
+    if (!mergeEaFactoryReadModel(response) && refreshReadModel) {
+      await loadEaFactoryReadModel({ forceFresh: true });
+    }
+    if (!isCurrent()) return null;
     if (terminalAware) {
       const report = state.propReports[EA_FACTORY_PROP_ID] || {};
       const dashboard = normalizeWorkflowDashboard(
@@ -31100,11 +33286,13 @@ async function runEaFactoryRequest(stageId, request, successMessage, { terminalA
     }
     return response;
   } catch (error) {
+    if (!isCurrent()) return null;
     if (error?.kind === "ea_factory_operator_cancelled_request") {
       if (eaFactoryActiveActionAbortController === actionController) {
         eaFactoryActiveActionAbortController = null;
       }
       const refreshed = await loadEaFactoryReadModel({ forceFresh: true });
+      if (!isCurrent()) return null;
       const report = state.propReports[EA_FACTORY_PROP_ID] || {};
       const dashboard = normalizeWorkflowDashboard(
         getModalSubject(),
@@ -31142,8 +33330,14 @@ async function runEaFactoryRequest(stageId, request, successMessage, { terminalA
     }
     const hasLastGood = Boolean(state.eaFactoryReadModel.payload);
     const failedRequestPresentation = eaFactoryReadModelFailurePresentation(error, { hasLastGood });
-    const refreshed = await loadEaFactoryReadModel({ forceFresh: true });
-    const busyClearedByFreshRead = Boolean(refreshed)
+    const refreshed = refreshReadModel ? await loadEaFactoryReadModel({ forceFresh: true }) : null;
+    if (!isCurrent()) return null;
+    const refreshedModel = refreshed?.eaFactory || refreshed;
+    const refreshedAuthoritative = refreshedModel?.schemaVersion === "ea-factory-v1"
+      && refreshedModel.snapshotStale !== true
+      && EA_FACTORY_SUPPORTED_MODES.has(refreshedModel.mode)
+      && refreshedModel.scheduled === false;
+    const busyClearedByFreshRead = refreshedAuthoritative
       && failedRequestPresentation.kind === "busy"
       && !state.eaFactoryReadModel.busy;
     const presentation = state.eaFactoryReadModel.busy
@@ -31158,7 +33352,7 @@ async function runEaFactoryRequest(stageId, request, successMessage, { terminalA
           }
         : failedRequestPresentation);
     if (presentation.busy) state.eaFactoryReadModel.busy = presentation.busy;
-    if (refreshed) {
+    if (refreshedAuthoritative) {
       // The GET is the current source of truth. Keep the POST outcome in the
       // action message, but do not relabel a fresh Read Model as stale/error.
       state.eaFactoryReadModel.lastError = null;
@@ -31187,21 +33381,28 @@ async function runEaFactoryRequest(stageId, request, successMessage, { terminalA
     });
     return null;
   } finally {
-    if (eaFactoryActiveActionAbortController === actionController) {
+    const ownsAction = eaFactoryActiveActionAbortController === actionController;
+    if (ownsAction) {
       eaFactoryActiveActionAbortController = null;
     }
-    if (state.modal.eaFactory.inFlight && state.modal.eaFactory.stageId === stageId) {
+    if (ownsAction && state.modal.eaFactory === actionFactory
+      && actionFactory.inFlight && actionFactory.stageId === stageId) {
+      const current = isCurrent();
       setEaFactoryActionState({
         inFlight: false,
-        stageId,
-        message: "คำขอสิ้นสุดแล้ว • กดตรวจสถานะอีกครั้งได้",
+        stageId: current ? stageId : "",
+        message: current ? "คำขอสิ้นสุดแล้ว • กดตรวจสถานะอีกครั้งได้"
+          : "คำขอเดิมสิ้นสุดแล้ว • การเลือกเปลี่ยนไป จึงไม่ใช้ผลกับงานปัจจุบัน กรุณาตรวจสถานะ",
         tone: "warning",
       });
     }
   }
 }
 
-async function syncEaFactoryGoogleSheet(configRevision) {
+async function syncEaFactoryGoogleSheet(configRevision, {
+  idempotencyKey = createWorkflowIdempotencyKey(),
+  onRequestError = null,
+} = {}) {
   const normalizedConfigRevision = Number(configRevision);
   if (
     !Number.isInteger(normalizedConfigRevision)
@@ -31217,13 +33418,21 @@ async function syncEaFactoryGoogleSheet(configRevision) {
     });
     return null;
   }
-  const idempotencyKey = createWorkflowIdempotencyKey();
-  const response = await runEaFactoryRequest("sheet_sync", (signal) => postEaFactoryJson(
-    "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
-    { configRevision: normalizedConfigRevision, idempotencyKey },
-    { signal },
-  ), "Backend อ่าน Google Sheets และอัปเดต Strategy Record แล้ว");
-  if (response) await loadResearchSheetHub({ force: true });
+  const response = await runEaFactoryRequest("sheet_sync", async (signal) => {
+    try {
+      return await postEaFactoryJson(
+        "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
+        { configRevision: normalizedConfigRevision, idempotencyKey },
+        { signal },
+      );
+    } catch (error) {
+      if (typeof onRequestError === "function") onRequestError(error);
+      throw error;
+    }
+  }, "Backend ยืนยันการอ่าน Google Sheet แล้ว • กำลังตรวจข้อมูล Import ล่าสุด", {
+    refreshReadModel: false,
+  });
+  if (response) void loadResearchSheetHub({ force: true });
   return response;
 }
 
@@ -31355,6 +33564,7 @@ async function ensureEaFactoryGoogleSheetCatalog({ force = false, reason = "auto
         factory.googleSheetCatalog,
         factory,
       );
+      reconcileEaFactoryPendingGoogleSheetImport();
       return factory.googleSheetCatalog;
     } catch (error) {
       if (factory.googleSheetCatalog.requestId !== requestId) return null;
@@ -31418,7 +33628,93 @@ async function ensureEaFactoryGoogleSheetCatalog({ force = false, reason = "auto
   }
 }
 
+function eaFactoryGoogleSheetSyncReceipt(response, intent) {
+  const mission = response?.mission;
+  const snapshot = response?.sourceSnapshot;
+  const report = response?.report;
+  const source = report?.metrics?.eaFactorySource;
+  if ([mission, snapshot, report, source].some((item) => (
+    !item || typeof item !== "object" || Array.isArray(item)
+  ))) return null;
+  if (
+    response?.ok !== true
+    || !["ea_factory_sheet_sync_completed", "ea_factory_sheet_sync_replayed"].includes(response.kind)
+    || !intent?.idempotencyKey || response.requestIdempotencyKey !== intent.idempotencyKey
+    || response.configRevision !== intent.configRevision
+    || mission.status !== "completed" || mission.toolId !== "ea_factory_google_sheet_read"
+    || mission.targetId !== EA_FACTORY_PROP_ID || mission.owner !== "mission_archivist"
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(String(mission.id || ""))
+    || snapshot?.missionId !== mission.id || snapshot.status !== "ready"
+    || snapshot.tabName !== "Deep_Research" || snapshot.headerExact !== true
+    || snapshot.sourceKind !== "verified_deep_research_sheet"
+    || snapshot.sourceSchemaVersion !== "deep-research-sheet-v2"
+    || !snapshot.sourceKey || !snapshot.syncedAt
+    || report?.id !== snapshot.reportId || !Array.isArray(mission.reportIds)
+    || !mission.reportIds.includes(report.id)
+    || report.status !== "ready" || report.type !== "trading_system_research_report"
+    || report.linkedMissionId !== mission.id || report.linkedPropId !== EA_FACTORY_PROP_ID
+    || report.ownerAgentId !== "mission_archivist"
+    || source?.schemaVersion !== "ea-factory-sheet-snapshot-v1"
+    || source.sourceKey !== snapshot.sourceKey || source.tabName !== "Deep_Research"
+    || source.recordCount !== snapshot.recordCount
+    || source.snapshotDigest !== intent.snapshotDigest
+  ) return null;
+  return {
+    missionId: mission.id, reportId: report.id, sourceKey: snapshot.sourceKey,
+    syncedAt: snapshot.syncedAt, snapshotDigest: source.snapshotDigest,
+  };
+}
+
+function reconcileEaFactoryPendingGoogleSheetImport() {
+  const factory = state.modal.eaFactory;
+  const intent = factory.pendingGoogleSheetImport;
+  const receipt = intent?.receipt;
+  const catalog = factory.googleSheetCatalog || {};
+  const model = state.eaFactoryReadModel.payload;
+  if (!receipt || factory.inFlight || !state.modal.open || state.modal.id !== EA_FACTORY_PROP_ID
+    || factory.sourceMode !== "google_sheet" || factory.sheetRecordId !== intent.recordId
+    || !eaFactoryGoogleSheetCatalogIsFresh(catalog)
+    || catalog.configRevision !== intent.configRevision
+    || catalog.catalogDigest !== intent.catalogDigest || catalog.snapshotDigest !== intent.snapshotDigest
+    || state.eaFactoryReadModel.stale === true || model?.snapshotStale === true
+    || model?.schemaVersion !== "ea-factory-v1" || !EA_FACTORY_SUPPORTED_MODES.has(model.mode)
+    || model.scheduled !== false || !state.eaFactoryReadModel.lastLoadedAt
+    || Date.now() - state.eaFactoryReadModel.lastLoadedAt > EA_FACTORY_READ_MODEL_MAX_AGE_MS
+    || model.sourceCatalog?.googleSheets?.configRevision !== intent.configRevision
+  ) return null;
+  const snapshot = Array.isArray(model.sourceSnapshots) && model.sourceSnapshots.find((item) => (
+    item?.missionId === receipt.missionId && item.reportId === receipt.reportId
+    && item.sourceKey === receipt.sourceKey && item.syncedAt === receipt.syncedAt
+    && item.status === "ready" && item.headerExact === true && item.tabName === "Deep_Research"
+  ));
+  const refreshedCatalogRecord = eaFactoryGoogleSheetCatalogRecords(catalog).find((item) => (
+    item.recordId === intent.recordId && item.sourceRecordId === intent.sourceRecordId
+    && item.recordDigest === intent.recordDigest
+  ));
+  const source = eaFactoryFindSourceByExactRecordId(model.sourceCatalog?.records || [], intent.recordId);
+  if (!snapshot || !refreshedCatalogRecord || !source
+    || source.sourceRecordId !== refreshedCatalogRecord.sourceRecordId
+    || source.recordDigest !== refreshedCatalogRecord.recordDigest) return null;
+  state.modal.eaFactory.selectedSourceId = source.sourceRecordId;
+  state.modal.eaFactory.importedSourceId = source.sourceRecordId;
+  state.modal.eaFactory.importedRecordDigest = refreshedCatalogRecord.recordDigest;
+  state.modal.eaFactory.importedCatalogDigest = catalog.catalogDigest;
+  state.modal.eaFactory.importedSnapshotDigest = catalog.snapshotDigest;
+  factory.pendingGoogleSheetImport = null;
+  const selectable = eaFactorySourceIsBuildSelectable(normalizeEaFactorySourceRecord(source));
+  setEaFactoryActionState({
+    inFlight: false, stageId: "sheet_import",
+    message: selectable ? `Import ${source.recordId} แล้ว • ตรวจข้อมูลและเริ่มงานได้`
+      : `Import ${source.recordId} แล้ว แต่ Strategy Brief ยังไม่ผ่าน Gate จึงเปิดอ่านได้อย่างเดียว`,
+    tone: selectable ? "success" : "warning",
+    messageKind: selectable ? "record_imported" : "record_read_only",
+  });
+  return source;
+}
+
 async function importEaFactorySourceRecord(rawRecordId) {
+  const factory = state.modal.eaFactory;
+  if (factory.inFlight) return null;
   const recordId = String(rawRecordId || "").trim();
   state.modal.eaFactory.sheetRecordId = recordId;
   clearEaFactoryGoogleSheetImport(state.modal.eaFactory);
@@ -31450,63 +33746,61 @@ async function importEaFactorySourceRecord(rawRecordId) {
     });
     return null;
   }
-  const response = await syncEaFactoryGoogleSheet(currentCatalog.configRevision);
-  if (!response) return null;
-  const refreshedCatalog = await ensureEaFactoryGoogleSheetCatalog({
-    force: true,
-    reason: "import",
-  });
-  const refreshedCatalogRecord = eaFactoryGoogleSheetCatalogRecords(refreshedCatalog || {}).find((record) => (
-    record.recordId.toLowerCase() === recordId.toLowerCase()
-  )) || null;
-  if (!refreshedCatalogRecord) {
-    setEaFactoryActionState({
-      inFlight: false,
-      stageId: "sheet_import",
-      message: "หลัง Sync แล้วไม่พบระบบที่เลือกใน Deep_Research Revision ล่าสุด กรุณาเลือกรายการใหม่",
-      tone: "warning",
-      messageKind: "record_removed_after_sync",
+  const previous = factory.pendingGoogleSheetImport;
+  const matches = previous && previous.recordId === recordId
+    && previous.configRevision === currentCatalog.configRevision
+    && previous.catalogDigest === currentCatalog.catalogDigest
+    && previous.snapshotDigest === currentCatalog.snapshotDigest
+    && previous.sourceRecordId === selectedCatalogRecord.sourceRecordId
+    && previous.recordDigest === selectedCatalogRecord.recordDigest;
+  const intent = matches ? previous : {
+    recordId, configRevision: currentCatalog.configRevision,
+    catalogDigest: currentCatalog.catalogDigest, snapshotDigest: currentCatalog.snapshotDigest,
+    sourceRecordId: selectedCatalogRecord.sourceRecordId, recordDigest: selectedCatalogRecord.recordDigest,
+    idempotencyKey: createWorkflowIdempotencyKey(), receipt: null,
+  };
+  factory.pendingGoogleSheetImport = intent;
+  const isCurrent = () => state.modal.eaFactory === factory
+    && factory.pendingGoogleSheetImport === intent && factory.sourceMode === "google_sheet"
+    && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+    && factory.sheetRecordId === recordId;
+  if (!intent.receipt) {
+    let requestError = null;
+    let response = await syncEaFactoryGoogleSheet(intent.configRevision, {
+      idempotencyKey: intent.idempotencyKey, onRequestError: (error) => { requestError = error; },
     });
-    return null;
+    // An acknowledgement timeout does not prove the read failed. Replay the
+    // same reservation once; never create a second sync with a new key.
+    if (!response && isCurrent() && requestError?.kind === "fetch_timeout") {
+      response = await syncEaFactoryGoogleSheet(intent.configRevision, { idempotencyKey: intent.idempotencyKey });
+    }
+    if (!isCurrent() || !response) return null;
+    if (!response.report && response.kind === "ea_factory_sheet_sync_replayed"
+      && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(String(response.sourceSnapshot?.reportId || ""))) {
+      try {
+        const detail = await fetchJson(`/api/reports/${encodeURIComponent(response.sourceSnapshot.reportId)}`, {
+          timeoutMs: EA_FACTORY_ACTION_TIMEOUT_MS,
+        });
+        if (detail?.ok === true && detail.readModel === "report_detail_v1") response.report = detail.report;
+      } catch { /* Keep the reservation; a later explicit Import can reconcile it. */ }
+    }
+    if (!isCurrent()) return null;
+    intent.receipt = eaFactoryGoogleSheetSyncReceipt(response, intent);
+    if (!intent.receipt) {
+      setEaFactoryActionState({ stageId: "sheet_import", tone: "warning", messageKind: "sheet_sync_unconfirmed",
+        message: "ยังยืนยัน Mission และ Snapshot ของคำขอ Import นี้ไม่ได้ จึงยังไม่เปิดเริ่มงาน" });
+      return null;
+    }
   }
-  const report = state.propReports[EA_FACTORY_PROP_ID] || {};
-  const dashboard = normalizeWorkflowDashboard(
-    getModalSubject(),
-    getPropertyRole(getModalSubject()),
-    report,
-  );
-  const domain = dashboard.domainData.eaFactory;
-  const source = eaFactoryFindSourceByExactRecordId(domain.sourceCatalog.records, recordId);
-  if (
-    !source
-    || source.sourceRecordId !== refreshedCatalogRecord.sourceRecordId
-    || source.recordDigest !== refreshedCatalogRecord.recordDigest
-  ) {
-    setEaFactoryActionState({
-      inFlight: false,
-      stageId: "sheet_import",
-      message: `ข้อมูล record_id “${safeDashboardDisplayText(recordId, "รหัสนี้", { limit: 160 })}” จาก Sync และ Catalog ไม่ตรง Revision กัน จึงยังไม่เปิดเริ่มงาน กรุณารีเฟรชแล้ว Import ใหม่`,
-      tone: "warning",
-      messageKind: "record_id_not_found",
-      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
-    });
-    return null;
-  }
-  state.modal.eaFactory.selectedSourceId = source.sourceRecordId;
-  state.modal.eaFactory.importedSourceId = source.sourceRecordId;
-  state.modal.eaFactory.importedRecordDigest = refreshedCatalogRecord.recordDigest;
-  state.modal.eaFactory.importedCatalogDigest = refreshedCatalog.catalogDigest;
-  state.modal.eaFactory.importedSnapshotDigest = refreshedCatalog.snapshotDigest;
-  setEaFactoryActionState({
-    inFlight: false,
-    stageId: "sheet_import",
-    message: eaFactorySourceIsBuildSelectable(source)
-      ? `Import ${source.recordId} แล้ว • ตรวจข้อมูลและเริ่มงานได้`
-      : `Import ${source.recordId} แล้ว แต่ Strategy Brief ยังไม่ผ่าน Gate จึงเปิดอ่านได้อย่างเดียว`,
-    tone: eaFactorySourceIsBuildSelectable(source) ? "success" : "warning",
-    messageKind: eaFactorySourceIsBuildSelectable(source) ? "record_imported" : "record_read_only",
-  });
-  return source;
+  setEaFactoryActionState({ stageId: "sheet_import", tone: "working", messageKind: "sheet_import_verifying",
+    message: "Backend ยืนยัน Import แล้ว • กำลังตรวจ Catalog และสถานะล่าสุดก่อนเปิดเริ่มงาน" });
+  // The durable receipt is already visible. Fresh projections may arrive later
+  // through the normal GET poll; both merge paths reconcile this exact intent.
+  await Promise.all([loadEaFactoryReadModel({ forceFresh: true }),
+    ensureEaFactoryGoogleSheetCatalog({ force: true, reason: "import" })]);
+  if (!isCurrent()) return factory.importedSourceId === intent.sourceRecordId
+    ? eaFactoryFindSourceByExactRecordId(state.eaFactoryReadModel.payload?.sourceCatalog?.records || [], recordId) : null;
+  return reconcileEaFactoryPendingGoogleSheetImport();
 }
 
 function eaFactoryCreateBuildFormSignature(requestPayload = {}) {
@@ -31563,7 +33857,45 @@ function completeEaFactoryCreateBuildRequest(identity = {}) {
   }
 }
 
+function eaFactoryCreateContextSignature(factory = {}) {
+  const catalog = factory.googleSheetCatalog || {};
+  return JSON.stringify([
+    factory.sourceMode, factory.selectedSourceId, factory.selectedArtifactKind,
+    factory.selectedPlatform, factory.sheetRecordId, factory.customSystemName,
+    factory.customConditions, factory.customTemplateId, factory.importedSourceId,
+    factory.importedRecordDigest, factory.importedCatalogDigest, factory.importedSnapshotDigest,
+    catalog.configRevision, catalog.catalogDigest, catalog.snapshotDigest,
+  ]);
+}
+
+function eaFactoryCreateCommitReceipt(response, identity, sourceRecordDigest) {
+  const build = response?.build;
+  const binding = build?.createSheetBinding;
+  if (!build || typeof build !== "object" || Array.isArray(build)
+    || response.ok !== true
+    || !["ea_factory_build_created", "ea_factory_build_replayed"].includes(response.kind)
+    || response.requestIdempotencyKey !== identity.idempotencyKey
+    || !/^ea-build-[a-zA-Z0-9._:-]+$/.test(String(build.id || ""))
+    || !/^[0-9a-f]{64}$/.test(String(response.createRequestDigest || ""))
+    || response.createRequestDigest !== build.createRequestDigest
+    || !/^[0-9a-f]{64}$/.test(String(sourceRecordDigest || ""))
+    || build.sourceRecordDigest !== sourceRecordDigest
+    || (binding && (typeof binding !== "object" || Array.isArray(binding)
+      || binding.sourceRecordId !== build.sourceRecordId))
+    || eaFactoryCreateBuildFormSignature({
+      sourceRecordId: build.sourceRecordId, artifactKind: build.artifactKind,
+      platform: build.platform, brief: build.brief,
+      ...(binding ? { recordId: binding.recordId, recordDigest: binding.recordDigest,
+        catalogDigest: binding.catalogDigest, snapshotDigest: binding.snapshotDigest,
+        configRevision: binding.configRevision } : {}),
+    }) !== identity.formSignature
+  ) return null;
+  return build;
+}
+
 async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brief) {
+  const factory = state.modal.eaFactory;
+  if (factory.inFlight) return null;
   const normalizedArtifactKind = normalizeEaFactoryArtifactKind(artifactKind);
   const normalizedPlatform = normalizeEaFactoryPlatform(platform);
   if (
@@ -31613,6 +33945,7 @@ async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brie
     return null;
   }
   state.modal.eaFactory.selectedBuildId = "";
+  state.modal.eaFactory.confirmedCreateBuildId = "";
   state.modal.eaFactory.selectedArtifactKind = normalizedArtifactKind;
   state.modal.eaFactory.selectedPlatform = normalizedPlatform;
   const requestPayload = {
@@ -31624,20 +33957,54 @@ async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brie
   };
   const createIdentity = eaFactoryCreateBuildRequestIdentity(requestPayload);
   requestPayload.idempotencyKey = createIdentity.idempotencyKey;
-  const response = await runEaFactoryRequest("create_build", (signal) => postEaFactoryJson(
-    "/api/props/right_server_racks/ea-factory/builds",
-    requestPayload,
-    { signal },
-  ), "สร้าง Build แล้ว ตรวจ Strategy Spec ก่อนกดทำขั้นถัดไป");
-  const buildId = String(response?.build?.id || response?.build?.buildId || "").trim();
-  if (buildId) {
-    completeEaFactoryCreateBuildRequest(createIdentity);
-    state.modal.eaFactory.selectedBuildId = buildId;
-    // Render page 2 now, before a one-click preflight can stop locally.
-    // setWorkflowDashboardTab also persists the selected page snapshot.
-    setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "progress");
+  const contextSignature = eaFactoryCreateContextSignature(factory);
+  const contextRevision = Number(factory.readContextRevision || 0);
+  const isCurrent = () => state.modal.eaFactory === factory
+    && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+    && Number(factory.readContextRevision || 0) === contextRevision
+    && eaFactoryCreateContextSignature(factory) === contextSignature
+    && factory.createFormSignature === createIdentity.formSignature
+    && factory.createIdempotencyKey === createIdentity.idempotencyKey;
+  let requestError = null;
+  const submit = () => runEaFactoryRequest("create_build", async (signal) => {
+    try {
+      return await postEaFactoryJson("/api/props/right_server_racks/ea-factory/builds", requestPayload, { signal });
+    } catch (error) { requestError = error; throw error; }
+  }, "Backend รับ Build แล้ว • กำลังตรวจสถานะล่าสุด", { refreshReadModel: false, isCurrent });
+  let response = await submit();
+  // Reconcile only the original authorized Create; a timeout is not a failure receipt.
+  if (!response && isCurrent() && requestError?.kind === "fetch_timeout") response = await submit();
+  if (!isCurrent()) return null;
+  if (!response && requestError && requestError.kind !== "fetch_timeout") return null;
+  const receipt = eaFactoryCreateCommitReceipt(response, createIdentity, source.recordDigest);
+  if (!receipt) {
+    setEaFactoryActionState({ inFlight: false, stageId: "create_build", tone: "warning",
+      messageKind: "create_outcome_unconfirmed",
+      message: "ยังยืนยันผลคำขอสร้าง Build นี้ไม่ได้ • เก็บรหัสคำขอเดิมไว้แล้ว กรุณาตรวจสถานะก่อนเริ่มซ้ำ" });
+    return null;
   }
-  return response;
+  const buildId = receipt.id;
+  state.modal.eaFactory.selectedBuildId = buildId;
+  // A durable receipt is a fact, independent of transient GET/action messages.
+  // It never supplies capabilities, progress, or permission to run the Build.
+  state.modal.eaFactory.confirmedCreateBuildId = buildId;
+  state.eaFactoryReadModel.stale = true;
+  setEaFactoryActionState({ inFlight: false, stageId: "create_build", tone: "working",
+    messageKind: "create_receipt_confirmed",
+    message: `Backend รับ Build ${buildId} แล้ว • กำลังตรวจสถานะล่าสุดก่อนเริ่มขั้นถัดไป` });
+  // Render page 2 now; the receipt never grants execution authority.
+  // setWorkflowDashboardTab also persists the selected page snapshot.
+  setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "progress");
+  const confirmed = await waitForEaFactoryAuthoritativeReceipt({ factory, isCurrent,
+    message: `Backend รับ Build ${buildId} แล้ว • กำลังรอข้อมูลล่าสุดก่อนเริ่มขั้นถัดไป`,
+    messageKind: "create_receipt_confirmed",
+    matches: (model) => Array.isArray(model?.builds) && model.builds.some((build) => build.id === buildId
+      && build.sourceRecordId === receipt.sourceRecordId && build.sourceRecordDigest === receipt.sourceRecordDigest
+      && build.platform === normalizedPlatform && build.artifactKind === normalizedArtifactKind),
+  });
+  if (!isCurrent()) return null;
+  if (confirmed) completeEaFactoryCreateBuildRequest(createIdentity);
+  return confirmed ? response : { ...response, readModelReady: false };
 }
 
 function eaFactoryOneClickRequestKey(buildId, run = {}) {
@@ -31715,7 +34082,100 @@ async function restartEaFactoryBacktestOnly(buildIdOverride = "", runOverride = 
   ), "เก็บรอบเดิมแล้ว • เริ่มเฉพาะ Backtest ใหม่โดยใช้ Source และ Compile เดิม", { terminalAware: true });
 }
 
-async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = false } = {}) {
+function eaFactoryCancelledContinuationReceipt(response, intent) {
+  if (!response || typeof response !== "object" || Array.isArray(response)
+    || response.ok !== true || !intent
+    || !["ea_factory_cancelled_run_resumed", "ea_factory_cancelled_run_resume_replayed"].includes(response.kind)
+    || response.buildId !== intent.buildId || response.previousRunId !== intent.previousRunId
+    || response.previousRunDigest !== intent.previousRunDigest
+    || response.requestIdempotencyKey !== intent.idempotencyKey
+    || typeof response.runId !== "string" || !/^ea-run-[a-zA-Z0-9._:-]+$/.test(response.runId)
+    || response.runId === intent.previousRunId
+    || typeof response.continuationArchiveDigest !== "string"
+    || !/^[0-9a-f]{64}$/.test(response.continuationArchiveDigest)
+    || !Object.prototype.hasOwnProperty.call(response, "adoptedMissionId")
+    || (response.adoptedMissionId !== null && typeof response.adoptedMissionId !== "string")
+    // The exact Mission observed at click time may finish before commit. An
+    // explicit empty adoption acknowledges no Mission identity or readiness.
+    || (response.adoptedMissionId && response.adoptedMissionId !== intent.adoptedMissionId)
+    || typeof response.workerStarted !== "boolean" || typeof response.idempotentReplay !== "boolean"
+    || response.idempotentReplay !== (response.kind === "ea_factory_cancelled_run_resume_replayed")
+    || response.eaFactoryReadResult?.status !== "deferred"
+    || response.eaFactoryReadResult?.kind !== "ea_factory_refresh_deferred"
+    || response.eaFactoryReadResult?.readinessConfirmed !== false
+    || response.eaFactoryReadResult?.refreshEndpoint !== "/api/props/right_server_racks/ea-factory"
+  ) return null;
+  // A continuation receipt acknowledges identity only. Never merge embedded
+  // capabilities, a Run, or a Read Model from this POST response.
+  return {
+    ok: true, kind: response.kind, buildId: response.buildId,
+    previousRunId: response.previousRunId, previousRunDigest: response.previousRunDigest,
+    runId: response.runId, requestIdempotencyKey: response.requestIdempotencyKey,
+    continuationArchiveDigest: response.continuationArchiveDigest,
+    adoptedMissionId: String(response.adoptedMissionId || ""), idempotentReplay: response.idempotentReplay,
+    workerStarted: response.workerStarted,
+  };
+}
+
+async function resumeEaFactoryCancelledRun(buildId, previousRunId, previousRunDigest) {
+  const factory = state.modal.eaFactory;
+  const domain = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()),
+    state.propReports[EA_FACTORY_PROP_ID] || {}).domainData.eaFactory;
+  const admission = eaFactoryCancelledContinuationAdmission(domain);
+  if (!admission.canSubmit || admission.buildId !== buildId
+    || admission.previousRunId !== previousRunId || admission.previousRunDigest !== previousRunDigest) return null;
+  const signature = JSON.stringify([buildId, previousRunId, previousRunDigest]);
+  factory.cancelledContinuationIntents ||= {};
+  let intent = factory.cancelledContinuationIntents[signature];
+  if (!intent) {
+    intent = { buildId, previousRunId, previousRunDigest,
+      adoptedMissionId: String(domain.oneClick.run.resumeCancelledMissionId || ""),
+      idempotencyKey: createWorkflowIdempotencyKey(), receipt: null };
+    factory.cancelledContinuationIntents[signature] = intent;
+  }
+  const revision = Number(factory.readContextRevision || 0);
+  const isCurrent = () => state.modal.eaFactory === factory && state.modal.open
+    && state.modal.id === EA_FACTORY_PROP_ID && factory.selectedBuildId === buildId
+    && Number(factory.readContextRevision || 0) === revision
+    && factory.cancelledContinuationIntents[signature] === intent;
+  const payload = Object.freeze({ previousRunId, previousRunDigest, idempotencyKey: intent.idempotencyKey });
+  let requestError = null;
+  const submit = () => runEaFactoryRequest("resume_cancelled", async (signal) => {
+    try {
+      const response = await postEaFactoryJson(admission.endpoint, payload, { signal });
+      const receipt = eaFactoryCancelledContinuationReceipt(response, intent);
+      if (!receipt) throw Object.assign(new Error("Backend ยังไม่ยืนยันรหัสคำขอทำงานต่อ"), {
+        kind: "ea_factory_continuation_receipt_invalid",
+      });
+      return receipt;
+    } catch (error) { requestError = error; throw error; }
+  }, "Backend รับคำขอทำงานต่อจาก Build เดิมแล้ว • กำลังตรวจสถานะล่าสุด", {
+    refreshReadModel: false, isCurrent,
+  });
+  let receipt = await submit();
+  // Only repeat the original authorized intent once after a transport timeout.
+  // A stale snapshot never authorizes a new continuation or a fresh key.
+  if (!receipt && isCurrent() && requestError?.kind === "fetch_timeout") receipt = await submit();
+  if (!isCurrent()) return null;
+  state.eaFactoryReadModel.stale = true;
+  if (!receipt) {
+    setEaFactoryActionState({ inFlight: false, stageId: "resume_cancelled", tone: "warning",
+      messageKind: "continuation_outcome_unconfirmed",
+      message: "ยังยืนยันผลคำขอทำงานต่อไม่ได้ • เก็บรหัสคำขอเดิมไว้แล้ว กดตรวจสถานะก่อนทำต่อ" });
+    return null;
+  }
+  intent.receipt = receipt;
+  setEaFactoryActionState({ inFlight: false, stageId: "resume_cancelled", tone: "working",
+    messageKind: "continuation_receipt_confirmed",
+    message: `Backend รับคำขอทำงานต่อของ Build ${buildId} แล้ว • รอบใหม่ ${receipt.runId} • กำลังตรวจสถานะล่าสุด` });
+  setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "progress");
+  await loadEaFactoryReadModel({ forceFresh: true });
+  if (!isCurrent()) return null;
+  return receipt;
+}
+
+async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = false, recoveredSourceSignature = "" } = {}) {
+  if (state.modal.eaFactory.inFlight) return null;
   const report = state.propReports[EA_FACTORY_PROP_ID] || {};
   const dashboard = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), report);
   const domain = dashboard.domainData.eaFactory;
@@ -31736,12 +34196,16 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
   const run = matchingBuild?.oneClickRun || capability.run || {};
   const active = ["queued", "running", "waiting_ai", "cancelling"].includes(run.status);
   const currentStage = domain.stages?.find((item) => item.id === domain.currentStageId);
+  const recovery = typeof eaFactoryRecoveredSourceState === "function" ? eaFactoryRecoveredSourceState(domain) : null;
+  const recoveredSource = Boolean(recoveredSourceSignature && recovery?.canContinue === true
+    && recovery.continuationSignature === recoveredSourceSignature);
   const permitted = allowFreshBuild
     || (run.status === "idle"
       && capability.canRun === true
       && !["failed", "blocked"].includes(currentStage?.status))
     || (run.status === "awaiting_visible_terminal" && capability.canResume === true)
-    || (["failed", "blocked"].includes(run.status) && capability.canRetry === true);
+    || (["failed", "blocked"].includes(run.status) && capability.canRetry === true)
+    || recoveredSource;
   const terminalSelected = Boolean(capability.selectedTerminalId || domain.selectedTerminalId);
   const platform = matchingBuild?.platform || capability.selectedPlatform;
   if (
@@ -31765,6 +34229,7 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
     || capability.terminalProcessLaunchAllowed === true
     || capability.selectedPlatform !== platform
     || (!allowFreshBuild && !matchingBuild)
+    || (recoveredSourceSignature && !recoveredSource)
     || !permitted
   ) {
     const message = !domain.authoritative
@@ -31848,8 +34313,12 @@ async function cancelEaFactoryOneClick(buildIdOverride = "", runOverride = {}) {
 }
 
 async function createAndRunEaFactoryBuild(sourceRecordId, artifactKind, platform, brief) {
+  const factory = state.modal.eaFactory;
+  const contextRevision = Number(factory.readContextRevision || 0);
   const normalizedPlatform = normalizeEaFactoryPlatform(platform);
   const normalizedArtifactKind = normalizeEaFactoryArtifactKind(artifactKind);
+  const contextSignature = eaFactoryCreateContextSignature({ ...factory,
+    selectedPlatform: normalizedPlatform, selectedArtifactKind: normalizedArtifactKind });
   if (
     typeof rejectEaFactoryMissingTopHeaderLocks === "function"
     && rejectEaFactoryMissingTopHeaderLocks("one_click_create_run", normalizedPlatform)
@@ -31887,9 +34356,23 @@ async function createAndRunEaFactoryBuild(sourceRecordId, artifactKind, platform
     brief,
   );
   const buildId = String(created?.build?.id || created?.build?.buildId || "").trim();
-  if (!buildId) return created;
-  state.modal.eaFactory.selectedBuildId = buildId;
-  return runEaFactoryOneClick(buildId, { allowFreshBuild: true });
+  if (!buildId || created.readModelReady === false) return created;
+  const current = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()),
+    state.propReports[EA_FACTORY_PROP_ID] || {}).domainData.eaFactory;
+  const model = state.eaFactoryReadModel.payload;
+  const confirmed = Array.isArray(model?.builds) && model.builds.find((build) => build?.id === buildId);
+  if (state.modal.eaFactory !== factory
+    || Number(factory.readContextRevision || 0) !== contextRevision
+    || eaFactoryCreateContextSignature(factory) !== contextSignature
+    || !state.modal.open || state.modal.id !== EA_FACTORY_PROP_ID
+    || state.modal.eaFactory.selectedBuildId !== buildId
+    || state.eaFactoryReadModel.stale === true || model?.snapshotStale === true
+    || !current.authoritative || current.activeBuild?.id !== buildId
+    || !confirmed || confirmed.sourceRecordId !== created.build.sourceRecordId
+    || confirmed.sourceRecordDigest !== created.build.sourceRecordDigest
+    || confirmed.platform !== normalizedPlatform || confirmed.artifactKind !== normalizedArtifactKind
+  ) return created;
+  return runEaFactoryOneClick(buildId);
 }
 
 async function advanceEaFactoryStage(uiStageId) {
@@ -34548,8 +37031,10 @@ function tradingResearchConfirmationMessage(response = {}) {
   const confirmation = tradingResearchBlueprintObject(response.confirmation);
   const delivery = tradingResearchBlueprintObject(confirmation.sheetDelivery);
   const deliveryStatus = safeDashboardDisplayText(delivery.status, "").toLowerCase();
-  if (confirmation.handoffReady === true && delivery.synced === true && deliveryStatus !== "failed") {
-    return "บันทึก Strategy Brief ลง Google Sheet แล้ว • โรงงาน EA โหลดระบบนี้ได้";
+  if (delivery.synced === true && delivery.failed !== true && deliveryStatus !== "failed") {
+    return response.eaFactoryReadResult?.ok === false
+      ? "บันทึก Strategy Brief ลง Google Sheet แล้ว • โรงงาน EA ยังถูกระงับ กรุณาเปิดดูสาเหตุโดยไม่ต้องบันทึก Sheet ซ้ำ"
+      : "บันทึก Strategy Brief ลง Google Sheet แล้ว • ตรวจสถานะและ Guard ของโรงงาน EA แยกจากผลการบันทึก";
   }
   if (delivery.failed === true || deliveryStatus === "failed") {
     const errorCode = safeDashboardDisplayText(delivery.errorCode, "sheet_delivery_failed");
@@ -34564,11 +37049,114 @@ function tradingResearchConfirmationMessage(response = {}) {
   );
 }
 
+function tradingResearchConfirmationSheetKey() {
+  const hub = state.researchSheetHub?.data || {};
+  return JSON.stringify([hub.sheetId, hub.configRevision, hub.activeConfigRevision, hub.activationConfirmedAt, hub.active]);
+}
+
+function tradingResearchConfirmationForSession(report, session = state.modal.tradingResearchLab) {
+  const current = tradingResearchConfirmationReadModel(report);
+  const reportDigest = String(report?.eaResearch?.briefDigest || report?.eaResearch?.blueprintDigest || "").toLowerCase();
+  const reportKey = JSON.stringify([String(report?.id || ""), reportDigest]);
+  const reportSource = report?.eaResearch?.confirmation;
+  const sheetKey = tradingResearchConfirmationSheetKey();
+  if (session.confirmationReportKey && (session.confirmationReportKey !== reportKey
+      || session.confirmationReportSource !== reportSource || session.confirmationSheetKey !== sheetKey)) {
+    resetTradingResearchConfirmationStatus(session);
+  }
+  session.confirmationReportKey = reportKey;
+  session.confirmationReportSource = reportSource;
+  session.confirmationSheetKey = sheetKey;
+  const receipt = session.confirmationReceipt;
+  if (!receipt || receipt.reportId !== String(report?.id || "")
+      || receipt.briefDigest !== current.briefDigest || !current.digestMatches || !current.reportMatches) {
+    return current;
+  }
+  // Retain the receipt only over the original stale snapshot when GETs fail.
+  // A fresh Backend confirmation or changed Sheet binding always wins.
+  const remembered = tradingResearchConfirmationReadModel({
+    ...report,
+    eaResearch: { ...report.eaResearch, confirmation: receipt },
+  });
+  return current.confirmed && current.deliverySynced ? current : remembered;
+}
+
+function tradingResearchConfirmationRequestIsCurrent(session, request) {
+  if (session.confirmationRequest === request && request.sheetKey !== tradingResearchConfirmationSheetKey()) {
+    resetTradingResearchConfirmationStatus(session);
+  }
+  return state.modal.tradingResearchLab === session
+    && session.confirmationRequest === request
+    && session.sourceReportId === request.sourceReportId
+    && session.selectedSystemId === request.selectedSystemId;
+}
+
+function blockTradingResearchFactoryRead(result = {}) {
+  state.eaFactoryReadModel.stale = true;
+  state.eaFactoryReadModel.lastError = {
+    kind: safeDashboardDisplayText(result.kind, "read_model_unavailable"),
+    tone: "error",
+    title: "โรงงาน EA ยังไม่พร้อมรับคำสั่ง",
+    message: safeDashboardDisplayText(result.messageTh,
+      "ยังตรวจสถานะโรงงาน EA ไม่สำเร็จ จึงปิดคำสั่งใหม่ไว้ • ผลบันทึก Google Sheet ยังคงเดิม"),
+    at: new Date().toISOString(),
+  };
+}
+
+async function refreshTradingResearchConfirmationReads(session, request) {
+  const results = await Promise.allSettled([
+    Promise.resolve().then(() => loadPropReport(TRADING_RESEARCH_LAB_PROP_ID, {
+      forceFresh: true,
+      shouldApply: () => tradingResearchConfirmationRequestIsCurrent(session, request),
+    })),
+    Promise.resolve().then(() => loadResearchSheetHub({ force: true })),
+    Promise.resolve().then(() => loadEaFactoryReadModel({ forceFresh: true })),
+  ]);
+  if (!tradingResearchConfirmationRequestIsCurrent(session, request)) return;
+  const failed = results.map((result) => result.status === "rejected" || !result.value || result.value.ok === false);
+  const labels = ["รายงานวิจัย", "สถานะ Google Sheet", "โรงงาน EA"];
+  session.confirmationRefreshMessage = failed.some(Boolean)
+    ? `รีเฟรช ${labels.filter((_, index) => failed[index]).join(" / ")} ไม่สำเร็จ • ผลการยืนยันที่ได้รับยังคงเดิม ไม่ต้องบันทึกซ้ำเพราะการรีเฟรช`
+    : "";
+  if (failed[2]) {
+    state.eaFactoryReadModel.stale = true;
+    if (!state.eaFactoryReadModel.lastError) blockTradingResearchFactoryRead();
+  }
+  if (session.confirmationReceipt) {
+    session.confirmationMessage = tradingResearchConfirmationMessage({
+      confirmation: session.confirmationReceipt,
+      eaFactoryReadResult: state.eaFactoryReadModel.lastError ? { ok: false } : undefined,
+    });
+  }
+}
+
+async function completeTradingResearchConfirmationReads(session, request, response = {}) {
+  try {
+    await refreshTradingResearchConfirmationReads(session, request);
+  } catch {
+    if (!tradingResearchConfirmationRequestIsCurrent(session, request)) return;
+    session.confirmationRefreshMessage = "ยังตรวจสถานะเพิ่มเติมไม่สำเร็จ • ผลการบันทึกที่ Backend ยืนยันยังคงเดิม ไม่ต้องบันทึกซ้ำ";
+  }
+  if (!tradingResearchConfirmationRequestIsCurrent(session, request)) return;
+  if (response.researchCatalogReadResult?.ok === false) {
+    session.confirmationRefreshMessage = [
+      safeDashboardDisplayText(response.researchCatalogReadResult.messageTh, "ยังแสดงคลังวิจัยล่าสุดไม่ได้"),
+      session.confirmationRefreshMessage,
+    ].filter(Boolean).join(" • ");
+  }
+  session.confirmationRequest = null;
+  if (state.modal.open && state.modal.id === TRADING_RESEARCH_LAB_PROP_ID) renderGameModal();
+}
+
 async function confirmTradingResearchForSheet(report, { retryDelivery = false } = {}) {
   const session = state.modal.tradingResearchLab;
+  const confirmation = tradingResearchConfirmationForSession(report, session);
   if (session.confirmationInFlight) return;
-  const confirmation = tradingResearchConfirmationReadModel(report);
-  const canSubmit = retryDelivery ? confirmation.canRetryDelivery : confirmation.canConfirm;
+  // A synced receipt is an idempotent stop, even if the original report is stale.
+  if (confirmation.confirmed && (confirmation.deliverySynced || !retryDelivery)) return;
+  const canSubmit = retryDelivery
+    ? confirmation.canRetryDelivery && !confirmation.deliverySynced
+    : confirmation.canConfirm;
   if (!canSubmit) {
     session.confirmationMessage = retryDelivery
       ? "ยังส่งคำขอบันทึกซ้ำไม่ได้: Digest หรือสัญญาการบันทึกจาก Backend ไม่ตรงกับรายงานปัจจุบัน"
@@ -34577,14 +37165,19 @@ async function confirmTradingResearchForSheet(report, { retryDelivery = false } 
     rerenderTradingResearchLab();
     return;
   }
+  const request = { sourceReportId: session.sourceReportId, selectedSystemId: session.selectedSystemId,
+    sheetKey: tradingResearchConfirmationSheetKey() };
+  session.confirmationRequest = request;
   session.confirmationInFlight = true;
+  session.confirmationRefreshMessage = "";
   session.confirmationMessage = retryDelivery
     ? "กำลังลองบันทึก Deep_Research ลง Google Sheet อีกครั้ง..."
     : "กำลังบันทึก Strategy Brief ลง Deep_Research ผ่าน Backend";
   session.confirmationTone = "working";
   rerenderTradingResearchLab();
+  let response;
   try {
-    const response = await postJson(confirmation.endpoint, {
+    response = await postJson(confirmation.endpoint, {
       researchReportId: confirmation.reportId,
       confirmBriefDigest: confirmation.briefDigest,
       confirmSaveToGoogleSheet: true,
@@ -34592,54 +37185,63 @@ async function confirmTradingResearchForSheet(report, { retryDelivery = false } 
     if (response?.ok !== true || !response?.confirmation) {
       throw new Error("Backend ไม่ได้ส่งใบยืนยันการบันทึกกลับมา");
     }
-    if (response.eaFactory) mergeEaFactoryReadModel({ eaFactory: response.eaFactory });
-    session.confirmationMessage = tradingResearchConfirmationMessage(response);
     const receipt = tradingResearchBlueprintObject(response.confirmation);
-    const receiptDelivery = tradingResearchBlueprintObject(receipt.sheetDelivery);
-    const receiptStatus = safeDashboardDisplayText(receiptDelivery.status, "").toLowerCase();
-    session.confirmationTone = receipt.handoffReady === true && receiptDelivery.synced === true
-      ? "success"
-      : ((receiptDelivery.failed === true || receiptStatus === "failed") ? "error" : "working");
-    await Promise.all([
-      loadPropReport(TRADING_RESEARCH_LAB_PROP_ID, { forceFresh: true }),
-      loadResearchSheetHub({ force: true }),
-      loadEaFactoryReadModel({ forceFresh: true }),
-    ]);
+    const receiptDigest = String(receipt.briefDigest || receipt.blueprintDigest || "").toLowerCase();
+    if (receipt.confirmed !== true || receipt.reportId !== confirmation.reportId
+        || receiptDigest !== confirmation.briefDigest) {
+      throw new Error("ใบยืนยันไม่ตรงกับ Report ID หรือ Brief Digest ที่ส่ง • กรุณาตรวจสถานะล่าสุดก่อนดำเนินการต่อ");
+    }
   } catch (error) {
+    if (!tradingResearchConfirmationRequestIsCurrent(session, request)) return;
     session.confirmationMessage = safeDashboardDisplayText(
       error?.message,
       "ยืนยันหรือบันทึก Google Sheet ไม่สำเร็จ กรุณาตรวจรายการที่ Backend ระบุแล้วลองใหม่",
     );
     session.confirmationTone = "error";
-  } finally {
     session.confirmationInFlight = false;
+    session.confirmationRequest = null;
     if (state.modal.open && state.modal.id === TRADING_RESEARCH_LAB_PROP_ID) renderGameModal();
+    return;
   }
+  if (!tradingResearchConfirmationRequestIsCurrent(session, request)) return;
+  session.confirmationReceipt = {
+    ...response.confirmation,
+    briefDigest: confirmation.briefDigest,
+  };
+  session.confirmationMessage = tradingResearchConfirmationMessage(response);
+  const saved = tradingResearchConfirmationForSession(report, session);
+  session.confirmationTone = saved.deliverySynced ? "success" : (saved.deliveryFailed ? "error" : "working");
+  if (response.eaFactoryReadResult?.ok === false) {
+    blockTradingResearchFactoryRead(response.eaFactoryReadResult);
+  } else if (response.eaFactoryReadResult?.status === "deferred") {
+    // Saving a Sheet never attests that a previous Factory snapshot is ready.
+    state.eaFactoryReadModel.stale = true;
+  } else if (response.eaFactory) {
+    mergeEaFactoryReadModel({ eaFactory: response.eaFactory });
+  }
+  // Show the authoritative POST receipt immediately. Optional reads run in the
+  // background and cannot keep the save button busy or change a committed save
+  // into a failure. A newer request/context owns its own finalization.
+  session.confirmationInFlight = false;
+  session.confirmationRefreshMessage = "กำลังตรวจรายงานและสถานะโรงงาน EA เพิ่มเติม • ผลการบันทึกแสดงแล้วด้านบน";
+  if (state.modal.open && state.modal.id === TRADING_RESEARCH_LAB_PROP_ID) renderGameModal();
+  void completeTradingResearchConfirmationReads(session, request, response);
 }
 
 async function refreshTradingResearchConfirmationStatus() {
   const session = state.modal.tradingResearchLab;
   if (session.confirmationInFlight) return;
+  const request = { sourceReportId: session.sourceReportId, selectedSystemId: session.selectedSystemId,
+    sheetKey: tradingResearchConfirmationSheetKey() };
+  session.confirmationRequest = request;
   session.confirmationInFlight = true;
-  session.confirmationMessage = "กำลังตรวจสถานะ Google Sheet และโรงงาน EA จาก Backend...";
-  session.confirmationTone = "working";
+  session.confirmationRefreshMessage = "กำลังตรวจสถานะ Google Sheet และโรงงาน EA จาก Backend...";
   rerenderTradingResearchLab();
-  try {
-    await Promise.all([
-      loadPropReport(TRADING_RESEARCH_LAB_PROP_ID, { forceFresh: true }),
-      loadResearchSheetHub({ force: true }),
-      loadEaFactoryReadModel({ forceFresh: true }),
-    ]);
-    session.confirmationMessage = "ตรวจสถานะล่าสุดจาก Backend แล้ว • ดูผลการซิงก์ด้านล่าง";
-    session.confirmationTone = "neutral";
-  } catch (error) {
-    session.confirmationMessage = safeDashboardDisplayText(
-      error?.message,
-      "ตรวจสถานะการบันทึกไม่สำเร็จ กรุณาลองใหม่",
-    );
-    session.confirmationTone = "error";
-  } finally {
+  await refreshTradingResearchConfirmationReads(session, request);
+  if (tradingResearchConfirmationRequestIsCurrent(session, request)) {
+    session.confirmationRefreshMessage ||= "ตรวจสถานะล่าสุดจาก Backend แล้ว • ดูผลการซิงก์และสถานะโรงงานแยกกันด้านล่าง";
     session.confirmationInFlight = false;
+    session.confirmationRequest = null;
     if (state.modal.open && state.modal.id === TRADING_RESEARCH_LAB_PROP_ID) renderGameModal();
   }
 }
@@ -34674,11 +37276,12 @@ function createTradingResearchColumnCompleteness(confirmation) {
 }
 
 function createTradingResearchConfirmationPanel(report, briefReadModel) {
-  const confirmation = tradingResearchConfirmationReadModel(report);
+  const confirmation = tradingResearchConfirmationForSession(report);
   const briefModel = tradingResearchBlueprintObject(briefReadModel);
   const session = state.modal.tradingResearchLab;
   const canConfirm = confirmation.canConfirm && briefModel.canonical === true;
-  const canRetryDelivery = confirmation.canRetryDelivery && briefModel.canonical === true;
+  const canRetryDelivery = confirmation.canRetryDelivery && !confirmation.deliverySynced && briefModel.canonical === true;
+  const factoryError = state.eaFactoryReadModel.lastError;
   const panel = document.createElement("section");
   const heading = document.createElement("div");
   const headingCopy = document.createElement("div");
@@ -34687,7 +37290,7 @@ function createTradingResearchConfirmationPanel(report, briefReadModel) {
   const badge = document.createElement("strong");
   const facts = document.createElement("dl");
   panel.className = "workflow-research-confirmation";
-  panel.dataset.tone = confirmation.handoffReady
+  panel.dataset.tone = confirmation.deliverySynced
     ? "ready"
     : (confirmation.confirmed
       ? "pending"
@@ -34695,8 +37298,8 @@ function createTradingResearchConfirmationPanel(report, briefReadModel) {
   heading.className = "workflow-research-confirmation-heading";
   eyebrow.textContent = "GOOGLE SHEET • EA FACTORY";
   title.textContent = "บันทึกระบบนี้ลง Google Sheet";
-  badge.textContent = confirmation.handoffReady
-    ? "ซิงก์แล้ว • ส่งโรงงาน EA ได้"
+  badge.textContent = confirmation.deliverySynced
+    ? "บันทึก Google Sheet แล้ว"
     : (confirmation.confirmed
       ? (confirmation.deliveryFailed ? "บันทึก Sheet ไม่สำเร็จ" : "ยืนยันแล้ว • รอซิงก์ Sheet")
       : (canConfirm ? "พร้อมบันทึก" : "ยังไม่พร้อมบันทึก"));
@@ -34710,7 +37313,8 @@ function createTradingResearchConfirmationPanel(report, briefReadModel) {
     ["Google Sheet", confirmation.deliverySynced
       ? "ซิงก์สำเร็จ"
       : (confirmation.deliveryFailed ? "ไม่สำเร็จ" : (confirmation.deliveryQueued ? "อยู่ในคิว" : "ยังไม่ยืนยันการซิงก์"))],
-    ["ส่งต่อโรงงาน EA", confirmation.handoffReady ? "พร้อม" : "ยังล็อก"],
+    ["ข้อมูลส่งต่อโรงงาน EA", confirmation.handoffReady ? "Sheet พร้อม • ตรวจ Guard ในโรงงานอีกครั้ง" : "ยังล็อก"],
+    ["สถานะโรงงาน EA", factoryError ? "ยังไม่พร้อมรับคำสั่ง • เปิดดูสาเหตุได้" : "ตรวจสถานะล่าสุดในโรงงาน EA"],
     ["Brief Digest", confirmation.digestMatches ? `${confirmation.briefDigest.slice(0, 12)}… ตรงกัน` : "ไม่ตรงหรือยังไม่มี"],
   ].forEach(([termText, valueText]) => {
     const row = document.createElement("div");
@@ -34722,6 +37326,13 @@ function createTradingResearchConfirmationPanel(report, briefReadModel) {
     facts.appendChild(row);
   });
   panel.append(heading, facts);
+  if (factoryError) {
+    panel.appendChild(createTradingResearchNotice(
+      "โรงงาน EA ยังไม่พร้อมรับคำสั่ง",
+      safeDashboardDisplayText(factoryError.message, "เปิดโรงงาน EA เพื่อดูสาเหตุ โดยไม่ต้องบันทึก Google Sheet ซ้ำ"),
+      "warning",
+    ));
+  }
   if (confirmation.missingColumns.length) {
     panel.appendChild(createTradingResearchNotice(
       "ยังมีหัวข้อว่าง",
@@ -34760,16 +37371,15 @@ function createTradingResearchConfirmationPanel(report, briefReadModel) {
       ? `บันทึกคำยืนยันเมื่อ ${formatThaiDateTime(confirmation.confirmedAt)} • ใช้ Brief Digest เดียวกับรายงานนี้`
       : "Backend ยืนยัน Strategy Brief นี้แล้ว";
     controls.appendChild(completed);
-    if (confirmation.handoffReady) {
+    if (confirmation.deliverySynced) {
       const factory = document.createElement("button");
       factory.type = "button";
       factory.className = "modal-action primary";
-      factory.textContent = "เปิดโรงงาน EA";
+      factory.textContent = factoryError ? "เปิดโรงงาน EA เพื่อดูสาเหตุ" : "เปิดโรงงาน EA";
       factory.addEventListener("click", () => void openPropDialog(EA_FACTORY_PROP_ID));
       controls.appendChild(factory);
     } else {
       const retry = document.createElement("button");
-      const refresh = document.createElement("button");
       retry.type = "button";
       retry.className = "modal-action primary";
       retry.disabled = !canRetryDelivery || session.confirmationInFlight;
@@ -34777,13 +37387,15 @@ function createTradingResearchConfirmationPanel(report, briefReadModel) {
         ? "กำลังบันทึกอีกครั้ง..."
         : "ลองบันทึก Google Sheet อีกครั้ง";
       retry.addEventListener("click", () => void confirmTradingResearchForSheet(report, { retryDelivery: true }));
-      refresh.type = "button";
-      refresh.className = "modal-action";
-      refresh.disabled = session.confirmationInFlight;
-      refresh.textContent = "ตรวจสถานะล่าสุด";
-      refresh.addEventListener("click", () => void refreshTradingResearchConfirmationStatus());
-      controls.append(retry, refresh);
+      controls.appendChild(retry);
     }
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "modal-action";
+    refresh.disabled = session.confirmationInFlight;
+    refresh.textContent = "ตรวจสถานะล่าสุด";
+    refresh.addEventListener("click", () => void refreshTradingResearchConfirmationStatus());
+    controls.appendChild(refresh);
   }
   panel.appendChild(controls);
   if (session.confirmationMessage) {
@@ -34793,6 +37405,9 @@ function createTradingResearchConfirmationPanel(report, briefReadModel) {
     status.setAttribute("role", session.confirmationTone === "error" ? "alert" : "status");
     status.textContent = session.confirmationMessage;
     panel.appendChild(status);
+  }
+  if (session.confirmationRefreshMessage) {
+    panel.appendChild(createTradingResearchNotice("การตรวจสถานะเพิ่มเติม", session.confirmationRefreshMessage, "warning"));
   }
   return panel;
 }
@@ -36668,6 +39283,7 @@ function createRadarRailTruthCard(dashboard = {}) {
     : `ยังไม่เชื่อม Adapter ครบตามที่ Backend ยืนยัน • ${centralSheet.detail}`;
   const schedule = normalizeRadarSchedule(domain.schedule || dashboard?.schedule);
   const service = normalizeRadarServiceHealth(domain.serviceHealth);
+  const readPending = domain.readState?.hasData === false;
   const statusLabel = (value) => ({
     ready: "พร้อมใช้งาน",
     healthy: "พร้อมใช้งาน",
@@ -36698,8 +39314,8 @@ function createRadarRailTruthCard(dashboard = {}) {
     ["บริการ Radar", statusLabel(service.status)],
     ["Adapter", statusLabel(service.adapterStatus)],
     ["แหล่งข้อมูลรวม", statusLabel(service.sourceStatus)],
-    ["รันล่าสุด", schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt) : "ยังไม่เคยรัน"],
-    ["ผลรอบล่าสุด", `${statusLabel(schedule.lastRunStatus)}${schedule.lastResultKind ? ` • ${safeDashboardDisplayText(schedule.lastResultKind, "")}` : ""}`],
+    ["รันล่าสุด", schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt) : readPending ? "ยังยืนยันไม่ได้" : "ยังไม่เคยรัน"],
+    ["ผลรอบล่าสุด", readPending ? "กำลังรอข้อมูลจาก Backend" : `${statusLabel(schedule.lastRunStatus)}${schedule.lastResultKind ? ` • ${safeDashboardDisplayText(schedule.lastResultKind, "")}` : ""}`],
     ["รอบถัดไป", schedule.nextRunAt
       ? formatThaiDateTime(schedule.nextRunAt)
       : (schedule.effectiveEnabled
@@ -36711,8 +39327,8 @@ function createRadarRailTruthCard(dashboard = {}) {
         ? `${schedule.runsReservedToday}/1 • เหลือ ${schedule.remainingRunsToday} รอบ`
         : "สูงสุด 1 รอบต่อวัน",
     ],
-    ["ผลวันนี้", `${domain.todayEntries?.length || 0} รายการ`],
-    ["ผลย้อนหลัง 7 วัน", `${domain.sevenDayEntries?.length || 0} รายการ`],
+    ["ผลวันนี้", readPending ? "ยังยืนยันไม่ได้" : `${domain.todayEntries?.length || 0} รายการ`],
+    ["ผลย้อนหลัง 7 วัน", readPending ? "ยังยืนยันไม่ได้" : `${domain.sevenDayEntries?.length || 0} รายการ`],
     [
       "Google Sheet กลาง",
       centralSheet.consumer
@@ -36742,6 +39358,8 @@ function createRadarRailTruthCard(dashboard = {}) {
     facts.appendChild(row);
   });
   card.append(heading, facts);
+  const readMessage = radarReadStatusMessage(domain);
+  if (readMessage) card.appendChild(createWorkflowTruthEmpty(readMessage));
   const errorText = service.lastError || schedule.lastError;
   if (errorText) {
     const error = document.createElement("p");
@@ -36793,7 +39411,8 @@ function createBackendOwnedDailyScheduleCard(dashboard = {}, titleText = "รอ
     ["เวลา", `${INDICATOR_SCOUT_DEFAULT_TIME} น.`],
     ["เขตเวลา", INDICATOR_SCOUT_TIMEZONE],
     ["เพดาน", "สูงสุด 1 รอบต่อวัน"],
-    ["รันล่าสุด", schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt) : "ยังไม่เคยรัน"],
+    ["รันล่าสุด", schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt)
+      : domain.readState?.hasData === false ? "ยังยืนยันไม่ได้" : "ยังไม่เคยรัน"],
     ["รอบถัดไป", schedule.nextRunAt ? formatThaiDateTime(schedule.nextRunAt) : "Backend ยังไม่ส่งเวลา"],
   ].forEach(([labelText, valueText]) => {
     const row = document.createElement("div");
@@ -36919,6 +39538,7 @@ function createEaFactoryRailTaskStatus(domain = {}) {
   const busy = workflowDomainObject(domain.backendBusy);
   const requestInFlight = state.modal.eaFactory.inFlight === true;
   const hasBusySnapshot = Object.keys(busy).length > 0;
+  const sheetSyncOnly = requestInFlight && state.modal.eaFactory.stageId === "sheet_sync" && !hasBusySnapshot;
   const staleBusy = hasBusySnapshot && domain.authoritative !== true;
   const hasTask = (hasBusySnapshot && !staleBusy) || requestInFlight;
   const terminalLabel = domain.oneClick?.selectedTerminalLabel
@@ -36937,7 +39557,7 @@ function createEaFactoryRailTaskStatus(domain = {}) {
   card.dataset.status = staleBusy ? "checking" : (hasTask ? "running" : (authorityPending ? "checking" : "ready"));
   title.textContent = staleBusy
     ? "สถานะงานล่าสุดยังยืนยันไม่ได้"
-    : (hasTask
+    : (sheetSyncOnly ? "กำลัง Import จาก Google Sheet" : hasTask
     ? "มีงาน EA กำลังทำ"
     : (authorityPending ? "กำลังตรวจสอบสถานะงาน EA" : "ไม่มีงาน EA ค้างอยู่"));
   detail.textContent = staleBusy
@@ -36989,6 +39609,9 @@ function mergeFxNewsDirectResponse(response = {}) {
 }
 
 async function saveFxNewsSchedule(form) {
+  // SENTIMENT_UNIVERSE_HOOK: legacy FX controls are replaced by local onboarding.
+  if (SENTIMENT_UNIVERSE_ENABLED) return;
+
   if (state.modal.workflowAction.inFlight) return;
   const controls = [...form.querySelectorAll("[data-fx-news-schedule-time]")];
   controls.forEach((control) => control.setCustomValidity(""));
@@ -37045,6 +39668,9 @@ async function saveFxNewsSchedule(form) {
 }
 
 async function refreshFxNewsDirect() {
+  // SENTIMENT_UNIVERSE_HOOK: no legacy FX refresh actions from the new screen.
+  if (SENTIMENT_UNIVERSE_ENABLED) return;
+
   if (state.modal.workflowAction.inFlight) return;
   state.modal.workflowAction = {
     inFlight: true,
@@ -37109,8 +39735,14 @@ function renderFxNewsSettingsRail(dashboard, identity) {
   const inFlight = actionState.inFlight && actionState.propId === FX_NEWS_BIAS_PROP_ID;
   els.workflowSettingsRail.hidden = false;
   els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
-  if (els.workflowSettingsRailTitle) els.workflowSettingsRailTitle.textContent = "อัปเดตข่าวอัตโนมัติ";
+  if (els.workflowSettingsRailTitle) els.workflowSettingsRailTitle.textContent = domain.fxTrend ? "รอบอัปเดตและสถานะ" : "อัปเดตข่าวอัตโนมัติ";
   els.workflowSettingsRailContent.innerHTML = "";
+  if (domain.fxTrend) {
+    els.workflowSettingsRailContent.appendChild(createFx28TrendRail(domain.fxTrend));
+    const newsHeading = document.createElement("h4");
+    newsHeading.textContent = "รอบข่าวเศรษฐกิจ (แยกจากราคา)";
+    els.workflowSettingsRailContent.appendChild(newsHeading);
+  }
 
   const form = document.createElement("form");
   const toggle = document.createElement("label");
@@ -37560,6 +40192,12 @@ async function submitWorkflowAgentHandoff() {
 }
 
 function renderWorkflowDashboard(subject, propertyRole, report = {}) {
+  // SENTIMENT_UNIVERSE_HOOK: retain one mount across HQ report renders.
+  if (SENTIMENT_UNIVERSE_ENABLED && subject?.id === FX_NEWS_BIAS_PROP_ID) {
+    renderSentimentUniverse();
+    return;
+  }
+
   if (!subject || !isWorkflowDashboardPropId(subject.id)) return;
   const dashboard = normalizeWorkflowDashboard(subject, propertyRole, report);
   const selectedTab = getWorkflowSelectedTab(subject.id, dashboard);
@@ -37675,6 +40313,7 @@ function setWorkflowDashboardTab(propId, tabId, { focus = false } = {}) {
   const selected = dashboard.tabs.find((tab) => tab.id === tabId) || dashboard.tabs[0];
   if (!selected) return;
   state.modal.workflowTabs[propId] = selected.id;
+  if (propId === EA_FACTORY_PROP_ID) state.modal.eaFactory.explicitPageId = selected.id;
   renderWorkflowDashboard(subject, propertyRole, report);
   if ([EA_OPTIMIZATION_LAB_PROP_ID, EA_FACTORY_PROP_ID].includes(propId)) {
     const scrollArea = els.workflowDashboardContent?.closest(".workflow-dashboard-scroll");
@@ -38689,14 +41328,15 @@ function renderAgentAttachmentComposer(subject) {
   const selectedModel = state.agentRuntime.models.find((item) => item.id === profile.model);
   const modelSupportsImage = Array.isArray(selectedModel?.inputModalities)
     && selectedModel.inputModalities.includes("image");
+  const usableExtensions = agentAttachmentExtensionsForModel(policy, modelSupportsImage);
   const inputReady = policy?.inputReady === true
-    && modelSupportsImage
+    && usableExtensions.length > 0
     && !profile.runtimeEndpointUnavailable
     && selectedThread?.archived !== true;
-  const busy = state.agentChat.inFlight || profile.actionInFlight || profile.attachmentUploadInFlight;
+  const busy = Boolean(state.agentChat.inFlight || profile.actionInFlight || profile.attachmentUploadInFlight);
   if (els.modalAgentAttachButton) {
     els.modalAgentAttachButton.disabled = !inputReady || busy;
-    els.modalAgentAttachButton.textContent = profile.attachmentUploadInFlight ? "กำลังอัปโหลด..." : "แนบรูป";
+    els.modalAgentAttachButton.textContent = profile.attachmentUploadInFlight ? "กำลังอัปโหลด..." : "เพิ่มไฟล์ / Add file";
     els.modalAgentAttachButton.title = inputReady
       ? "เลือกไฟล์จากเครื่อง ไฟล์จะอัปโหลดเมื่อกดส่งเท่านั้น"
       : modelSupportsImage
@@ -38705,11 +41345,11 @@ function renderAgentAttachmentComposer(subject) {
   }
   if (els.modalAgentAttachmentInput) {
     els.modalAgentAttachmentInput.disabled = !inputReady || busy;
-    els.modalAgentAttachmentInput.accept = inputReady ? policy.acceptedExtensions.join(",") : "";
+    els.modalAgentAttachmentInput.accept = inputReady ? usableExtensions.join(",") : "";
   }
   if (els.modalAgentAttachmentPolicy) {
     els.modalAgentAttachmentPolicy.textContent = inputReady
-      ? `สูงสุด ${policy.maxFiles} ไฟล์ • ไฟล์ละไม่เกิน ${formatAgentAttachmentBytes(policy.maxBytes)} • ${policy.acceptedExtensions.join(", ")}`
+      ? `สูงสุด ${policy.maxFiles} ไฟล์ • ไฟล์ละไม่เกิน ${formatAgentAttachmentBytes(policy.maxBytes)} • ${usableExtensions.join(", ")}`
       : "Locked • รอ Backend ยืนยันชนิด ขนาด และช่องทางอัปโหลด";
   }
   if (!els.modalAgentAttachmentDrafts) return;
@@ -38787,7 +41427,7 @@ function renderAgentComposer(subject) {
             ? "Backend ยังไม่ยืนยันโหมดที่เลือก จึงยังส่งข้อความไม่ได้"
             : limitedChatReady
               ? "limited_chat พร้อมใช้งาน • ไม่มี Computer Use, MCP หรือ Plugin"
-              : "Chat พร้อมจาก Backend แบบไม่เรียก Tool • Workspace/Computer/Full Access ล็อก";
+              : "Chat พร้อม • เลือกสิทธิ์ของเธรดเพื่อทำงานไฟล์และ Terminal";
     els.modalChatStatus.dataset.tone = isCurrentChat
       ? state.agentChat.tone
       : chatBusy ? "working" : "neutral";
@@ -38795,7 +41435,7 @@ function renderAgentComposer(subject) {
   if (els.modalChatUsageNote) {
     els.modalChatUsageNote.textContent = limitedChatReady
       ? "โหมดสำรองนี้ส่งเฉพาะข้อความไปยัง /api/agents/chat และไม่อ้างว่าใช้ Tool หากต้องการไฟล์ Terminal Computer Use MCP หรือ Plugin ต้องรอ Backend ยืนยัน Full Agent Runtime"
-      : "Frontend ส่งเฉพาะข้อความและ Intent การตั้งค่า ไม่มี Token หรือ Secret การใช้ Tool และผลการทำงานจะแสดงเฉพาะเหตุการณ์ที่ Backend ยืนยัน";
+      : "ไฟล์และผลลัพธ์ผูกกับเธรดนี้ • ตรวจความคืบหน้าได้ในกิจกรรมของ Agent";
   }
   renderAgentAttachmentComposer(subject);
   renderAgentRuntimeConsole(subject);
@@ -38902,6 +41542,12 @@ function renderGameModal() {
 
 function gameModalFocusableElements() {
   if (!els.gameModal) return [];
+  // SENTIMENT_UNIVERSE_FOCUS_V1: this ShadowRoot has its own inner focus handling.
+  if (SENTIMENT_UNIVERSE_ENABLED && state.modal.type === "prop" && state.modal.id === FX_NEWS_BIAS_PROP_ID) {
+    const shadow = sentimentUniverseMount?.host?.shadowRoot;
+    const nested = shadow ? [...shadow.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex="0"]')] : [];
+    return [els.modalCloseButton,els.workflowDashboardContent,...nested].filter((node) => node && !node.closest('[inert]') && node.getClientRects().length > 0);
+  }
   return [...els.gameModal.querySelectorAll(
     'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
   )].filter((node) => !node.hidden && !node.closest("[hidden]") && node.getAttribute("aria-hidden") !== "true");
@@ -38950,6 +41596,16 @@ function trapGameModalFocus(event) {
 }
 
 function openGameModal(type, id, tab = "chat") {
+  // SENTIMENT_UNIVERSE_HOOK: dispose only this equipment when switching away.
+  if (type !== "prop" || id !== FX_NEWS_BIAS_PROP_ID) disposeSentimentUniverse();
+
+  if (type !== "prop" || id !== AI_TRADE_COUNCIL_PROP_ID) stopAiTradeHeartbeatPolling();
+  if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID
+    && (type !== "prop" || id !== EA_FACTORY_PROP_ID)) {
+    stopEaFactoryActiveProgressPolling({ resetRefresh: true });
+    state.modal.eaFactory.readContextRevision = Number(state.modal.eaFactory.readContextRevision || 0) + 1;
+    state.modal.eaFactory.pendingGoogleSheetImport = null;
+  }
   if (els.taskDetailDialog?.open) closeTaskDetail({ restoreFocus: false });
   if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
   if (els.newsEventDialog?.open) closeFxNewsEventDetail({ restoreFocus: false });
@@ -38960,6 +41616,7 @@ function openGameModal(type, id, tab = "chat") {
   const surface = getModalSurface(type, id);
   if (surface === "dashboard" && isWorkflowDashboardPropId(id)) {
     delete state.modal.workflowTabs[id];
+    if (id === EA_FACTORY_PROP_ID) state.modal.eaFactory.explicitPageId = "";
   }
   state.modal.activeTab = surface === "agent"
     ? tab
@@ -38984,10 +41641,17 @@ function openGameModal(type, id, tab = "chat") {
 }
 
 function closeGameModal() {
+  // SENTIMENT_UNIVERSE_HOOK: cancel its requests, RAF and WebGL resources.
+  disposeSentimentUniverse();
+
+  stopAiTradeHeartbeatPolling();
   const closingType = state.modal.type;
   const closingId = state.modal.id;
   if (closingType === "prop" && closingId === EA_FACTORY_PROP_ID) {
+    stopEaFactoryActiveProgressPolling({ resetRefresh: true });
     stopEaFactoryGoogleSheetCatalogAutoRefresh();
+    state.modal.eaFactory.pendingGoogleSheetImport = null;
+    state.modal.eaFactory.readContextRevision = Number(state.modal.eaFactory.readContextRevision || 0) + 1;
   }
   if (els.taskDetailDialog?.open) closeTaskDetail({ restoreFocus: false });
   if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
@@ -39245,6 +41909,12 @@ function agentAttachmentMediaType(file) {
     ".webp": "image/webp",
     ".pdf": "application/pdf",
     ".txt": "text/plain",
+    ".mq4": "text/plain",
+    ".mq5": "text/plain",
+    ".mqh": "text/plain",
+    ".set": "text/plain",
+    ".md": "text/markdown",
+    ".zip": "application/zip",
     ".csv": "text/csv",
     ".json": "application/json",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -39274,6 +41944,8 @@ function addAgentAttachmentDrafts(subject, fileList) {
     setAgentChatStatus(subject.id, "Backend ยังไม่ยืนยันช่องทางแนบไฟล์ จึงยังไม่ได้อ่านหรือส่งไฟล์", "error");
     return;
   }
+  const model = state.agentRuntime.models.find((item) => item.id === profile.model);
+  const usableExtensions = agentAttachmentExtensionsForModel(policy, model?.inputModalities?.includes("image") === true);
   const current = Array.isArray(profile.attachmentDrafts) ? profile.attachmentDrafts : [];
   const files = Array.from(fileList || []);
   let rejected = "";
@@ -39284,8 +41956,8 @@ function addAgentAttachmentDrafts(subject, fileList) {
     }
     const extension = agentAttachmentExtension(file?.name);
     const byteSize = Number(file?.size);
-    if (!extension || !policy.acceptedExtensions.includes(extension)) {
-      rejected = `รองรับเฉพาะ ${policy.acceptedExtensions.join(", ")}`;
+    if (!extension || !usableExtensions.includes(extension)) {
+      rejected = `โมเดลและโหมดนี้รองรับ ${usableExtensions.join(", ") || "ยังไม่มีชนิดไฟล์พร้อมใช้งาน"}`;
       return;
     }
     if (!Number.isFinite(byteSize) || byteSize <= 0 || byteSize > policy.maxBytes) {
@@ -39364,7 +42036,7 @@ async function uploadAgentRuntimeAttachment(threadId, draft, policy) {
   if (
     payload?.ok !== true
     || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,179}$/.test(id)
-    || attachment?.modelInputReady !== true
+    || (attachment?.modelInputReady !== true && attachment?.fileInputReady !== true)
   ) {
     throw Object.assign(new Error("attachment_upload_not_confirmed"), { kind: "attachment_upload_not_confirmed" });
   }
@@ -39560,6 +42232,8 @@ function normalizeAgentRuntimeStatus(payload) {
     toolExecutionEnabled,
     attachments: {
       inputReady: attachmentInputReady,
+      imageInputReady: attachmentInputReady && attachmentContract.imageInputReady !== false,
+      fileInputReady: attachmentInputReady && attachmentContract.fileInputReady === true,
       outputReady: artifactOutputReady,
       uploadTemplate: attachmentInputReady ? AGENT_RUNTIME_ATTACHMENT_UPLOAD_TEMPLATE : "",
       maxFiles: attachmentInputReady
@@ -39586,7 +42260,7 @@ function normalizeAgentRuntimeStatus(payload) {
     message: safeDashboardDisplayText(
       runtime?.messageTh || runtime?.message,
       chatReady
-        ? "Chat พร้อมจาก Backend แบบไม่เรียก Tool • Workspace/Computer/Full Access ล็อก"
+        ? "Chat พร้อม • เลือกสิทธิ์ของเธรดเพื่อทำงานไฟล์และ Terminal"
         : available
           ? "เชื่อม Runtime แล้ว แต่ Backend ยังไม่เปิดการลงมือทำ"
           : "Backend ยังไม่ยืนยัน Full Agent Runtime",
@@ -39613,6 +42287,7 @@ function normalizeAgentRuntimeThread(item, fallbackAgentId = "") {
     model: String(item.model || "").slice(0, 120),
     reasoning: String(item.reasoning || item.reasoningEffort || "").slice(0, 40),
     mode,
+    accessGrant: normalizeAgentAccessGrant(item.accessGrant, mode),
     archived: item.archived === true,
     revision: Number.isSafeInteger(item.revision) && item.revision >= 0 ? item.revision : null,
     eventCount: Number.isFinite(Number(item.eventCount)) ? Number(item.eventCount) : null,
@@ -39630,6 +42305,14 @@ function normalizeAgentRuntimeThread(item, fallbackAgentId = "") {
     canArchive: item.canArchive === true,
     canUpdateSettings: item.canUpdateSettings === true,
   };
+}
+
+function normalizeAgentAccessGrant(value, mode) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || value.mode !== mode || !["workspace", "full"].includes(mode)
+    || value.scope !== "thread" || value.authorization !== "user_selected_mode"
+    || !Number.isFinite(Date.parse(String(value.grantedAt || "")))) return null;
+  return { mode, scope: "thread", authorization: "user_selected_mode", grantedAt: value.grantedAt };
 }
 
 function safeAgentAttachmentName(value, fallback = "ไฟล์จาก Agent") {
@@ -39709,7 +42392,8 @@ function normalizeAgentRuntimeMessages(value, subject) {
           : typeof item.reply === "string" ? item.reply : "";
     const text = safeAgentChatReplyText(rawContent, "");
     const artifacts = agentRuntimeArtifactsFromItem(item);
-    if (!text && !artifacts.length) return null;
+    const inputAttachments = normalizeAgentInputAttachments(item.attachments || item.metadata?.attachments || []);
+    if (!text && !artifacts.length && !inputAttachments.length) return null;
     const userSide = ["user", "human", "operator"].includes(role);
     return {
       id: String(item.id || item.turnId || `runtime-message-${index}`).slice(0, 180),
@@ -39718,6 +42402,7 @@ function normalizeAgentRuntimeMessages(value, subject) {
         : safeDashboardDisplayText(item.speaker || item.agentName, subject?.name || "Agent", { limit: 100 }),
       text,
       artifacts,
+      inputAttachments,
       side: userSide ? "user" : "agent",
       time: typeof item.createdAt === "string" ? item.createdAt : null,
     };
@@ -40334,12 +43019,11 @@ function agentRuntimeCapabilityTruth(status) {
     && status?.modeReadiness?.workspace === true
     && status?.capabilities?.workspace === true
     && status?.approvalBrokerReady === true;
-  const fullReady = workspaceReady
+  // Permission readiness is independent of optional connected tools.
+  const fullReady = chatReady
+    && status?.toolExecutionEnabled === true
     && status?.fullAgentReady === true
-    && status?.modeReadiness?.full === true
-    && status?.capabilities?.computerUse === true
-    && status?.capabilities?.mcp === true
-    && status?.capabilities?.plugins === true;
+    && status?.modeReadiness?.full === true;
   return { chatReady, workspaceReady, fullReady };
 }
 
@@ -40347,8 +43031,8 @@ function agentRuntimeLockPresentation(status, truth) {
   if (truth.fullReady) {
     return {
       state: "ready",
-      reason: "Full Access ผ่าน Capability และ Approval Gate ครบแล้ว",
-      nextAction: "เลือก Full Agent หรือกดเปิด Full Access สำหรับ Agent ตัวนี้",
+      reason: "Backend พร้อมรับสิทธิ์ Full Access สำหรับเธรดที่คุณเลือก",
+      nextAction: "เลือก Full Access เพื่ออนุญาตงานไฟล์และ Terminal; เครื่องมือที่เชื่อมต่อแสดงแยกด้านล่าง",
     };
   }
   if (status?.available !== true) {
@@ -40372,16 +43056,14 @@ function agentRuntimeLockPresentation(status, truth) {
   if (!blockerLabels.length) {
     if (status?.approvalBrokerReady !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.approval_broker_not_ready);
     if (status?.capabilities?.workspace !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.workspace_not_ready);
-    if (status?.capabilities?.computerUse !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.computer_use_not_ready);
-    if (status?.capabilities?.mcp !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.mcp_not_ready);
-    if (status?.capabilities?.plugins !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.plugins_not_ready);
+
   }
   return {
     state: "locked",
     reason: blockerLabels.slice(0, 3).join(" • ") || "Backend ยังไม่ยืนยัน Full Access",
     nextAction: truth.workspaceReady
-      ? "รอ Backend ยืนยัน Computer Use, MCP และ Plugin ครบก่อนเปิด Full Access"
-      : "ใช้ Chat ได้ตามปกติ • ห้ามปลดล็อก Workspace/Full Access จนกว่า release ใหม่จะผ่าน safety sentinel",
+      ? "ใช้ Workspace ได้; Full Access จะเปิดเมื่อ Backend ยืนยันสิทธิ์"
+      : "ตรวจสถานะ Runtime; ยังใช้ Chat และไฟล์ที่ระบบระบุว่ารองรับได้",
   };
 }
 
@@ -40395,7 +43077,7 @@ function renderAgentRuntimeCapabilityMatrix(status, selectedThread) {
         label: "Chat",
         ready: truth.chatReady,
         description: truth.chatReady
-          ? "สนทนาและวิเคราะห์รูปที่ Backend อนุญาต • ไม่มี Tool Call"
+          ? "สนทนา วิเคราะห์รูปและไฟล์ที่รองรับ • ไม่แก้ไฟล์ในเครื่อง"
           : "ยังไม่พร้อมส่ง Turn ผ่าน Codex App Server",
       },
       {
@@ -40403,16 +43085,16 @@ function renderAgentRuntimeCapabilityMatrix(status, selectedThread) {
         label: "Workspace",
         ready: truth.workspaceReady,
         description: truth.workspaceReady
-          ? "ไฟล์/Terminal ภายในขอบเขตพร้อม และทุกการเปลี่ยนแปลงต้องขออนุมัติครั้งเดียว"
+          ? "ทำงานไฟล์และ Terminal ในพื้นที่ที่คุณอนุญาต"
           : "ล็อก • ไม่มีการรันคำสั่งหรือแก้ไฟล์",
       },
       {
         id: "full",
-        label: "Full Agent",
+        label: "Full Access",
         ready: truth.fullReady,
         description: truth.fullReady
-          ? "Workspace + Computer Use + MCP/Plugin ผ่าน Backend ครบ"
-          : "ล็อก • ไม่ควบคุมคอม ไม่เรียก MCP/Plugin",
+          ? "ใช้สิทธิ์ไฟล์และ Terminal ที่คุณเลือกให้เธรดนี้"
+          : "ยังไม่พร้อมรับสิทธิ์ Full Access",
       },
     ].forEach((mode) => {
       const row = document.createElement("article");
@@ -40517,7 +43199,7 @@ function renderAgentRuntimeConsole(subject) {
       : fullAgentReady
         ? "Full Agent พร้อมจาก Backend"
         : chatReady
-          ? "Chat พร้อม • Workspace/Computer/Full Access ล็อกโดย Backend"
+          ? "Chat พร้อม • ดูสิทธิ์และเครื่องมือที่เชื่อมต่อด้านล่าง"
         : profile.runtimeEndpointUnavailable
           ? "limited_chat"
           : status?.available ? "เชื่อมแล้ว • ยังไม่เปิด Tool" : "ยังไม่ยืนยัน Runtime";
@@ -40597,7 +43279,8 @@ function renderAgentRuntimeConsole(subject) {
   }
   renderAgentRuntimeCapabilityMatrix(status, selectedThread);
   if (els.modalAgentFullAccessButton) {
-    const fullAccessActive = fullAgentReady && profile.mode === "full";
+    const fullAccessActive = fullAgentReady && selectedThread?.mode === "full"
+      && selectedThread?.accessGrant?.mode === "full";
     els.modalAgentFullAccessButton.textContent = fullAccessActive
       ? "Full Access · ON"
       : fullAgentReady ? "เปิด Full Access" : "Full Access · Locked";
@@ -40608,17 +43291,17 @@ function renderAgentRuntimeConsole(subject) {
   }
   if (els.modalAgentFullAccessHelp) {
     els.modalAgentFullAccessHelp.textContent = fullAgentReady
-      ? profile.mode === "full"
-        ? "Full Access เปิดสำหรับ Agent ตัวนี้แล้ว แต่ทุกคำสั่งเสี่ยงสูงยังต้องผ่าน Approval Gate"
-        : "Backend ยืนยัน Full Agent แล้ว กดเพื่อเปิดเฉพาะ Agent ตัวนี้"
-      : "Locked • Chat ใช้ได้ แต่ Backend ปิด Workspace, Computer Use, MCP/Plugin และ Full Access เพราะยังไม่ผ่าน Safety Gate";
+      ? selectedThread?.mode === "full" && selectedThread?.accessGrant?.mode === "full"
+        ? "เธรดนี้ได้รับสิทธิ์ Full Access; เครื่องมือเสริมใช้ได้เฉพาะที่เชื่อมต่อจริง"
+        : "กดเพื่ออนุญาต Full Access เฉพาะเธรดนี้"
+      : "Full Access ยังไม่พร้อม; Chat และการแนบไฟล์ใช้ตามความสามารถที่แสดง";
   }
 
   setAgentRuntimeBadge(els.modalAgentRuntimeBadge, "Chat Runtime", chatReady, status?.available ? "ยังไม่เปิด Chat" : "ยังไม่ยืนยัน");
   setAgentRuntimeBadge(els.modalAgentWorkspaceBadge, "Workspace", status?.capabilities?.workspace === true, "ล็อก", "locked");
-  setAgentRuntimeBadge(els.modalAgentComputerUseBadge, "Computer Use", status?.capabilities?.computerUse === true, "ล็อก", "locked");
-  setAgentRuntimeBadge(els.modalAgentMcpBadge, "MCP", status?.capabilities?.mcp === true, "ล็อก", "locked");
-  setAgentRuntimeBadge(els.modalAgentPluginBadge, "Plugin", status?.capabilities?.plugins === true, "ล็อก", "locked");
+  setAgentRuntimeBadge(els.modalAgentComputerUseBadge, "Computer Use", status?.capabilities?.computerUse === true, "ยังไม่เชื่อมต่อ", "unknown");
+  setAgentRuntimeBadge(els.modalAgentMcpBadge, "MCP", status?.capabilities?.mcp === true, "ยังไม่เชื่อมต่อ", "unknown");
+  setAgentRuntimeBadge(els.modalAgentPluginBadge, "Plugin", status?.capabilities?.plugins === true, "ยังไม่เชื่อมต่อ", "unknown");
   setAgentRuntimeBadge(els.modalAgentAttachmentBadge, "แนบไฟล์", status?.attachments?.inputReady === true);
   setAgentRuntimeBadge(els.modalAgentArtifactBadge, "ไฟล์ผลลัพธ์", status?.attachments?.outputReady === true);
   renderAgentRuntimeApproval(profile, selectedThread);
@@ -40764,6 +43447,7 @@ async function archiveSelectedAgentRuntimeThread(subject) {
 async function saveAgentRuntimeThreadSettings(subject, changedField, value) {
   if (!subject) return;
   const profile = getAgentRuntimeProfile(subject.id);
+  if (profile.actionInFlight) return;
   const previous = profile[changedField];
   const previousReasoning = profile.reasoning;
   if (changedField === "mode" && !AGENT_RUNTIME_CAPABILITY_MODES.some((item) => item.id === value)) return;
@@ -40785,9 +43469,22 @@ async function saveAgentRuntimeThreadSettings(subject, changedField, value) {
     return;
   }
   saveSessionSnapshot();
-  if (!thread || profile.runtimeEndpointUnavailable) {
+  if (profile.runtimeEndpointUnavailable) {
     if (changedField === "mode" && profile.mode !== "chat") profile.mode = "chat";
     renderAgentRuntimeConsole(subject);
+    return;
+  }
+  if (!thread) {
+    // The explicit permission selection is also the grant for the first
+    // durable thread. Never silently reset a new Agent's selection to Chat.
+    if (changedField === "mode" && profile.mode !== "chat") {
+      const created = await createAgentRuntimeThread(subject);
+      if (!created) {
+        profile[changedField] = previous;
+        saveSessionSnapshot();
+        renderAgentRuntimeConsole(subject);
+      }
+    } else renderAgentRuntimeConsole(subject);
     return;
   }
   const path = agentRuntimeThreadEndpoint(thread.id, "/settings");
@@ -41221,9 +43918,16 @@ async function syncAgentChatCreatedTasks(subject, validated) {
 }
 
 function agentChatErrorMessage(error) {
-  const kind = String(error?.body?.kind || error?.kind || "").trim().toLowerCase();
+  const kind = String(error?.body?.error?.code || error?.body?.code || error?.body?.kind || error?.kind || "").trim().toLowerCase();
   if (typeof error?.userMessage === "string" && error.userMessage.trim()) {
     return safeAgentChatReplyText(error.userMessage, "Full Agent Turn ไม่สำเร็จ");
+  }
+  if (/^(?:attachment_|file_|artifact_|upload_|unsupported_file|invalid_file|text_input_|media_type_|pdf_parser_|secret_rejected)/.test(kind)) {
+    const detail = error?.body?.messageTh || error?.body?.error?.messageTh;
+    if (typeof detail === "string" && detail.trim()) return safeAgentChatReplyText(detail);
+    if (["attachment_requires_workspace", "attachment_requires_full_access"].includes(kind)) {
+      return "ไฟล์นี้ต้องใช้ Workspace หรือ Full Access เพื่ออ่านด้วยเครื่องมือ กรุณาเลือกสิทธิ์ของเธรดแล้วส่งใหม่";
+    }
   }
   if (error?.status === 429 || ["rate_limited", "codex_limit_reached"].includes(kind)) {
     return "โควตา Codex ยังไม่พร้อมสำหรับข้อความนี้ กรุณารอตามเวลาที่ระบบกำหนดแล้วลองใหม่";
@@ -41365,7 +44069,9 @@ async function handleModalSend() {
           runtimeResult.completed ? "ready" : "working",
         );
         runtimeProfile.message = runtimeResult.completed
-          ? "Turn เสร็จแล้ว • โหมด Chat นี้ไม่เปิด Tool"
+          ? runtimeProfile.mode === "chat"
+            ? "Turn เสร็จแล้ว • โหมด Chat นี้ไม่เปิด Tool"
+            : "Turn เสร็จแล้ว • บันทึกคำตอบและผลลัพธ์ของเธรดแล้ว"
           : `Turn อยู่ในสถานะ ${runtimeResult.lifecycle || "กำลังตรวจสอบ"}`;
         runtimeProfile.tone = runtimeResult.completed ? "ready" : "working";
         void refreshCodexRateLimits({ manual: true });
@@ -43205,27 +45911,43 @@ function propReportToMissionItems(report, owner = "mission_archivist") {
   return [...missionItems, ...reportItems, ...eventItems, ...memoryItems];
 }
 
-async function loadPropReport(propId, { signal = null, forceFresh = false } = {}) {
+async function loadPropReport(propId, { signal = null, forceFresh = false, shouldApply = null } = {}) {
+  // SENTIMENT_UNIVERSE_HOOK: retire legacy FX report reads only.
+  if (SENTIMENT_UNIVERSE_ENABLED && propId === FX_NEWS_BIAS_PROP_ID) return state.propReports[propId] || null;
+
   const key = String(propId || "").trim();
   if (!key) return null;
   const existing = propReportInFlight.get(key);
   if (existing) {
     const existingResult = await existing;
+    if (shouldApply && !shouldApply()) return null;
     if (!forceFresh || signal?.aborted) return existingResult;
     if (propReportInFlight.get(key) === existing) propReportInFlight.delete(key);
-    return loadPropReport(key, { signal });
+    return loadPropReport(key, { signal, shouldApply });
   }
   state.propReportLoadState[key] = {
     status: "loading",
     errorMessage: "",
     lastAttemptAt: new Date().toISOString(),
   };
+  if (key === "left_audit_crystals" && state.modal?.open && state.modal.type === "prop" && state.modal.id === key) {
+    renderGameModal();
+  }
   const request = (async () => {
     try {
+      // Council assembles the three-agent history and terminal observations in
+      // one read. Allow that bounded read to finish without changing freshness
+      // checks or the shorter deadline used by other equipment dashboards.
+      const timeoutMs = key === "left_analytics_console"
+        ? AI_TRADE_COUNCIL_REPORT_FETCH_TIMEOUT_MS
+        : PROP_REPORT_FETCH_TIMEOUT_MS;
       const report = await fetchJson(
         `/api/props/${encodeURIComponent(key)}/report`,
-        { timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS, signal },
+        { timeoutMs, signal },
       );
+      // A save/retry can supersede its optional refresh before this GET ends.
+      // Do not let the older snapshot invalidate the newer save request.
+      if (shouldApply && !shouldApply()) return null;
       state.propReports[key] = report;
       state.propReportLoadedAt[key] = Date.now();
       state.propReportLoadState[key] = {
@@ -43237,11 +45959,15 @@ async function loadPropReport(propId, { signal = null, forceFresh = false } = {}
       if (state.panelObject === key) selectObject(key, { loadBackendReport: false });
       return report;
     } catch (error) {
+      if (shouldApply && !shouldApply()) return null;
       state.propReportLoadState[key] = {
         status: signal?.aborted ? (state.propReports[key] ? "ready" : "idle") : "error",
         errorMessage: signal?.aborted ? "" : "โหลดข้อมูลจาก Local Runner ไม่สำเร็จ",
         lastAttemptAt: new Date().toISOString(),
       };
+      if (key === "left_audit_crystals" && state.modal?.open && state.modal.type === "prop" && state.modal.id === key) {
+        renderGameModal();
+      }
       return null;
     }
   })();
@@ -44217,6 +46943,9 @@ async function pollMissionReadModel({ manual = false, signal = null } = {}) {
 }
 
 async function pollOpenPropReport({ force = false, signal = null } = {}) {
+  // SENTIMENT_UNIVERSE_HOOK: this equipment polls its read-only market mirror.
+  if (SENTIMENT_UNIVERSE_ENABLED && state.modal.type === "prop" && state.modal.id === FX_NEWS_BIAS_PROP_ID) return null;
+
   if (document.visibilityState !== "visible" || signal?.aborted) return null;
   if (typeof document.hasFocus === "function" && !document.hasFocus()) return null;
   if (!state.modal.open || state.modal.type !== "prop" || state.modal.id === "mission_strategy_table") return null;
@@ -44265,6 +46994,8 @@ async function pollOpenPropReport({ force = false, signal = null } = {}) {
   );
   const shouldRefreshReport = propId !== EA_FACTORY_PROP_ID && (force || reportTtlExpired);
   const shouldRefreshFactory = propId === "right_server_racks"
+    && !(state.modal.eaFactory.inFlight
+      && ["sheet_sync", "create_build"].includes(state.modal.eaFactory.stageId) && !factoryBackendBusy)
     && (force || factoryBackendBusy || factoryStageActive || factoryOneClickActive || factoryTtlExpired);
   const shouldRefreshOptimization = propId === EA_OPTIMIZATION_LAB_PROP_ID
     && (force || optimizationTtlExpired);
@@ -44889,7 +47620,10 @@ els.missionMeetingOpenMissionButton?.addEventListener("click", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") syncMeetingRoomPolling();
-  else stopMeetingRoomPolling();
+  else {
+    stopMeetingRoomPolling();
+    stopEaFactoryActiveProgressPolling({ resetRefresh: true });
+  }
 });
 
 els.signalConsensusTabs?.addEventListener("click", (event) => {
@@ -45150,7 +47884,8 @@ els.modalAgentFullAccessButton?.addEventListener("click", () => {
     setAgentRuntimeProfileStatus(profile, "เธรดกำลังทำงานอยู่ จึงยังเปลี่ยน Full Access ไม่ได้", "warning");
     return;
   }
-  void saveAgentRuntimeThreadSettings(subject, "mode", profile.mode === "full" ? "chat" : "full");
+  const fullAccessActive = selectedThread?.mode === "full" && selectedThread?.accessGrant?.mode === "full";
+  void saveAgentRuntimeThreadSettings(subject, "mode", fullAccessActive ? "chat" : "full");
 });
 
 els.modalAgentStopButton?.addEventListener("click", () => {

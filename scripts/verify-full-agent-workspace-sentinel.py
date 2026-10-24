@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fail-closed live proof for Full Agent Workspace approval semantics.
+"""Historical diagnostic for a stricter every-write approval expectation.
+
+This is not the active permission readiness gate: Codex workspace-write with
+on-request approvals intentionally permits authorized in-scope writes. The
+current runtime records explicit per-thread grants and checks native sandbox,
+escalation rejection, interrupt, durable decision replay and output isolation.
 
 The default invocation is deliberately inert.  ``--live`` creates one
 backend-owned disposable directory directly below ``workspace/`` and runs two

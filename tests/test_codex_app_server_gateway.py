@@ -353,12 +353,27 @@ class ModeAndPolicyTests(unittest.TestCase):
         )
         self.assertEqual(by_cwd.workspace_roots, by_roots.workspace_roots)
 
-    def test_danger_full_access_is_always_denied(self) -> None:
-        with self.assertRaisesRegex(gateway_module.PolicyViolation, "prohibited") as caught:
+    def test_danger_full_access_without_explicit_thread_grant_is_denied(self) -> None:
+        with self.assertRaisesRegex(gateway_module.PolicyViolation, "explicit") as caught:
             gateway_module.validate_thread_policy(
                 self.request(sandbox="danger-full-access")
             )
         self.assertEqual(caught.exception.code, "danger_full_access_denied")
+
+    def test_native_full_access_requires_matching_mode_grant_and_broker_policy(self) -> None:
+        values = self.request(mode="full_agent", sandbox="danger-full-access",
+                              fullAccessAuthorized=True, approvalMode="explicit",
+                              requestedCapabilities=["conversation", "history", "model_selection",
+                                                     "workspace_read", "workspace_write", "shell", "web_search"])
+        policy = gateway_module.validate_thread_policy(values)
+        self.assertEqual(policy.sandbox_policy(), {"type": "dangerFullAccess"})
+        self.assertEqual(policy.approval_policy, "on-request")
+        self.assertEqual(policy.thread_config()["web_search"], "live")
+        self.assertFalse(policy.feature_overrides["plugins"])
+        for changes in ({"mode": "workspace"}, {"fullAccessAuthorized": False},
+                        {"fullAccessAuthorized": "true"}, {"approvalMode": "deny_all"}):
+            with self.subTest(changes=changes), self.assertRaises(gateway_module.PolicyViolation):
+                gateway_module.validate_thread_policy({**values, **changes})
 
     def test_automatic_external_effects_are_always_denied(self) -> None:
         with self.assertRaises(gateway_module.PolicyViolation) as caught:
@@ -1738,11 +1753,15 @@ class SdkGatewayTests(unittest.TestCase):
         call = next(call for call in self.client.calls if call[0] == "thread_start")
         params = call[1]
         self.assertEqual(params["approvalPolicy"], "never")
+        self.assertEqual(params["approvalsReviewer"], "user")
         self.assertEqual(params["sandbox"], "workspace-write")
         self.assertNotEqual(params["sandbox"], "danger-full-access")
         self.assertTrue(params["config"]["features"]["shell_tool"])
         self.assertFalse(params["config"]["features"]["plugins"])
         self.assertEqual(result["policy"]["autoExternalEffects"], False)
+        self.gateway.thread_resume("thread-1", self.policy)
+        resumed = next(call for call in self.client.calls if call[0] == "thread_resume")
+        self.assertEqual(resumed[2]["approvalsReviewer"], "user")
 
     def test_thread_start_discovers_model_catalog_before_trusting_selection(self) -> None:
         fresh_client = FakeClient()
@@ -1823,6 +1842,7 @@ class SdkGatewayTests(unittest.TestCase):
         turn_call = next(call for call in self.client.calls if call[0] == "turn_start")
         params = turn_call[3]
         self.assertEqual(params["approvalPolicy"], "never")
+        self.assertEqual(params["approvalsReviewer"], "user")
         self.assertEqual(params["sandboxPolicy"]["type"], "workspaceWrite")
         self.assertNotEqual(params["sandboxPolicy"]["type"], "dangerFullAccess")
         self.assertTrue(any(call[0] == "thread_read" for call in self.client.calls))

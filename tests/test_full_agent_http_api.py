@@ -573,7 +573,7 @@ class FullAgentHttpApiTests(unittest.TestCase):
         )
         self.assertEqual(dormant_status, 409, dormant)
         self.assertEqual(dormant_headers.get("cache-control"), "no-store")
-        self.assertEqual(dormant.get("code"), "approval_broker_required")
+        self.assertEqual(dormant.get("code"), "approval_binding_mismatch")
 
     def test_http_response_redacts_local_paths_without_corrupting_links(self) -> None:
         safe_url = "https://docs.example.com/setup/path"
@@ -897,7 +897,7 @@ class FullAgentHttpApiTests(unittest.TestCase):
         self.assertNotIn(str(internal_path), json.dumps(queued))
         self.assertNotIn(str(internal_path), json.dumps(finished))
 
-    def test_chat_turn_rejects_uploaded_non_image_before_gateway_dispatch(self) -> None:
+    def test_chat_turn_dispatches_uploaded_text_as_untrusted_text(self) -> None:
         thread = self.create_thread(agent_id="manager", mode="chat")
         thread_id = thread["id"]
         upload_status, _headers, uploaded = self.request(
@@ -922,9 +922,12 @@ class FullAgentHttpApiTests(unittest.TestCase):
             },
             headers={"Origin": self.origin},
         )
-        self.assertEqual(turn_status, 409, rejected)
-        self.assertEqual(rejected["code"], "attachment_requires_full_access")
-        self.assertEqual(self.gateway.calls_for("turn_start"), [])
+        self.assertEqual(turn_status, 202, rejected)
+        self._wait_for(lambda: bool(self.gateway.calls_for("turn_start")))
+        items = self.gateway.calls_for("turn_start")[0]["inputItems"]
+        self.assertEqual([item["type"] for item in items], ["text"])
+        self.assertIn("bounded notes", items[0]["text"])
+        self.assertIn("untrusted", items[0]["text"])
 
     def test_http_interrupt_reaches_fake_gateway_and_finishes_fail_closed(self) -> None:
         self.gateway.block_waits = True

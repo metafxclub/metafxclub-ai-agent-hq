@@ -78,6 +78,18 @@ function Remove-GoogleOAuthUserConfiguration {
     }
 }
 
+# This service has its own verified process/task ownership and private state.
+$sentimentAutostart = Join-Path $installRoot 'scripts\register-sentiment-autostart.ps1'
+if (Test-Path -LiteralPath $sentimentAutostart -PathType Leaf) {
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sentimentAutostart -Remove
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot remove the verified sentiment task; uninstall stopped.' }
+}
+$sentimentLifecycle = Join-Path $installRoot 'scripts\sentiment-universe.ps1'
+if (Test-Path -LiteralPath $sentimentLifecycle -PathType Leaf) {
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sentimentLifecycle -Action Stop
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot stop the verified sentiment processes; uninstall stopped.' }
+}
+
 $unregisterAutostart = Join-Path $installRoot "scripts\unregister-bridge-autostart.ps1"
 if (Test-Path -LiteralPath $unregisterAutostart -PathType Leaf) {
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $unregisterAutostart
@@ -177,6 +189,7 @@ else {
 }
 
 Write-Host "Shortcut และตัวโปรแกรมถูกนำออกแล้ว ไม่ได้แตะ Codex Login หรือ Secret ภายนอกโฟลเดอร์ HQ"
+Write-Host 'Sentiment Universe account, provider limits and news cache remain in %LOCALAPPDATA%\Metafxclub\SentimentUniverse. They are never bundled with an installer.'
 if ($RemoveUserData) {
     Write-Host "Environment variable ของ Google ที่ผู้ดูแลตั้งเองจะไม่ถูกแก้ไขอัตโนมัติ" -ForegroundColor Yellow
 }

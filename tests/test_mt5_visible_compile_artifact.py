@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_DIR = (
-    ROOT / "artifacts" / "mt5-trade-gateway-v1.03-visible-compile-readiness"
+    ROOT / "artifacts" / "mt5-trade-gateway-v1.07-visible-compile-readiness"
 )
 MANIFEST_PATH = ARTIFACT_DIR / "MANIFEST.json"
 CHECKSUMS_PATH = ARTIFACT_DIR / "SHA256SUMS.txt"
@@ -36,6 +36,7 @@ class Mt5VisibleCompileArtifactTests(unittest.TestCase):
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
     def test_manifest_source_and_source_only_distribution_policy(self) -> None:
+        self.assertEqual(self.manifest["packageVersion"], "1.07")
         self.assertEqual(
             self.manifest["sourceFile"],
             "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5",
@@ -112,7 +113,7 @@ class Mt5VisibleCompileArtifactTests(unittest.TestCase):
             encoding="utf-8"
         )
         artifact_windows = (
-            r"artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
+            r"artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness"
         )
         expected_files = {
             path.name for path in ARTIFACT_DIR.iterdir() if path.is_file()
@@ -138,11 +139,11 @@ class Mt5VisibleCompileArtifactTests(unittest.TestCase):
 
         ignored = (ROOT / ".gitignore").read_text(encoding="utf-8-sig")
         self.assertIn(
-            "!artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/",
+            "!artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/",
             ignored,
         )
         self.assertIn(
-            "!artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/**",
+            "!artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/**",
             ignored,
         )
 
@@ -153,7 +154,7 @@ class Mt5VisibleCompileArtifactTests(unittest.TestCase):
             staged_artifact = (
                 candidate_root
                 / "artifacts"
-                / "mt5-trade-gateway-v1.03-visible-compile-readiness"
+                / "mt5-trade-gateway-v1.07-visible-compile-readiness"
             )
             staged_source = (
                 candidate_root

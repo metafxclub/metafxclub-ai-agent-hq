@@ -516,7 +516,8 @@ def _clause_explicitly_disables_component(
     return any(
         re.search(
             rf"(?:\bno\b|\bwithout\b|\bnever\b|\bdo\s+not\b|"
-            rf"ไม่(?:ใช้|ตั้ง|กำหนด|เปิด)|ไม่มี|ห้าม|ปิดใช้งาน)"
+            rf"ไม่(?:ใช้|ตั้ง|กำหนด|เปิด)|ไม่(?=เพิ่มไม้|แก้ไม้|ถัวเฉลี่ย)|"
+            rf"ไม่\s+(?=grid\b|martingale\b|averag(?:e|ing)\b|hedg(?:e|ing)\b)|ไม่มี|ห้าม|ปิดใช้งาน)"
             rf".{{0,24}}(?:{alias})",
             clause,
             flags=re.IGNORECASE,
@@ -531,10 +532,82 @@ def _clause_explicitly_disables_component(
     )
 
 
+def _normalize_recovery_policy_enumerations(text: str) -> str:
+    """Keep a closed list's negation on every named mode before clause splitting.
+
+    Only bare, recognized names are propagated. Numeric rules, assignments and
+    conditional tails remain untouched so an ambiguous or later positive rule
+    cannot disappear into a preceding ``No``. A conditional default is not an
+    operator instruction: the ordinary missing-rule policy handles that case.
+    """
+
+    name = (
+        r"(?:(?:automatic\s+)?recovery|grid|martingale|averag(?:e|ing)|hedg(?:e|ing)|"
+        r"pyramiding|pending\s+orders?)\b"
+        r"(?!\s*(?:=|:|at\b|when\b|\d))"
+    )
+    separator = r"\s*(?:,\s*(?:(?:and|or)\s+)?|/\s*|\b(?:and|or)\b\s*|และ\s*|หรือ\s*)"
+    names = name + r"(?:" + separator + name + r")+"
+    end = r"(?=\s*(?:[,.;!?\r\n]|$|\bbut\b))"
+    source = re.sub(
+        r"\bIf\s+(?:none\s+are\s+specified|no\s+recovery\s+rules?\s+are\s+specified)"
+        r"\s*,\s*" + names + r"\s+are\s+(?:disabled|off)" + end,
+        " ", text, flags=re.IGNORECASE,
+    )
+    # A list of undocumented modes is not a positive request for its second
+    # and later names, and is not itself an unconditional prohibition either.
+    source = re.sub(
+        r"(?:ไม่ได้ระบุ(?:ว่าใช้)?|ไม่ระบุ(?:ว่าใช้)?|ไม่พบกฎ(?:ของ)?|"
+        r"\b(?:does|do|did)\s+not\s+(?:state|specify|define|document))\s+"
+        r"(?:recovery\s+แบบ\s+)?"
+        r"(?P<names>" + names + r")",
+        lambda match: "; ".join(
+            "not specified " + item.group(0)
+            for item in re.finditer(name, match.group("names"), flags=re.IGNORECASE)
+        ),
+        source, flags=re.IGNORECASE,
+    )
+
+    def disable_each(match: re.Match) -> str:
+        return "; ".join(
+            "no " + item.group(0)
+            for item in re.finditer(name, match.group("names"), flags=re.IGNORECASE)
+        )
+
+    source = re.sub(
+        r"(?:\bno\b|\bwithout\b|\bnever(?:\s+use)?\b|\bdo\s+not(?:\s+use)?\b|"
+        r"\bdisable\b|ไม่ใช้|ไม่เปิด|ไม่(?=\s)|ห้ามใช้|ห้าม)\s+(?P<names>" + names + r")" + end,
+        disable_each, source, flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"(?P<names>" + names + r")\s+are\s+(?:disabled|off|prohibited|forbidden)" + end,
+        disable_each, source, flags=re.IGNORECASE,
+    )
+
+
 def _component_enabled_requested(text: str, aliases: tuple[str, ...]) -> bool:
     """Return True only for a positive, resolved request for one component."""
 
-    source_text = re.sub(r"\[[^\]\r\n]{0,240}\]", " ", text)
+    source_text = _normalize_recovery_policy_enumerations(
+        re.sub(r"\[[^\]\r\n]{0,240}\]", " ", text)
+    )
+    # Keep an explicit negation attached to its enumerated management names
+    # before comma/and splitting. Otherwise "ไม่ได้ระบุ trailing exit,
+    # break-even หรือ partial close" becomes two false positive requests.
+    # Match names only, never arbitrary prose: a later positive instruction,
+    # numeric rule or assignment remains visible and must still be checked.
+    management_name = (
+        r"(?:trailing(?:[ _-]+(?:stop|exit))?|break[ _-]?even|partial[ _-]?close)"
+        r"\b(?!\s*(?:=|:|at\b|when\b|\d))"
+    )
+    source_text = re.sub(
+        r"(?:ไม่ได้ระบุ|ไม่ระบุ|ไม่พบกฎ(?:ของ)?|"
+        r"\b(?:does|do|did)\s+not\s+(?:state|specify|define|document))\s+"
+        + management_name
+        + r"(?:\s*(?:,\s*(?:(?:and|or)\s+)?|\b(?:and|or)\b\s*|และ\s*|หรือ\s*)"
+        + management_name + r")+",
+        " ", source_text, flags=re.IGNORECASE,
+    )
     for clause in _operational_clauses(source_text):
         if not any(re.search(alias, clause, flags=re.IGNORECASE) for alias in aliases):
             continue
@@ -660,7 +733,7 @@ def _component_has_resolved_rule(
 
 
 def _recovery_explicit_none(text: str) -> bool:
-    lowered = text.casefold()
+    lowered = _normalize_recovery_policy_enumerations(text).casefold()
     conditional_no_recovery = re.search(
         r"\bno\s+recovery\s+(?:on|until|before|for)\b|"
         r"(?:ยังไม่|ไม่).{0,16}แก้ไม้.{0,24}(?:จนกว่า|ก่อน|ครั้งแรก)",
@@ -678,7 +751,7 @@ def _recovery_explicit_none(text: str) -> bool:
     )
     if conditional_no_recovery and later_recovery_enabled:
         return False
-    missing_recovery_statement = re.search(
+    missing_recovery_statement = re.compile(
         r"\bno\s+recovery(?:\s+(?:section|rules?|method|strategy))?"
         r".{0,40}(?:available|provided|located|found|documented|described|stated|specified)\b|"
         r"(?:no|without).{0,24}recovery.{0,24}"
@@ -689,9 +762,8 @@ def _recovery_explicit_none(text: str) -> bool:
         r"(?:recovery).{0,24}(?:not|isn't|wasn't).{0,16}"
         r"(?:described|stated|specified|documented|found)|"
         r"ไม่พบ.{0,24}(?:ข้อมูล|หลักฐาน).{0,24}(?:แก้ไม้|recovery)",
-        lowered,
     )
-    explicit_no_recovery = re.search(
+    explicit_no_recovery = re.compile(
         r"(?:recovery\s*mode\s*=\s*none\b|"
         r"\brecovery\s*=\s*none\b|"
         r"\brecovery\s+(?:is\s+)?(?:disabled|off)\b|"
@@ -701,7 +773,6 @@ def _recovery_explicit_none(text: str) -> bool:
         r"(?:described|stated|specified|documented))|"
         r"ไม่มี(?:การ|ระบบ)?แก้ไม้|ไม่ใช้ระบบแก้ไม้|ไม่เปิดระบบแก้ไม้|"
         r"ห้ามแก้ไม้|ไม่แก้ไม้)",
-        lowered,
     )
     disabled_modes = all(
         re.search(pattern, lowered)
@@ -712,9 +783,11 @@ def _recovery_explicit_none(text: str) -> bool:
             r"(?:\bno\b|\bwithout\b|ไม่ใช้|ไม่เปิด|ห้ามใช้).{0,18}\bhedg(?:e|ing)\b",
         )
     )
-    return bool(
-        (explicit_no_recovery and not missing_recovery_statement) or disabled_modes
-    )
+    return bool(disabled_modes or any(
+        explicit_no_recovery.search(clause)
+        and not missing_recovery_statement.search(clause)
+        for clause in _operational_clauses(lowered)
+    ))
 
 
 def _paired_protection_resolution(text: str, detail: str) -> tuple[bool, bool]:
@@ -2432,7 +2505,7 @@ def _compact_ea_one_level_trade_bindings(
     aliases: list[str] = []
     for function_name, bodies in functions.items():
         if function_name == "ontick" or not any(
-            _mql_trade_call_records(body) for body in bodies
+            _mql_trade_call_records(body, source_code=code) for body in bodies
         ):
             continue
         parameters = parameter_map.get(function_name, ())
@@ -2781,7 +2854,179 @@ def _mql5_request_is_position_close(request_name: str, before_call: str) -> bool
     return bool(selected_position and symbol_scope and magic_scope and type_scope)
 
 
-def _mql_trade_call_records(code: str) -> list[dict[str, object]]:
+def _mql5_request_is_scoped_pending_remove(
+    request_name: str,
+    result_name: str,
+    code: str,
+    send_start: int,
+    send_end: int,
+    source_code: str,
+) -> bool:
+    """Prove a canonical cancellation of an existing owned pending-stop ticket.
+
+    MQL5 REMOVE deletes an existing pending order; it does not open exposure.
+    See https://www.mql5.com/en/docs/constants/tradingconstants/enum_trade_request_actions.
+    Do not extend this proof to MODIFY, which can change price/protection.  This
+    deliberately small grammar excludes aliases, request reuse, conditional
+    assignments and unknown calls between selection/scope checks and the send.
+    The call remains a trade side effect for lifecycle/reachability validation.
+    """
+
+    if not all(re.fullmatch(r"[A-Za-z_]\w*", name) for name in (request_name, result_name)):
+        return False
+    if request_name == result_name or not 0 <= send_start < send_end <= len(code):
+        return False
+    request = re.escape(request_name)
+    result = re.escape(result_name)
+    false_return = r"return\s*(?:\(\s*false\s*\)|false)\s*;"
+    fail = rf"(?:{false_return}|\{{\s*{false_return}\s*\}})"
+    # Every checked value is consumed without an intervening statement.  The
+    # same selected ticket must be nonzero, owned, and specifically a stop.
+    proof = re.compile(
+        rf"\bif\s*\(\s*(?P<ticket>[A-Za-z_]\w*)\s*==\s*0\s*\)\s*{fail}\s*"
+        rf"if\s*\(\s*!\s*OrderSelect\s*\(\s*(?P=ticket)\s*\)\s*\)\s*{fail}\s*"
+        rf"if\s*\(\s*OrderGetString\s*\(\s*ORDER_SYMBOL\s*\)\s*!=\s*_Symbol\s*\)\s*{fail}\s*"
+        rf"if\s*\(\s*OrderGetInteger\s*\(\s*ORDER_MAGIC\s*\)\s*!=\s*(?P<magic>[A-Za-z_]\w*)\s*\)\s*{fail}\s*"
+        r"long\s+(?P<kind>[A-Za-z_]\w*)\s*=\s*OrderGetInteger\s*\(\s*ORDER_TYPE\s*\)\s*;\s*"
+        rf"if\s*\(\s*(?P=kind)\s*!=\s*ORDER_TYPE_BUY_STOP\s*&&\s*"
+        rf"(?P=kind)\s*!=\s*ORDER_TYPE_SELL_STOP\s*\)\s*{fail}\s*"
+        rf"MqlTradeRequest\s+{request}\s*=\s*\{{\s*\}}\s*;\s*"
+        rf"MqlTradeResult\s+{result}\s*=\s*\{{\s*\}}\s*;\s*"
+        rf"{request}\s*\.\s*action\s*=\s*TRADE_ACTION_REMOVE\s*;\s*"
+        rf"{request}\s*\.\s*order\s*=\s*(?P=ticket)\s*;\s*"
+        rf"{request}\s*\.\s*symbol\s*=\s*_Symbol\s*;\s*"
+        rf"{request}\s*\.\s*magic\s*=\s*(?P=magic)\s*;\s*"
+        r"if\s*\(\s*!\s*$",
+        flags=re.DOTALL,
+    )
+    match = proof.search(code[:send_start])
+    if match is None or send_start - match.start() > 4096:
+        return False
+    if (
+        _mql_brace_depth_at(code, match.start()) != _mql_brace_depth_at(code, send_start)
+        or match.start() in _mql_unbraced_controlled_statement_starts(code)
+        or re.search(r"\belse\s*$", code[:match.start()]) is not None
+        or re.match(rf"\s*\)\s*{fail}", code[send_end:]) is None
+    ):
+        return False
+    # A second use, alias, assignment, or declaration anywhere in this lexical
+    # view makes request identity ambiguous, even if its last action is REMOVE.
+    outside = code[:match.start()] + code[send_end:]
+    if re.search(rf"\b{request}\b", outside):
+        return False
+    if len({request_name, result_name, match.group("ticket"), match.group("magic"), match.group("kind")}) != 5:
+        return False
+    # Extracted reachable bodies lose declaration scope.  Require the original
+    # lexical source, a single by-value ticket helper, and its complete body.
+    # This prevents a local/parameter shadow from turning ownership into a
+    # tautology, and prevents an early/ignored-result success return.
+    source_calls = list(re.finditer(
+        rf"\bOrderSend\s*\(\s*{request}\s*,\s*{result}\s*\)", source_code
+    ))
+    if len(source_calls) != 1:
+        return False
+    source_call = source_calls[0]
+    owner = None
+    for header in re.finditer(
+        r"\bbool\s+[A-Za-z_]\w*\s*\((?P<parameters>[^;{}]{0,500})\)\s*\{",
+        source_code,
+    ):
+        closing = _balanced_close(source_code, header.end() - 1, "{", "}")
+        if closing is not None and header.end() <= source_call.start() < closing:
+            owner = (header, closing)
+            break
+    if owner is None:
+        return False
+    header, closing = owner
+    ticket = re.escape(match.group("ticket"))
+    if re.fullmatch(rf"\s*(?:const\s+)?ulong\s+{ticket}\s*", header.group("parameters")) is None:
+        return False
+    owner_prefix = source_code[header.end():source_call.start()]
+    owner_proof = proof.search(owner_prefix)
+    if owner_proof is None or owner_prefix[:owner_proof.start()].strip():
+        return False
+    success_tail = (
+        rf"\s*\)\s*{fail}\s*return\s*\(\s*{result}\s*\.\s*retcode\s*"
+        r"==\s*TRADE_RETCODE_DONE\s*\)\s*;\s*"
+    )
+    if re.fullmatch(success_tail, source_code[source_call.end():closing]) is None:
+        return False
+    source_outside_owner = source_code[:header.start()] + source_code[closing + 1:]
+    if re.search(rf"\b{request}\b", source_outside_owner):
+        return False
+    magic = re.escape(match.group("magic"))
+    global_code = _compact_ea_global_code(source_code)
+    if not isinstance(global_code, str):
+        return False
+    declarations = list(re.finditer(
+        rf"\binput\s+(?:int|long|ulong)\s+{magic}\s*=\s*(?P<value>[1-9]\d*)\s*;",
+        global_code,
+    ))
+    if len(declarations) != 1 or int(declarations[0].group("value")) > 2_147_483_647:
+        return False
+    declaration = declarations[0]
+    remaining = source_code[:declaration.start()] + source_code[declaration.end():]
+    if (
+        any(match.group("magic") in parameters for parameters in _compact_ea_function_parameters(source_code).values())
+        or re.search(rf"\b(?:bool|int|long|ulong|uint|double|float|string|datetime)\s+[^;{{}}()]{{0,500}}\b{magic}\b\s*[,;=\[]", remaining)
+        or re.search(rf"(?:\+\+|--)\s*{magic}\b|\b{magic}\b\s*(?:\+\+|--|(?:[+\-*/%&|^]|<<|>>)?=(?!=))|&\s*{magic}\b", remaining)
+    ):
+        return False
+    # A second input called ForeignMagic is not ownership proof merely because
+    # it is global.  Bind cancellation to the same configured magic used by the
+    # source's actual opening requests, never a value read from selected order.
+    opening_requests = 0
+    for record in _mql_named_call_records(source_code, ("OrderSend",)):
+        arguments = [str(value).strip() for value in record.get("arguments", [])]
+        if len(arguments) != 2 or re.fullmatch(r"[A-Za-z_]\w*", arguments[0]) is None:
+            return False
+        other_request = re.escape(arguments[0])
+        before = source_code[:int(record["start"])]
+        actions = re.findall(rf"\b{other_request}\s*\.\s*action\s*=(?!=)\s*([^;\r\n]+)", before)
+        if actions and all(action.strip() == "TRADE_ACTION_REMOVE" for action in actions):
+            continue
+        if len(actions) != 1 or actions[0].strip() not in {"TRADE_ACTION_PENDING", "TRADE_ACTION_DEAL"}:
+            return False
+        magics = re.findall(rf"\b{other_request}\s*\.\s*magic\s*=(?!=)\s*([^;\r\n]+)", before)
+        if len(magics) != 1 or magics[0].strip() != match.group("magic"):
+            return False
+        initialized = list(re.finditer(
+            rf"\bMqlTradeRequest\s+(?P<name>{other_request})\s*=\s*\{{\s*\}}\s*;", before
+        ))
+        if len(initialized) != 1:
+            return False
+        declaration_start = initialized[0].start()
+        send_depth = _mql_brace_depth_at(before, len(before))
+        if _mql_brace_depth_at(before, declaration_start) != send_depth:
+            return False
+        controlled = _mql_unbraced_controlled_statement_starts(before)
+        field_writes = list(re.finditer(rf"\b{other_request}\s*\.\s*(?P<field>[A-Za-z_]\w*)\s*=(?!=)", before))
+        for assignment in field_writes:
+            if assignment.group("field") in {"action", "magic"} and (
+                assignment.start() < declaration_start
+                or _mql_brace_depth_at(before, assignment.start()) != send_depth
+                or assignment.start() in controlled
+                or re.search(r"\belse\s*$", before[:assignment.start()])
+            ):
+                return False
+        # A stale .magic write does not survive whole-request assignment,
+        # aliasing or an unknown call. OrderCheck is the sole allowed reader.
+        permitted = [initialized[0].span("name"), *(assignment.span() for assignment in field_writes)]
+        permitted.extend(
+            (int(check["start"]), int(check["end"]))
+            for check in _mql_named_call_records(before, ("OrderCheck",))
+            if list(check.get("arguments") or ())[:1] == [arguments[0]]
+        )
+        if any(
+            not any(start <= reference.start() < end for start, end in permitted)
+            for reference in re.finditer(rf"\b{other_request}\b", before)
+        ):
+            return False
+        opening_requests += 1
+    return opening_requests > 0
+
+
+def _mql_trade_call_records(code: str, *, source_code: str | None = None) -> list[dict[str, object]]:
     """Return bounded argument records for reachable MQL trade-entry calls."""
 
     patterns = (
@@ -2804,9 +3049,19 @@ def _mql_trade_call_records(code: str) -> list[dict[str, object]]:
             if (
                 match.group("name").casefold() == "ordersend"
                 and len(arguments) == 2
-                and _mql5_request_is_position_close(
-                    " ".join(arguments[0].split()),
-                    code[:match.start()],
+                and (
+                    _mql5_request_is_position_close(
+                        " ".join(arguments[0].split()),
+                        code[:match.start()],
+                    )
+                    or _mql5_request_is_scoped_pending_remove(
+                        " ".join(arguments[0].split()),
+                        " ".join(arguments[1].split()),
+                        code,
+                        match.start(),
+                        closing + 1,
+                        source_code if isinstance(source_code, str) else code,
+                    )
                 )
             ):
                 continue
@@ -2972,6 +3227,8 @@ def _compact_display_requirement_findings(
 
 def _compact_ea_trade_invocation_multiplicity_safe(
     functions: dict[str, list[str]],
+    *,
+    source_code: str | None = None,
 ) -> bool:
     """Prove that an opening helper cannot submit more orders than inspected.
 
@@ -2996,7 +3253,7 @@ def _compact_ea_trade_invocation_multiplicity_safe(
         ]
         call_records[function_name] = records
         adjacency[function_name] = {name for name, _position in records}
-        if _mql_trade_call_records(body):
+        if _mql_trade_call_records(body, source_code=source_code):
             direct_trade_functions.add(function_name)
         ranges: list[tuple[int, int]] = []
         for loop in re.finditer(r"\bfor\s*\(", body, flags=re.IGNORECASE):
@@ -3044,7 +3301,7 @@ def _compact_ea_trade_invocation_multiplicity_safe(
     incoming_counts = {name: 0 for name in trade_reaching if name != "ontick"}
     for function_name in reachable:
         body = "\n".join(functions.get(function_name, []))
-        for trade_record in _mql_trade_call_records(body):
+        for trade_record in _mql_trade_call_records(body, source_code=source_code):
             if inside_loop(function_name, int(trade_record.get("start") or 0)):
                 return False
         for called, position in call_records.get(function_name, []):
@@ -3440,6 +3697,8 @@ def _fixed_lot_dependency_matches(
     dependency: str,
     code: str,
     expected: float,
+    *,
+    safe_sizing_functions: set[str] | None = None,
 ) -> bool:
     root = dependency.splitlines()[0].strip() if dependency else ""
     if re.fullmatch(r"-?\d+(?:\.\d+)?", root):
@@ -3453,6 +3712,150 @@ def _fixed_lot_dependency_matches(
     if not wrapper:
         return False
     name = wrapper.group("name")
+    # A brief may require the fixed-lot default AND optional percent-equity
+    # sizing. Prove the exact runtime selector rather than requiring its
+    # resulting volume variable to have a misleading numeric initializer.
+    # Only the direct OnTick form is supported; aliases, wrapper expressions,
+    # conditional declarations and subsequent writes remain fail closed.
+    if safe_sizing_functions:
+        functions = _compact_ea_function_map(code)
+        tick_bodies = (functions or {}).get("ontick", [])
+        if len(tick_bodies) == 1:
+            tick_body = tick_bodies[0]
+            declarations = list(re.finditer(
+                rf"\b(?:double|float)\s+{re.escape(name)}\s*=(?!=)\s*"
+                r"(?P<expression>[^;]+);",
+                tick_body,
+                flags=re.IGNORECASE,
+            ))
+            selector_candidates = [
+                match for match in declarations
+                if "?" in match.group("expression")
+            ]
+            selector_assignments = re.findall(
+                rf"\b{re.escape(name)}\s*=(?!=)\s*[^;]*\?[^;]*;",
+                tick_body,
+                flags=re.IGNORECASE,
+            )
+            if selector_assignments and not selector_candidates:
+                return False
+            if selector_candidates:
+                if len(declarations) != 1 or len(selector_candidates) != 1:
+                    return False
+                declaration = selector_candidates[0]
+                if _mql_brace_depth_at(tick_body, declaration.start()) != 0:
+                    return False
+                if declaration.start() in _mql_unbraced_controlled_statement_starts(tick_body):
+                    return False
+                expression = " ".join(declaration.group("expression").split())
+                # Strip only a balanced outer pair; do not discard a suffix
+                # such as '* 2' or an enclosing call that changes the lot.
+                if expression.startswith("(") and expression.endswith(")"):
+                    depth = 0
+                    outer_pair = True
+                    for index, character in enumerate(expression):
+                        if character == "(":
+                            depth += 1
+                        elif character == ")":
+                            depth -= 1
+                        if depth == 0 and index < len(expression) - 1:
+                            outer_pair = False
+                            break
+                    if outer_pair:
+                        expression = expression[1:-1].strip()
+                selector = re.fullmatch(
+                    r"PositionSizingMode\s*==\s*0\s*\?\s*FixedLot\s*:\s*"
+                    r"(?P<risk>[A-Za-z_]\w*)\s*\((?P<arguments>[^;{}?]+)\)",
+                    expression,
+                )
+                if not selector:
+                    return False
+                risk_name = selector.group("risk")
+                if risk_name.casefold() not in {
+                    item.casefold() for item in safe_sizing_functions
+                }:
+                    return False
+                risk_records = _mql_named_call_records(expression, (risk_name,))
+                if len(risk_records) != 1 or int(risk_records[0]["end"]) != len(expression):
+                    return False
+                if not _numeric_input_matches(code, "FixedLot", expected):
+                    return False
+                if not _numeric_input_matches(code, "PositionSizingMode", 0.0):
+                    return False
+                for condition in _mql_fail_closed_return_conditions(
+                    tick_body[:declaration.start()],
+                    allow_void_return=True,
+                    top_level_only=True,
+                ):
+                    condition_names = set(re.findall(r"\b[A-Za-z_]\w*\b", condition))
+                    if (
+                        "PositionSizingMode" in condition_names
+                        and condition_names.issubset({"PositionSizingMode", "true", "false"})
+                    ):
+                        return False
+                for input_name in ("FixedLot", "PositionSizingMode"):
+                    input_writes = list(re.finditer(
+                        rf"\b{input_name}\s*(?:=(?!=)|[+*/%-]=|\+\+|--)",
+                        code,
+                    ))
+                    if len(input_writes) != 1:
+                        return False
+                root_writes = list(re.finditer(
+                    rf"\b{re.escape(name)}\s*(?:=(?!=)|[+*/%-]=|\+\+|--)",
+                    tick_body,
+                ))
+                root_declarations = re.findall(
+                    rf"\b(?:double|float|int|long|uint|ulong)\s+{re.escape(name)}\b",
+                    tick_body,
+                )
+                if len(root_writes) != 1 or len(root_declarations) != 1:
+                    return False
+                if re.search(
+                    rf"(?:\+\+|--)\s*\b{re.escape(name)}\b|"
+                    rf"\b{re.escape(name)}\s*(?:<<=|>>=|&=|\|=|\^=)",
+                    tick_body,
+                ):
+                    return False
+                dependency_lines = [" ".join(line.split()) for line in dependency.splitlines()]
+                declared_expression = " ".join(declaration.group("expression").split())
+                if len(dependency_lines) < 2 or dependency_lines[1] != declared_expression:
+                    return False
+                # Reject hidden output-reference mutation of the volume.
+                # These two supported calls only read their volume argument.
+                for call in _mql_named_call_records(
+                    tick_body[declaration.end():],
+                    tuple(set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", tick_body))),
+                ):
+                    arguments = []
+                    for item in call.get("arguments", []):
+                        argument = str(item).strip()
+                        # Parentheses preserve an lvalue's output-reference
+                        # semantics: SymbolInfoDouble(..., ((lot))) still
+                        # overwrites the selected entry volume.
+                        while argument.startswith("(") and argument.endswith(")"):
+                            depth = 0
+                            enclosing_pair = True
+                            for index, character in enumerate(argument):
+                                if character == "(":
+                                    depth += 1
+                                elif character == ")":
+                                    depth -= 1
+                                if depth == 0 and index < len(argument) - 1:
+                                    enclosing_pair = False
+                                    break
+                            if not enclosing_pair:
+                                break
+                            argument = argument[1:-1].strip()
+                        arguments.append(argument)
+                    if name not in arguments:
+                        continue
+                    call_name = str(call.get("name") or "").casefold()
+                    if call_name == "mathisvalidnumber" and arguments == [name]:
+                        continue
+                    if call_name == "ordercalcmargin" and len(arguments) == 5 and arguments[2] == name:
+                        continue
+                    return False
+                return True
     binding = re.search(
         rf"\b(?:input|extern|const)?\s*(?:double|float)\s+{re.escape(name)}"
         rf"\s*=\s*(-?\d+(?:\.\d+)?)\s*;",
@@ -4317,7 +4720,7 @@ def analyze_compact_ea_source(
     if not checks["signalNoneSentinel"]:
         findings.append("ea_signal_none_sentinel_invalid")
 
-    trade_calls = _mql_trade_call_records(reachable)
+    trade_calls = _mql_trade_call_records(reachable, source_code=code)
     (
         implemented_order_modes,
         trade_stop_dependencies,
@@ -4487,7 +4890,7 @@ def analyze_compact_ea_source(
         trade_function_names = {
             function_name
             for function_name, helper_bodies in (functions or {}).items()
-            if any(_mql_trade_call_records(body) for body in helper_bodies)
+            if any(_mql_trade_call_records(body, source_code=code) for body in helper_bodies)
         }
         for helper_name, helper_bodies in (functions or {}).items():
             if not any(_stateful_new_bar_guard(body, -1) for body in helper_bodies):
@@ -5582,6 +5985,7 @@ def analyze_compact_ea_source(
                     dependency,
                     code,
                     requested_fixed_lot,
+                    safe_sizing_functions=safe_sizing_functions,
                 )
                 for dependency in volume_dependencies
             )
@@ -5750,7 +6154,7 @@ def analyze_compact_ea_source(
         not repeated_same_mode_call
         and not repeated_entry_loop
         and isinstance(functions, dict)
-        and _compact_ea_trade_invocation_multiplicity_safe(functions)
+        and _compact_ea_trade_invocation_multiplicity_safe(functions, source_code=code)
     )
     checks["positionCapExecution"] = bool(
         not position_cap_required
@@ -6166,6 +6570,8 @@ def analyze_compact_ea_source(
         and not recovery_runtime_evidence
         and not repeated_entry_loop
         and not repeated_same_mode_call
+        and not required_modes
+        and not generic_recovery_requested
         if recovery_prohibited
         else (
             required_modes.issubset(implemented_modes)

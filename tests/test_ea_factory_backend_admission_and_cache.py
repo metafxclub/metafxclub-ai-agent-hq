@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import inspect
+import json
 import tempfile
 import threading
 import time
@@ -291,6 +292,38 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
                 self.bridge._world_sheet_catalog_projection()
                 self.assertEqual(project.call_count, 2)
 
+    def test_state_cache_revalidates_after_artifact_report_and_state_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            reports = runtime / "reports"
+            workspace = runtime / "workspace"
+            reports.mkdir()
+            workspace.mkdir()
+            state_path = runtime / "ea-factory-state.json"
+            state_path.write_text(json.dumps(self.state()), encoding="utf-8")
+            with (
+                mock.patch.object(self.bridge, "RUNTIME_DIR", runtime),
+                mock.patch.object(self.bridge, "RUNTIME_REPORTS_DIR", reports),
+                mock.patch.object(self.bridge, "_ea_factory_build_root", return_value=workspace),
+                mock.patch.object(
+                    self.bridge, "_load_ea_factory_state_uncached",
+                    wraps=self.bridge._load_ea_factory_state_uncached,
+                ) as validate,
+            ):
+                self.bridge._load_ea_factory_state_unlocked()
+                self.bridge._load_ea_factory_state_unlocked()
+                self.assertEqual(validate.call_count, 1)
+                (workspace / "artifact.txt").write_text("new evidence", encoding="utf-8")
+                self.bridge._load_ea_factory_state_unlocked()
+                self.assertEqual(validate.call_count, 2)
+                (reports / "report-new.json").write_text('{"id":"report-new"}', encoding="utf-8")
+                self.bridge._load_ea_factory_state_unlocked()
+                self.assertEqual(validate.call_count, 3)
+                state_path.write_text('{"schemaVersion":"invalid"}', encoding="utf-8")
+                with self.assertRaises(self.bridge.DataIntegrityError):
+                    self.bridge._load_ea_factory_state_unlocked()
+                self.assertEqual(validate.call_count, 4)
+
     def test_read_model_cache_coalesces_concurrent_cold_reads(self) -> None:
         entered = threading.Event()
         release = threading.Event()
@@ -397,7 +430,19 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
             "phase": "running",
             "workStatus": "running",
             "updatedAt": "2026-09-12T00:00:00Z",
-            "lastHeartbeatAt": "2026-09-12T00:00:00Z",
+            "heartbeatAt": "2026-09-12T00:00:00Z",
+            "execution": {
+                "schema": "auto-guarded-execution-v1",
+                "dispatchState": "running",
+                "heartbeatAt": "2026-09-12T00:00:00Z",
+                "startedAt": "2026-09-12T00:00:00Z",
+                "timeoutAt": "2026-09-12T00:10:00Z",
+                "authorizationPayloadDigest": "a" * 64,
+                "processStarted": True,
+                "processTreeTerminated": False,
+                "workerId": "worker-signature",
+                "leaseId": "lease-signature",
+            },
             "reportIds": [],
             "targetId": "right_server_racks",
             "requester": "human",
@@ -416,7 +461,7 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
                 mock.patch.object(
                     self.bridge,
                     "load_missions",
-                    return_value=[copy.deepcopy(row)],
+                    return_value=[row],
                 ),
                 mock.patch.object(
                     self.bridge,
@@ -426,11 +471,16 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
             ):
                 return self.bridge._ea_factory_mission_projection_signature()
 
+        original = copy.deepcopy(mission)
         baseline = signature_for(mission)
+        self.assertEqual(mission, original)
         heartbeat = copy.deepcopy(mission)
         heartbeat["updatedAt"] = "2026-09-12T00:01:00Z"
-        heartbeat["lastHeartbeatAt"] = "2026-09-12T00:01:00Z"
+        heartbeat["heartbeatAt"] = "2026-09-12T00:01:00Z"
+        heartbeat["execution"]["heartbeatAt"] = "2026-09-12T00:01:00Z"
+        heartbeat_before = copy.deepcopy(heartbeat)
         self.assertEqual(signature_for(heartbeat), baseline)
+        self.assertEqual(heartbeat, heartbeat_before)
 
         for field, value in (
             ("status", "completed"),
@@ -442,6 +492,25 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
             changed[field] = value
             with self.subTest(field=field):
                 self.assertNotEqual(signature_for(changed), baseline)
+
+        for field, value in (
+            ("dispatchState", "completed"),
+            ("authorizationPayloadDigest", "b" * 64),
+            ("processStarted", False),
+            ("processTreeTerminated", True),
+            ("workerId", "other-worker"),
+            ("leaseId", "other-lease"),
+            ("startedAt", "2026-09-12T00:00:01Z"),
+            ("timeoutAt", "2026-09-12T00:11:00Z"),
+            ("capabilities", {"sourceWriteAllowed": False}),
+            ("nested", {"heartbeatAt": "must-not-be-ignored"}),
+        ):
+            changed = copy.deepcopy(mission)
+            changed["execution"][field] = value
+            before = copy.deepcopy(changed)
+            with self.subTest(execution_field=field):
+                self.assertNotEqual(signature_for(changed), baseline)
+                self.assertEqual(changed, before)
 
         context_changed = copy.deepcopy(mission)
         context_changed["workflowContext"]["actionId"] = "source_review"
@@ -710,6 +779,99 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
         self.assertEqual(model["busy"]["buildId"], build["id"])
         self.assertEqual(model["busy"]["missionStatus"], "running")
         self.assertNotIn("detail", model["busy"])
+
+    def test_build_projection_reuses_file_evidence_only_within_one_read(self) -> None:
+        stage = self.stage("final_report", None, "completed")
+        build = self.build("ea-build-read-files", [stage])
+        build["oneClickRun"] = {"status": "completed", "currentStageId": "final_report"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder = root / build["id"] / "Reports"
+            folder.mkdir(parents=True)
+            artifact = folder / "final.md"
+            artifact.write_text("Verified final evidence\n", encoding="utf-8")
+            with (
+                mock.patch.object(self.bridge, "_ea_factory_build_root", return_value=root),
+                mock.patch.object(self.bridge, "_ea_factory_terminal_gate", return_value={}),
+            ):
+                descriptor = self.bridge._ea_factory_artifact_descriptor(
+                    build["id"], "Reports/final.md", stage_id="final_report",
+                    report_id="report-read-files", artifact_kind="final_summary_markdown",
+                )
+                self.assertIsInstance(descriptor, dict)
+                build["artifactManifest"] = [descriptor]
+                build["artifactManifestDigest"] = self.bridge._ea_factory_artifact_manifest_digest([descriptor])
+                stage["artifacts"] = [descriptor["fileId"]]
+                with mock.patch.object(
+                    self.bridge, "_ea_factory_revalidated_artifact_manifest",
+                    wraps=self.bridge._ea_factory_revalidated_artifact_manifest,
+                ) as validate:
+                    first = self.bridge._ea_factory_build_read_model(build)
+                    self.assertEqual(validate.call_count, 1)
+                    self.assertEqual(first["files"], first["oneClickRun"]["evidence"])
+                    artifact.write_text("Changed after first read\n", encoding="utf-8")
+                    second = self.bridge._ea_factory_build_read_model(build)
+                    self.assertEqual(validate.call_count, 2)
+                    self.assertEqual(second["files"], [])
+                    self.assertEqual(second["oneClickRun"]["evidence"], [])
+                    with self.assertRaises(self.bridge.DataIntegrityError):
+                        self.bridge._ea_factory_revalidated_artifact_manifest(build)
+
+    def test_sheet_sync_route_returns_durable_receipt_without_factory_projection(self) -> None:
+        handler = object.__new__(self.bridge.BridgeHandler)
+        handler.path = "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync"
+        handler.validate_local_request = mock.Mock()
+        handler.validate_full_agent_mutation_request = mock.Mock()
+        payload = {"configRevision": 7, "idempotencyKey": "sheet-sync-receipt"}
+        handler.read_payload = mock.Mock(return_value=payload)
+        handler.send_result = mock.Mock()
+        receipt = {
+            "ok": True, "kind": "ea_factory_sheet_sync_completed",
+            "mission": {"id": "mission-sync-receipt", "status": "completed"},
+            "report": {"id": "report-sync-receipt", "status": "ready"},
+            "sourceSnapshot": {"status": "ready", "snapshotDigest": "a" * 64},
+            "idempotentReplay": False,
+        }
+        for replay in (False, True):
+            with self.subTest(replay=replay):
+                expected = {**receipt, "idempotentReplay": replay}
+                handler.send_result.reset_mock()
+                with (
+                    mock.patch.object(self.bridge, "sync_ea_factory_google_sheet", return_value=copy.deepcopy(expected)) as sync,
+                    mock.patch.object(self.bridge, "ea_factory_read_model", side_effect=AssertionError("optional read must not block receipt")) as projection,
+                ):
+                    handler.do_POST()
+                sync.assert_called_once_with(payload)
+                projection.assert_not_called()
+                actual = handler.send_result.call_args.args[0]
+                for key, value in expected.items():
+                    self.assertEqual(actual[key], value)
+                self.assertNotIn("eaFactory", actual)
+                self.assertEqual(actual["eaFactoryReadResult"], {
+                    "kind": "ea_factory_refresh_deferred", "status": "deferred",
+                    "refreshEndpoint": "/api/props/right_server_racks/ea-factory",
+                    "readinessConfirmed": False,
+                })
+
+    def test_sheet_sync_route_preserves_integrity_failure(self) -> None:
+        handler = object.__new__(self.bridge.BridgeHandler)
+        handler.path = "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync"
+        handler.validate_local_request = mock.Mock()
+        handler.validate_full_agent_mutation_request = mock.Mock()
+        handler.read_payload = mock.Mock(return_value={})
+        handler.send_result = mock.Mock()
+        handler.send_json_disconnect_safe = mock.Mock()
+        with (
+            mock.patch.object(self.bridge, "sync_ea_factory_google_sheet", side_effect=self.bridge.DataIntegrityError("Invalid Factory evidence")),
+            mock.patch.object(self.bridge, "ea_factory_read_model") as projection,
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            handler.do_POST()
+        projection.assert_not_called()
+        handler.send_result.assert_not_called()
+        actual = handler.send_json_disconnect_safe.call_args
+        self.assertEqual(actual.kwargs["status"], 503)
+        self.assertFalse(actual.args[0]["ok"])
 
     def test_create_busy_rejection_precedes_report_catalog_load(self) -> None:
         active = self.build(

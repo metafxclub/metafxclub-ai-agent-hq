@@ -113,10 +113,16 @@ function createCodexRateModel({ clamp, formatCodexRatePercent }) {
       nestedPolicy.minRemainingPercent,
     );
 
+    const checkedAt = normalizeCodexRateTimestamp(
+      payload.capturedAt || payload.checkedAt || payload.updatedAt || nestedSnapshot?.capturedAt,
+    );
+    const unavailableStatus = ["auth_required", "config_error", "timeout", "missing", "unavailable"].includes(rawStatus)
+      ? rawStatus : "unavailable";
+    const sourceReady = !rawStatus || ["ready", "ok", "available"].includes(rawStatus);
     return {
       status: primary && !invalidQuotaWindow
-        ? (stale ? "stale" : "ready")
-        : (["auth_required", "config_error", "timeout", "missing", "unavailable"].includes(rawStatus) ? rawStatus : "unavailable"),
+        ? (stale ? "stale" : sourceReady && checkedAt ? "ready" : unavailableStatus)
+        : unavailableStatus,
       source: "codex_app_server",
       meter: "codex",
       primary: invalidQuotaWindow ? null : primary,
@@ -124,13 +130,7 @@ function createCodexRateModel({ clamp, formatCodexRatePercent }) {
       quotaWindowsValid: !invalidQuotaWindow,
       limitReached: codexRateLimitWasReached(reachedValue),
       rateReservePercent,
-      checkedAt: normalizeCodexRateTimestamp(
-        payload.capturedAt
-        || payload.checkedAt
-        || payload.updatedAt
-        || nestedSnapshot?.capturedAt
-        || new Date().toISOString(),
-      ),
+      checkedAt,
     };
   }
 
@@ -152,6 +152,13 @@ function createCodexRateModel({ clamp, formatCodexRatePercent }) {
   function codexRateReservePresentation(snapshot, reservePercent) {
     const threshold = normalizeCodexRateReservePercent(reservePercent) ?? 15;
     const remaining = codexRatePolicyRemainingPercent(snapshot);
+    const displayState = getCodexRateDisplayState(snapshot);
+    if (displayState === "stale") {
+      return { tone: "warning", text: `ข้อมูลโควตาเดิม • รอตรวจข้อมูลล่าสุดก่อนยืนยันความพร้อม • เกณฑ์ส่วนกลาง ≥ ${threshold}%` };
+    }
+    if (["unavailable", "loading"].includes(displayState)) {
+      return { tone: "neutral", text: `เกณฑ์ส่วนกลาง ≥ ${threshold}% • ยังยืนยันโควตาล่าสุดไม่ได้` };
+    }
     if (snapshot?.limitReached === true) {
       return { tone: "error", text: `โควตาถึงขีดจำกัด • เกณฑ์ส่วนกลาง ≥ ${threshold}%` };
     }
@@ -173,6 +180,7 @@ function createCodexRateModel({ clamp, formatCodexRatePercent }) {
   function getCodexRateDisplayState(snapshot) {
     if (!snapshot?.primary) return snapshot?.status === "loading" ? "loading" : "unavailable";
     if (snapshot.status === "stale") return "stale";
+    if (snapshot.status !== "ready" || !normalizeCodexRateTimestamp(snapshot.checkedAt)) return "unavailable";
     return getCodexRateSeverity(snapshot);
   }
 

@@ -232,18 +232,79 @@ class AiTradeCouncilDeepAnalysisTests(unittest.TestCase):
         self.assertNotIn("C:\\private", serialized)
 
     def test_insufficient_source_bars_fails_closed(self) -> None:
-        result = self.build(snapshot_model(count=499))
-        self.assertFalse(result["available"])
-        self.assertFalse(result["fresh"])
-        self.assertFalse(result["decisionEligible"])
-        self.assertEqual(result["status"], "insufficient_closed_bars")
-        self.assertEqual(
-            result["reasonCode"],
-            "minimum_500_closed_bars_required",
-        )
-        self.assertEqual(result["sourceBarCount"], 499)
-        self.assertEqual(result["analysisBarCount"], 0)
-        self.assertEqual(result["bars"], [])
+        # Legacy attached charts retain the 240-bar EA Input. Increasing the
+        # requested count is not evidence that MT5 has supplied enough history.
+        for count in (240, 499):
+            with self.subTest(source_bar_count=count):
+                result = self.build(snapshot_model(count=count))
+                self.assertFalse(result["available"])
+                self.assertFalse(result["fresh"])
+                self.assertFalse(result["decisionEligible"])
+                self.assertEqual(result["status"], "insufficient_closed_bars")
+                self.assertEqual(
+                    result["reasonCode"],
+                    "minimum_500_closed_bars_required",
+                )
+                self.assertEqual(result["sourceBarCount"], count)
+                self.assertEqual(result["analysisBarCount"], 0)
+                self.assertEqual(result["bars"], [])
+
+    def test_1000_bar_mt5_history_keeps_exact_latest_closed_candle_and_warmup(self) -> None:
+        model = snapshot_model(count=1000)
+        # Match MT5's finite symbol-digit prices; synthetic trig values carry
+        # more precision than the snapshot wire contract permits.
+        for bar in model["chartSnapshot"]["bars"]:
+            for field in ("open", "high", "low", "close"):
+                bar[field] = round(bar[field], 5)
+        source_before = copy.deepcopy(model)
+        source_bars = model["chartSnapshot"]["bars"]
+        result = self.build(model)
+
+        self.assertTrue(result["available"])
+        self.assertTrue(result["decisionEligible"])
+        self.assertTrue(result["readOnly"])
+        self.assertEqual(result["sourceBarCount"], 1000)
+        self.assertEqual(result["minimumSourceBarCount"], 500)
+        self.assertEqual(result["analysisBarCount"], 300)
+        self.assertEqual(result["warmupBarsUsed"], 700)
+        self.assertEqual(result["bars"], source_bars[-300:])
+        self.assertEqual(result["snapshot"]["snapshotId"], "a" * 64)
+        self.assertEqual(result["snapshot"]["symbol"], "XAUUSD")
+        self.assertEqual(result["snapshot"]["timeframe"], "M5")
+        window = result["analysisWindow"]
+        self.assertTrue(window["closedBarsOnly"])
+        self.assertEqual(window["startTime"], source_bars[-300]["time"])
+        self.assertEqual(window["endTime"], source_bars[-1]["time"])
+        self.assertEqual(window["calculationStartTime"], source_bars[0]["time"])
+
+        # Independent averages show that indicators use historical warmup,
+        # while the displayed decision window stays on the exact source bars.
+        series = result["technicalIndicators"]["series"]
+        self.assertEqual([row["time"] for row in series],
+                         [bar["time"] for bar in source_bars[-300:]])
+        for series_index, source_index in ((0, 700), (-1, 999)):
+            expected_sma200 = sum(
+                bar["close"] for bar in source_bars[source_index - 199:source_index + 1]
+            ) / 200
+            self.assertAlmostEqual(series[series_index]["sma200"], expected_sma200, places=6)
+        self.assertEqual(model, source_before)
+
+    def test_1000_bar_history_does_not_hide_invalid_or_unordered_candles(self) -> None:
+        for corruption in ("duplicate_time", "out_of_order", "invalid_ohlc", "too_many"):
+            with self.subTest(corruption=corruption):
+                model = snapshot_model(count=1001 if corruption == "too_many" else 1000)
+                bars = model["chartSnapshot"]["bars"]
+                if corruption == "duplicate_time":
+                    bars[1]["time"] = bars[0]["time"]
+                elif corruption == "out_of_order":
+                    bars[1], bars[2] = bars[2], bars[1]
+                elif corruption == "invalid_ohlc":
+                    bars[0]["high"] = bars[0]["low"] - 1
+                result = self.build(model)
+                self.assertFalse(result["available"])
+                self.assertFalse(result["decisionEligible"])
+                self.assertEqual(result["reasonCode"], "closed_bar_payload_invalid")
+                self.assertEqual(result["bars"], [])
 
     def test_stale_snapshot_remains_inspectable_but_not_decision_eligible(self) -> None:
         model = snapshot_model(status="stale")

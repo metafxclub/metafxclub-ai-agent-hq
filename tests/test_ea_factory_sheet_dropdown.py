@@ -515,7 +515,7 @@ console.log(JSON.stringify(Object.fromEntries(
 
     def test_import_switches_to_summary_and_renders_every_deep_research_field(self) -> None:
         importer = self.block(
-            "async function importEaFactorySourceRecord",
+            "function eaFactoryGoogleSheetSyncReceipt",
             "async function createEaFactoryBuild",
         )
         summary = self.block(
@@ -525,10 +525,10 @@ console.log(JSON.stringify(Object.fromEntries(
         self.assertIn("selectedSourceId = source.sourceRecordId", importer)
         self.assertIn("importedSourceId = source.sourceRecordId", importer)
         self.assertIn(
-            "await syncEaFactoryGoogleSheet(currentCatalog.configRevision)",
+            "await syncEaFactoryGoogleSheet(intent.configRevision, {",
             importer,
         )
-        self.assertIn("await ensureEaFactoryGoogleSheetCatalog", importer)
+        self.assertIn('ensureEaFactoryGoogleSheetCatalog({ force: true, reason: "import" })', importer)
         self.assertIn("importedRecordDigest = refreshedCatalogRecord.recordDigest", importer)
         self.assertIn("renderEaFactoryImportedSummary", self.block(
             "function renderEaFactoryRecordImport",
@@ -772,9 +772,10 @@ console.log(JSON.stringify({{
         self.assertIn("Number.isInteger(normalizedConfigRevision)", sync)
         self.assertIn("configRevision: normalizedConfigRevision", sync)
         self.assertIn(
-            "syncEaFactoryGoogleSheet(currentCatalog.configRevision)",
+            "syncEaFactoryGoogleSheet(intent.configRevision, {",
             importer,
         )
+        self.assertIn("recordId, configRevision: currentCatalog.configRevision", importer)
         self.assertIn("syncEaFactoryGoogleSheet(hub?.configRevision)", legacy_sync)
 
     def test_activation_supersedes_inflight_catalog_and_forces_open_factory_refresh(self) -> None:
@@ -843,6 +844,7 @@ const state = {{
     }},
   }},
   propReports: {{}},
+  eaFactoryReadModel: {{ payload: null }},
 }};
 const deferred = [];
 function fetchJson(path, options) {{

@@ -326,6 +326,149 @@ class GlobalMetatraderConsumerProjectionTests(unittest.TestCase):
             )
         return json.loads(result.stdout)
 
+    def _write_council_header_selection(self, *, legacy_candidate: str | None = None) -> dict:
+        path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        store = self.bridge.read_json(path, {})
+        store.update({
+            "activePlatform": "mt5",
+            "platformSelections": {
+                "mt4": {
+                    "candidateId": self.mt4_id,
+                    "selectionRevision": 1,
+                    "selectedAt": "2026-09-07T00:00:00Z",
+                },
+                "mt5": {
+                    "candidateId": self.mt5_id,
+                    "selectionRevision": 2,
+                    "selectedAt": "2026-09-07T00:00:01Z",
+                },
+            },
+            "selections": {
+                "left_analytics_console": {
+                    "candidateId": legacy_candidate or self.mt5_id,
+                    "selectionRevision": 4,
+                    "selectedAt": "2026-09-07T00:00:02Z",
+                },
+            },
+        })
+        self.bridge.write_json(path, store)
+        return store
+
+    def test_council_checklist_uses_header_revision_not_legacy_projection(self) -> None:
+        self._write_council_header_selection()
+        path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        before = path.read_bytes()
+        checklist = self._dashboard_checklist("left_analytics_console")
+        hub = self.bridge.global_metatrader_hub_read_model(self.terminal_model)
+        selection = checklist["metatraderSelection"]
+
+        self.assertEqual(selection["selectedCandidate"]["candidateId"], self.mt5_id)
+        self.assertEqual(selection["selectionRevision"], 2)
+        self.assertEqual(selection["selectedAt"], "2026-09-07T00:00:01Z")
+        self.assertTrue(self.bridge._ai_trade_checklist_matches_global_snapshot(checklist, hub))
+        self.assertEqual(path.read_bytes(), before, "A status read must not rewrite the selectors")
+
+    def test_council_checklist_ignores_stale_legacy_candidate_and_discovery_cache(self) -> None:
+        self._write_council_header_selection(legacy_candidate=self.mt4_id)
+        self.terminal_model = {**self.terminal_model, "candidates": []}
+
+        checklist = self._dashboard_checklist("left_analytics_console")
+        hub = self.bridge.global_metatrader_hub_read_model(self.terminal_model)
+
+        self.assertEqual(checklist["metatraderSelection"]["selectedCandidate"]["candidateId"], self.mt5_id)
+        self.assertEqual(checklist["metatraderSelection"]["selectionRevision"], 2)
+        self.assertTrue(self.bridge._ai_trade_checklist_matches_global_snapshot(checklist, hub))
+
+    def test_combined_council_status_preserves_gateway_with_different_legacy_revision(self) -> None:
+        self._write_council_header_selection()
+        checklist = self._dashboard_checklist("left_analytics_console")
+        gateway = {
+            "selectedCandidateId": self.mt5_id,
+            "selectedPlatform": "mt5",
+            "selectionRevision": 2,
+            "connected": True,
+            "status": "execution_guard_blocked",
+            "executionGuardReady": False,
+            "executionGuardReason": "LIVE_COMMISSION_POLICY_UNCONFIRMED",
+        }
+        fake_bridge = {
+            "mode": "Codex Runner Ready",
+            "status": "guarded",
+            "codex": {"status": "ready"},
+        }
+        # Exercise the real combined-status capture and reconciliation; isolate
+        # unrelated mission history, external probes and the final presentation.
+        with ExitStack() as stack:
+            for name in (
+                "load_missions", "load_agent_events", "load_runtime_reports",
+                "load_meeting_records", "search_memory_items",
+            ):
+                stack.enter_context(mock.patch.object(self.bridge, name, return_value=[]))
+            stack.enter_context(mock.patch.object(self.bridge, "bridge_status", return_value=fake_bridge))
+            stack.enter_context(mock.patch.object(
+                self.bridge, "capability_registry",
+                return_value={"bridge": fake_bridge, "capabilities": []},
+            ))
+            stack.enter_context(mock.patch.object(
+                self.bridge, "dashboard_connection_checklist", return_value=checklist,
+            ))
+            gateway_reader = stack.enter_context(mock.patch.object(
+                self.bridge, "mt4_trade_gateway_status_read_model", return_value=gateway,
+            ))
+            stack.enter_context(mock.patch.object(
+                self.bridge, "_ai_trade_council_read_model",
+                side_effect=lambda *_args, **kwargs: {"tradeGateway": kwargs["gateway_snapshot"]},
+            ))
+            stack.enter_context(mock.patch.object(
+                self.bridge, "_auto_trading_status_read_model", return_value={},
+            ))
+            result = self.bridge.ai_trade_council_status_read_model()
+
+        self.assertEqual(gateway_reader.call_count, 1)
+        self.assertEqual(result["tradeGateway"], gateway)
+        self.assertFalse(result["tradeGateway"]["executionGuardReady"])
+
+    def test_council_checklist_never_falls_back_to_legacy_without_active_dual_locks(self) -> None:
+        for missing in ("activePlatform", "mt4", "mt5"):
+            with self.subTest(missing=missing):
+                store = self._write_council_header_selection()
+                if missing == "activePlatform":
+                    store["activePlatform"] = None
+                else:
+                    del store["platformSelections"][missing]
+                self.bridge.write_json(
+                    self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME, store
+                )
+
+                selection = self._dashboard_checklist("left_analytics_console")["metatraderSelection"]
+
+                self.assertIsNone(selection["selectedCandidate"])
+                self.assertIsNone(selection["selectionRevision"])
+                self.assertEqual(selection["configurationStatus"], "not_configured")
+
+    def test_council_checklist_still_rejects_real_header_generation_changes(self) -> None:
+        for change in ("revision", "candidate"):
+            with self.subTest(change=change):
+                store = self._write_council_header_selection()
+                checklist = self._dashboard_checklist("left_analytics_console")
+                if change == "revision":
+                    store["platformSelections"]["mt5"]["selectionRevision"] = 3
+                else:
+                    store["activePlatform"] = "mt4"
+                self.bridge.write_json(
+                    self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME, store
+                )
+                changed_hub = self.bridge.global_metatrader_hub_read_model(self.terminal_model)
+
+                self.assertFalse(
+                    self.bridge._ai_trade_checklist_matches_global_snapshot(checklist, changed_hub)
+                )
+                closed_checklist, closed_hub = self.bridge._fail_closed_ai_trade_selection_snapshots(
+                    checklist, changed_hub
+                )
+                self.assertIsNone(closed_checklist["metatraderSelection"]["selectedCandidate"])
+                self.assertIsNone(closed_hub["selectedPlatform"])
+
     def test_dual_locks_with_mt4_active_reach_all_three_consumers(self) -> None:
         with self._selection_action_patches(), mock.patch.object(
             self.bridge,

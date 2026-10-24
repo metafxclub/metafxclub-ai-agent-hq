@@ -28,6 +28,8 @@ AUTOMATION_MODES = {
 }
 PROCEDURE_KINDS = {"custom_plugin_skill", "backend_procedure"}
 REVIEWED_EVIDENCE_KINDS = {
+    "locked_price_snapshot",
+    "28_pair_explanations",
     "28_pair_rows",
     "acceptance_criteria",
     "adapter_status_truth",
@@ -82,6 +84,8 @@ REVIEWED_COMPLETION_EVIDENCE_KINDS = {
     "zero_compile_errors",
 }
 EVIDENCE_OUTPUT_ANY = {
+    "locked_price_snapshot": {"fxTrendAnalysis"},
+    "28_pair_explanations": {"fxTrendAnalysis"},
     "28_pair_rows": {"pairBias"},
     "acceptance_criteria": {"acceptanceCriteria"},
     "backend_observed_at": {"checkedAt", "backendObservedAt"},
@@ -461,11 +465,29 @@ def _validated_payload(raw: Any) -> dict[str, Any]:
                 raise EquipmentWorkflowContractError(f"invalid_schedule_actions:{prop_id}")
             if direct_backend_handler:
                 direct_endpoints = equipment_profile.get("directEndpoints")
+                # The FX cube retains its direct 00/12 news service while a
+                # separately bounded daily Mission explains locked prices.
+                # This exception cannot turn another direct service into an
+                # arbitrary agent action or change the news handler/endpoints.
+                hybrid_fx = bool(
+                    prop_id == "left_signal_cube"
+                    and equipment_profile.get("serviceMode") == "deterministic_price_snapshot_and_guarded_codex_with_direct_news"
+                    and equipment_profile.get("ownerAgentId") == "codex_mcp_operator"
+                    and equipment_profile.get("allowedActionIds") == ["analyze_fx28_trends"]
+                    and direct_backend_handler == "news_bias_direct_refresh"
+                    and default_times == ["00:00", "12:00"]
+                    and direct_endpoints == {"refresh": "/api/props/left_signal_cube/news/refresh", "schedule": "/api/props/left_signal_cube/news/schedule"}
+                    and isinstance(actions.get("analyze_fx28_trends"), dict)
+                    and actions["analyze_fx28_trends"].get("pluginSkillId") == "backend.fx28-trend-daily-v1"
+                    and actions["analyze_fx28_trends"].get("automationMode") == "scheduled_read_only"
+                    and actions["analyze_fx28_trends"].get("outputFields") == ["fxTrendAnalysis"]
+                    and set(actions["analyze_fx28_trends"].get("evidenceRequired") or []) == {"locked_price_snapshot", "28_pair_explanations"}
+                )
                 if (
-                    equipment_profile.get("serviceMode")
+                    not hybrid_fx and (equipment_profile.get("serviceMode")
                     != "deterministic_backend_direct"
                     or equipment_profile.get("ownerAgentId") is not None
-                    or equipment_profile.get("allowedActionIds") != []
+                    or equipment_profile.get("allowedActionIds") != [])
                     or not isinstance(direct_endpoints, dict)
                     or not all(
                         str(direct_endpoints.get(key) or "").startswith(

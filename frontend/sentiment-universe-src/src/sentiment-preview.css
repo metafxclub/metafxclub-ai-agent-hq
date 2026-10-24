@@ -1,0 +1,6 @@
+.sentiment-preview{position:relative;width:100%;height:250px;min-height:190px;isolation:isolate;overflow:hidden;contain:layout paint;pointer-events:none}
+.sentiment-preview>canvas{display:block;width:100%;height:100%}
+.sentiment-preview-fallback{display:none;position:absolute;inset:0;align-items:center;justify-content:center;color:#9aaec6;font-size:12px;text-align:center}
+.sentiment-preview[data-ready="false"] .sentiment-preview-fallback{display:flex}
+@media(max-height:800px) and (min-width:1024px){.sentiment-preview{height:210px}}
+@media(max-width:700px){.sentiment-preview{height:230px}}

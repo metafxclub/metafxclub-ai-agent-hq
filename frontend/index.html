@@ -733,14 +733,15 @@
                       aria-disabled="true"
                       aria-describedby="modalAgentFullAccessHelp"
                     >Full Access · Locked</button>
-                    <small id="modalAgentFullAccessHelp">รุ่นนี้เปิดได้เฉพาะ Chat • Workspace, Computer Use, MCP/Plugin และ Full Access ยังล็อกโดย Backend</small>
+                    <small id="modalAgentFullAccessHelp">เลือกสิทธิ์สำหรับเธรดนี้; เครื่องมือเสริมแสดงสถานะตามการเชื่อมต่อจริง</small>
                   </div>
                 </div>
-                <section class="agent-runtime-capability-matrix" aria-labelledby="modalAgentCapabilityMatrixHeading">
+                <details class="agent-runtime-capability-matrix" aria-labelledby="modalAgentCapabilityMatrixHeading">
+                  <summary>รายละเอียดสิทธิ์และความพร้อม</summary>
                   <header>
                     <div>
                       <strong id="modalAgentCapabilityMatrixHeading">ความสามารถตามที่ Backend ยืนยัน</strong>
-                      <small>พร้อม = ใช้งานได้จริงในเธรดนี้ • ล็อก = ไม่มีการเรียก Tool</small>
+                      <small>พร้อม = Backend รองรับโหมดนี้ • สิทธิ์ขึ้นกับโหมดที่คุณเลือก</small>
                     </div>
                   </header>
                   <div id="modalAgentCapabilityMatrix" role="list" aria-live="polite"></div>
@@ -748,7 +749,7 @@
                     <strong id="modalAgentLockedReason">กำลังตรวจสอบเหตุผลที่ Full Access ยังล็อก</strong>
                     <span id="modalAgentNextAction">รอข้อมูลความพร้อมจาก Backend</span>
                   </div>
-                </section>
+                </details>
                 <div class="agent-runtime-readiness" id="modalAgentRuntimeReadiness" aria-label="สถานะความพร้อมที่ Backend ยืนยัน">
                   <span id="modalAgentRuntimeBadge" data-state="unknown">Runtime: ยังไม่ยืนยัน</span>
                   <span id="modalAgentWorkspaceBadge" data-state="locked">Workspace: ล็อก</span>
@@ -1281,7 +1282,7 @@
               </label>
               <div class="agent-attachment-composer" id="modalAgentAttachmentComposer">
                 <input id="modalAgentAttachmentInput" type="file" multiple hidden>
-                <button class="modal-action" id="modalAgentAttachButton" type="button" aria-describedby="modalAgentAttachmentPolicy">แนบรูป</button>
+                <button class="modal-action" id="modalAgentAttachButton" type="button" aria-describedby="modalAgentAttachmentPolicy">เพิ่มไฟล์ / Add file</button>
                 <span id="modalAgentAttachmentPolicy">รอ Backend ยืนยันชนิดและขนาดไฟล์ที่รองรับ</span>
               </div>
               <div class="agent-attachment-drafts" id="modalAgentAttachmentDrafts" role="list" aria-label="รูปและไฟล์ที่รอส่ง" hidden></div>

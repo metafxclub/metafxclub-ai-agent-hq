@@ -6497,7 +6497,13 @@ void OnTick() {{
             def is_alive():
                 return False
 
-        owned_mission = {"id": "mission-eaf-owned"}
+        owned_mission = {"id": "mission-eaf-owned", "status": "running", "attemptCount": 1,
+                         "execution": {"processStarted": True}}
+
+        def persist_cancellation(*args, **kwargs):
+            owned_mission.update(status="blocked", errorCode="ea_factory_cancelled_by_operator")
+            owned_mission["execution"].update(dispatchState="blocked", automaticRetry=False)
+            return {"missionId": owned_mission["id"], "persisted": True, "previousStatus": "running"}
         self.bridge.EA_FACTORY_ONE_CLICK_THREADS[build["id"]] = StoppedCoordinator()
         self.bridge.EA_FACTORY_ONE_CLICK_CANCEL_EVENTS[build["id"]] = cancel_event
         try:
@@ -6508,7 +6514,7 @@ void OnTick() {{
                     return_value=state,
                 ),
                 mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked"),
-                mock.patch.object(self.bridge, "load_missions", return_value=[]),
+                mock.patch.object(self.bridge, "load_missions", return_value=[owned_mission]),
                 mock.patch.object(
                     self.bridge,
                     "_ea_factory_active_stage_mission_for_cancel",
@@ -6517,11 +6523,7 @@ void OnTick() {{
                 mock.patch.object(
                     self.bridge,
                     "_ea_factory_cancel_owned_mission",
-                    return_value={
-                        "missionId": owned_mission["id"],
-                        "persisted": True,
-                        "previousStatus": "running",
-                    },
+                    side_effect=persist_cancellation,
                 ) as cancel_mission,
                 mock.patch.object(
                     self.bridge,

@@ -703,7 +703,7 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
         script = "\n".join([
             "const PROP_REPORT_FETCH_TIMEOUT_MS=1000; const EA_FACTORY_PROP_ID='right_server_racks';",
             "const propReportInFlight=new Map(); let eaFactoryReadModelInFlight=null;",
-            "const state={propReportLoadState:{},propReports:{},propReportLoadedAt:{},panelObject:null,eaFactoryReadModel:{inFlight:false,lastLoadedAt:0,payload:null},modal:{open:false,id:null}};",
+            "const state={propReportLoadState:{},propReports:{},propReportLoadedAt:{},panelObject:null,eaFactoryReadModel:{inFlight:false,lastLoadedAt:0,payload:null},modal:{open:false,id:null,eaFactory:{inFlight:false,stageId:''}}};",
             "let propCalls=0; let factoryCalls=0; let resolveProp; let resolveFactory;",
             "function renderOperationalSidebars(){} function selectObject(){} function setEaFactoryActionState(){}",
             "function safeDashboardDisplayText(value,fallback=''){return String(value||fallback);}",

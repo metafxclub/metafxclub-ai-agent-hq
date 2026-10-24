@@ -1547,6 +1547,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 "stageId": "generate_source",
                 "idempotencyKey": receipt["advanceIdempotencyKey"],
             },
+            include_read_model=True,
         )
         write_state.assert_called_once_with(state)
         audit.assert_called_once()

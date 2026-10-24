@@ -1,0 +1,160 @@
+{
+  "request": {
+    "recordId": "receipt-system-001",
+    "sourceRecordId": "ea-source-2b6c682ef30c2c0fdb9e7cce",
+    "recordDigest": "9588c3c3492caa8e421ac57052382aa4041b23653615909ffb60ce1275e08411",
+    "catalogDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "snapshotDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "configRevision": 7,
+    "platform": "mt5",
+    "artifactKind": "expert_advisor",
+    "brief": "Compile and test only after independent stage admission.",
+    "idempotencyKey": "create-durable-receipt"
+  },
+  "sourceRecordDigest": "9588c3c3492caa8e421ac57052382aa4041b23653615909ffb60ce1275e08411",
+  "status": 200,
+  "created": {
+    "ok": true,
+    "kind": "ea_factory_build_created",
+    "mission": {
+      "id": "mission-create-receipt",
+      "title": "Untitled mission",
+      "detail": "",
+      "detailTruncated": false,
+      "detailLimitChars": 8000,
+      "owner": "mission_archivist",
+      "requester": "human",
+      "parentMissionId": null,
+      "subtaskIds": [],
+      "toolId": "ea_factory_strategy_spec",
+      "targetId": "right_server_racks",
+      "status": "completed",
+      "executionMode": "manual_guarded",
+      "autoEligible": false,
+      "dispatchState": null,
+      "webSearchEnabled": false,
+      "webSearchMode": "disabled",
+      "webSearchUsed": false,
+      "webSearchEvidenceVerified": false,
+      "nextAttemptAt": null,
+      "runnerStatus": null,
+      "workStatus": null,
+      "blockedCapability": null,
+      "reasonCode": null,
+      "blocker": null,
+      "evidence": [],
+      "requiresHumanApproval": false,
+      "automaticPolicy": {
+        "mode": "manual_guarded",
+        "decision": "manual",
+        "reason": "operator_mode_manual",
+        "version": null,
+        "humanApprovalRequired": false
+      },
+      "startedAt": null,
+      "heartbeatAt": null,
+      "archivedFromStatus": null,
+      "archivedSuccessful": false,
+      "phase": "",
+      "risk": "low",
+      "modelTier": "",
+      "reportType": "",
+      "budget": {},
+      "workflowContext": null,
+      "agentTransfer": null,
+      "approval": {
+        "required": false,
+        "state": "not_required",
+        "requiredActors": [],
+        "expiresAt": null,
+        "consumedAt": null
+      },
+      "readyToExecute": false,
+      "delegation": {
+        "state": "",
+        "mode": "",
+        "snapshotId": null,
+        "subtaskCount": 0,
+        "subtaskStatusCounts": {},
+        "summaryTargetId": null,
+        "realToolExecuted": false,
+        "delegatedAt": null,
+        "lastAggregatedAt": null,
+        "finalReportId": null
+      },
+      "localResult": null,
+      "workflowOutputContract": null,
+      "semanticRepair": null,
+      "result": "",
+      "reportIds": [
+        "report-create-receipt"
+      ],
+      "attemptCount": 0,
+      "createdAt": null,
+      "updatedAt": null,
+      "completedAt": null
+    },
+    "build": {
+      "id": "ea-build-durable-receipt",
+      "sourceRecordId": "ea-source-2b6c682ef30c2c0fdb9e7cce",
+      "sourceRecordDigest": "9588c3c3492caa8e421ac57052382aa4041b23653615909ffb60ce1275e08411",
+      "platform": "mt5",
+      "artifactKind": "expert_advisor",
+      "brief": "Compile and test only after independent stage admission.",
+      "createRequestDigest": "a0013bf00d09fc791ce8d149f9bfc4c74b1ef26a015479d41aa1fe49bb4d4aac",
+      "createdAt": "2026-10-18T05:14:23.391426+00:00",
+      "updatedAt": "2026-10-18T05:14:23.391426+00:00",
+      "createSheetBinding": {
+        "recordId": "receipt-system-001",
+        "sourceRecordId": "ea-source-2b6c682ef30c2c0fdb9e7cce",
+        "recordDigest": "9588c3c3492caa8e421ac57052382aa4041b23653615909ffb60ce1275e08411",
+        "catalogDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "snapshotDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "configRevision": 7
+      }
+    },
+    "requestIdempotencyKey": "create-durable-receipt",
+    "createRequestDigest": "a0013bf00d09fc791ce8d149f9bfc4c74b1ef26a015479d41aa1fe49bb4d4aac",
+    "idempotentReplay": false,
+    "eaFactoryReadResult": {
+      "kind": "ea_factory_refresh_deferred",
+      "status": "deferred",
+      "refreshEndpoint": "/api/props/right_server_racks/ea-factory",
+      "readinessConfirmed": false
+    }
+  },
+  "replayStatus": 200,
+  "replayed": {
+    "ok": true,
+    "kind": "ea_factory_build_replayed",
+    "mission": null,
+    "build": {
+      "id": "ea-build-durable-receipt",
+      "sourceRecordId": "ea-source-2b6c682ef30c2c0fdb9e7cce",
+      "sourceRecordDigest": "9588c3c3492caa8e421ac57052382aa4041b23653615909ffb60ce1275e08411",
+      "platform": "mt5",
+      "artifactKind": "expert_advisor",
+      "brief": "Compile and test only after independent stage admission.",
+      "createRequestDigest": "a0013bf00d09fc791ce8d149f9bfc4c74b1ef26a015479d41aa1fe49bb4d4aac",
+      "createdAt": "2026-10-18T05:14:23.391426+00:00",
+      "updatedAt": "2026-10-18T05:14:23.391426+00:00",
+      "createSheetBinding": {
+        "recordId": "receipt-system-001",
+        "sourceRecordId": "ea-source-2b6c682ef30c2c0fdb9e7cce",
+        "recordDigest": "9588c3c3492caa8e421ac57052382aa4041b23653615909ffb60ce1275e08411",
+        "catalogDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "snapshotDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "configRevision": 7
+      }
+    },
+    "requestIdempotencyKey": "create-durable-receipt",
+    "createRequestDigest": "a0013bf00d09fc791ce8d149f9bfc4c74b1ef26a015479d41aa1fe49bb4d4aac",
+    "idempotentReplay": true,
+    "eaFactoryReadResult": {
+      "kind": "ea_factory_refresh_deferred",
+      "status": "deferred",
+      "refreshEndpoint": "/api/props/right_server_racks/ea-factory",
+      "readinessConfirmed": false
+    }
+  }
+}

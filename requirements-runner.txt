@@ -23,3 +23,21 @@ typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
 tzdata==2026.3 \
     --hash=sha256:dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931
+
+# FX28 read-only MT5 data adapter; official Windows x64 wheels, verified 2026-10-23.
+MetaTrader5==5.0.6231; sys_platform == "win32" \
+    --hash=sha256:83221f52378c1cbdbc5f841f100280ff40fa42d4193af5c0e65873394bca0a98 \
+    --hash=sha256:1e0fb5e43437f426be3e5aef614f6798a918377db4cdb380593a66d1908f918d \
+    --hash=sha256:b94b1f8f52087ae36dfac5f352a96f5d04fe308704d9515f82cf5d1470bc31d4 \
+    --hash=sha256:3a8c8349ce691a4ef05e314afc034ad82f4dbb19415efc7442af5ea075d5e797 \
+    --hash=sha256:9a63f026072479298be0d0cbc1a878d4f659aff2e18280a4128843dbb425841b
+numpy==2.3.5; sys_platform == "win32" and python_version >= "3.11" \
+    --hash=sha256:a414504bef8945eae5f2d7cb7be2d4af77c5d1cb5e20b296c2c25b61dff2900c \
+    --hash=sha256:86945f2ee6d10cdfd67bcb4069c1662dd711f7e2a4343db5cecec06b87cf31aa \
+    --hash=sha256:00dc4e846108a382c5869e77c6ed514394bdeb3403461d25a829711041217d5b \
+    --hash=sha256:e6a0bc88393d65807d751a614207b7129a310ca4fe76a74e5c7da5fa5671417e
+numpy==2.2.6; sys_platform == "win32" and python_version < "3.11" \
+    --hash=sha256:f0fd6321b839904e15c46e0d257fdd101dd7f530fe03fd6359c1ea63738703f3
+
+# Agent document text extraction; official PyPI wheel.
+pypdf==6.21.2 --hash=sha256:1d44d1a3a200f25062adff0085b02040e4646431ac2ccac22e42679e91466084

@@ -1,0 +1,17 @@
+/* FX equipment only. No styles apply to council, orders, agents or other equipment. */
+#gameModal.sentiment-universe-modal .game-modal-body{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);height:100%;min-height:0;overflow:hidden}
+#gameModal.sentiment-universe-modal #modalPortraitPanel,
+#gameModal.sentiment-universe-modal .modal-controls-stack,
+#gameModal.sentiment-universe-modal .dialogue-box,
+#gameModal.sentiment-universe-modal .workflow-command-deck,
+#gameModal.sentiment-universe-modal #workflowActionStatus,
+#gameModal.sentiment-universe-modal #workflowResultsPanel{display:none!important}
+#gameModal.sentiment-universe-modal .modal-content-panel{display:flex;flex-direction:column;padding:0;min-width:0;min-height:0;height:100%;overflow:hidden}
+#gameModal.sentiment-universe-modal #modalDashboardPanel{flex:1;min-height:0;height:100%;overflow:hidden}
+#gameModal.sentiment-universe-modal #modalWorkflowDashboardWorkspace{display:flex;flex-direction:column;gap:0;padding:0;min-height:0;height:100%;container-type:normal}
+#gameModal.sentiment-universe-modal .workflow-dashboard-scroll{display:flex;flex-direction:column;flex:1;gap:0;padding:0;min-height:0;overflow:hidden}
+#gameModal.sentiment-universe-modal #workflowDashboardContent{display:block;flex:1;min-height:0;height:100%;padding:0;border:0;border-radius:0;overflow:hidden}
+#gameModal.sentiment-universe-modal .hq-sentiment-universe-host{display:block;width:100%;height:100%;min-height:0;min-width:0;background:#020a12}
+#gameModal.sentiment-universe-modal .hq-sentiment-universe-host>p{padding:24px;color:#b9d3e3}
+#gameModal.sentiment-universe-modal .hq-sentiment-universe-host>a,
+#gameModal.sentiment-universe-modal .hq-sentiment-universe-host>button{display:inline-block;margin:8px 12px;padding:10px 15px;border:1px solid #31556d;border-radius:6px;color:#6ce7e4}

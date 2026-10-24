@@ -58,7 +58,7 @@ class TradeGatewayCrossPlatformContractTests(unittest.TestCase):
         cls.mt5 = strip_mql_comments(MT5_SOURCE_PATH.read_text(encoding="utf-8"))
         cls.bridge = BRIDGE_SOURCE_PATH.read_text(encoding="utf-8")
 
-    def test_account_portfolio_policy_has_identical_cross_platform_semantics(self) -> None:
+    def test_account_portfolio_policy_distinguishes_mt5_cost_basis_from_legacy_mt4(self) -> None:
         expected = [
             "schema",
             "managedMagicNumbers",
@@ -77,7 +77,9 @@ class TradeGatewayCrossPlatformContractTests(unittest.TestCase):
             "maxAccountEquityDrawdownPercent",
         ]
         self.assertEqual(canonical_policy_fields(self.mt4), expected)
-        self.assertEqual(canonical_policy_fields(self.mt5), expected)
+        mt5_expected = [field for field in expected if field != "commissionFreeAccountConfirmed"]
+        mt5_expected.insert(mt5_expected.index("estimatedCommissionPerLot"), "riskCostBasis")
+        self.assertEqual(canonical_policy_fields(self.mt5), mt5_expected)
         for platform, source in (("MT4", self.mt4), ("MT5", self.mt5)):
             body = function_body(source, "BuildPortfolioPolicyCanonical")
             with self.subTest(platform=platform):
@@ -88,14 +90,19 @@ class TradeGatewayCrossPlatformContractTests(unittest.TestCase):
                     "DoubleToString(EffectiveEstimatedCommissionPerLot(), 8)",
                     body,
                 )
-                self.assertIn("CommissionFreeAccountConfirmed", body)
+                if platform == "MT4":
+                    self.assertIn("CommissionFreeAccountConfirmed", body)
+                    self.assertNotIn("RiskCostBasisName()", body)
+                else:
+                    self.assertNotIn("CommissionFreeAccountConfirmed", body)
+                    self.assertIn("RiskCostBasisName()", body)
+                    self.assertIn('"price_and_slippage_excluding_commission"', source)
 
     def test_live_commission_and_symbol_policy_are_explicit_and_fail_closed(self) -> None:
         for platform, source, chart_symbol in (
             ("MT4", self.mt4, "Symbol()"),
             ("MT5", self.mt5, "_Symbol"),
         ):
-            commission = function_body(source, "LiveCommissionPolicyConfirmed")
             exact_symbol = function_body(source, "LiveSymbolExactAllowlistConfirmed")
             configuration = function_body(
                 source,
@@ -108,15 +115,20 @@ class TradeGatewayCrossPlatformContractTests(unittest.TestCase):
                     "input bool CommissionFreeAccountConfirmed = false;",
                     source,
                 )
-                self.assertIn("NormalizeDouble(EstimatedCommissionPerLot, 8)", source)
-                self.assertIn(
-                    "EffectiveEstimatedCommissionPerLot() >= 0.00000001",
-                    commission,
-                )
-                self.assertIn("CommissionFreeAccountConfirmed", commission)
-                self.assertIn("GatewayMode == GATEWAY_LIVE", configuration)
-                self.assertIn("!LiveCommissionPolicyConfirmed()", configuration)
-                self.assertIn('"LIVE_COMMISSION_POLICY_UNCONFIRMED"', configuration)
+                if platform == "MT4":
+                    commission = function_body(source, "LiveCommissionPolicyConfirmed")
+                    self.assertIn("NormalizeDouble(EstimatedCommissionPerLot, 8)", source)
+                    self.assertIn("EffectiveEstimatedCommissionPerLot() >= 0.00000001", commission)
+                    self.assertIn("CommissionFreeAccountConfirmed", commission)
+                    self.assertIn("GatewayMode == GATEWAY_LIVE", configuration)
+                    self.assertIn("!LiveCommissionPolicyConfirmed()", configuration)
+                    self.assertIn('"LIVE_COMMISSION_POLICY_UNCONFIRMED"', configuration)
+                else:
+                    self.assertNotIn("LiveCommissionPolicyConfirmed", source)
+                    self.assertEqual(function_body(source, "EffectiveEstimatedCommissionPerLot").strip(), "return 0.0;")
+                    self.assertNotIn("EstimatedCommissionPerLot", configuration)
+                    self.assertNotIn("CommissionFreeAccountConfirmed", configuration)
+                    self.assertIn(r'\"riskCostBasis\"', status)
                 self.assertIn(f"CsvContains(AllowedSymbols, {chart_symbol})", exact_symbol)
                 self.assertIn("GatewayMode == GATEWAY_LIVE", runtime)
                 self.assertIn("CsvContains(AllowedSymbols, command.symbol)", runtime)

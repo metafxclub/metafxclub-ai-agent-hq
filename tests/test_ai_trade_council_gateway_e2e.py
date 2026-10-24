@@ -123,6 +123,7 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             "id": "mission-safe-e2e-demo-simulation",
             "analysisContext": {
                 "kind": "ai_trade_council_parent",
+                "automation": {"tradeCommandAllowed": True},
                 "snapshotId": snapshot_id,
                 "snapshotObservedAt": now.isoformat(),
                 "referencePrice": 2400.0,
@@ -399,6 +400,69 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             self.bridge._mt4_trade_gateway_instance().list_commands(limit=10),
             [],
         )
+
+    def test_successful_manual_consensus_never_publishes_a_command(self) -> None:
+        for automation in (None, "invalid", []):
+            with self.subTest(automation=automation):
+                parent, children = self.council_round()
+                if automation is None:
+                    parent["analysisContext"].pop("automation")
+                else:
+                    parent["analysisContext"]["automation"] = automation
+                consensus = self.bridge.ai_trade_council_consensus(parent, children)
+                self.assertTrue(consensus["ready"])
+                self.assertTrue(consensus["qualityGate"]["passed"])
+                self.assertEqual(consensus["decision"], "BUY")
+                self.bridge.mt4_trade_gateway_status_read_model = self.gateway_status
+
+                result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                    parent,
+                    consensus,
+                )
+
+                self.assertEqual(result["status"], "no_trade")
+                self.assertEqual(result["reasonCode"], "manual_analysis_only")
+                self.assertFalse(result["commandPublished"])
+                self.assertEqual(
+                    self.bridge._mt4_trade_gateway_instance().list_commands(limit=10),
+                    [],
+                )
+                self.assertEqual(
+                    list(self.bridge.METATRADER_COMMON_FILES_DIR.rglob("command.json")),
+                    [],
+                )
+
+    def test_automatic_consensus_requires_explicit_true_dispatch_permission(self) -> None:
+        for automation in ({}, {"tradeCommandAllowed": None},
+                           {"tradeCommandAllowed": False}, {"tradeCommandAllowed": 1},
+                           {"tradeCommandAllowed": "true"}):
+            with self.subTest(automation=automation):
+                parent, children = self.council_round()
+                parent["analysisContext"]["automation"] = automation
+                consensus = self.bridge.ai_trade_council_consensus(parent, children)
+                self.assertTrue(consensus["ready"])
+                self.assertTrue(consensus["qualityGate"]["passed"])
+                self.assertEqual(consensus["decision"], "BUY")
+                self.bridge.mt4_trade_gateway_status_read_model = self.gateway_status
+
+                result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                    parent,
+                    consensus,
+                )
+
+                self.assertEqual(result["status"], "no_trade")
+                self.assertEqual(
+                    result["reasonCode"], "audit_only_backlog_never_dispatches"
+                )
+                self.assertFalse(result["commandPublished"])
+                self.assertEqual(
+                    self.bridge._mt4_trade_gateway_instance().list_commands(limit=10),
+                    [],
+                )
+                self.assertEqual(
+                    list(self.bridge.METATRADER_COMMON_FILES_DIR.rglob("command.json")),
+                    [],
+                )
 
     def test_vote_to_signed_command_to_verified_ack_and_fill_simulation(self) -> None:
         parent, children = self.council_round()

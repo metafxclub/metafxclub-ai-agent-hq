@@ -18,7 +18,7 @@
     "POST /api/agent-runtime/threads": "Create one durable Agent thread from exactly agentId, title, model, reasoning and mode.",
     "GET /api/agent-runtime/threads/{threadId}": "Read one bounded thread and its sanitized event timeline.",
     "POST /api/agent-runtime/threads/{threadId}/settings": "Update the allowlisted model, reasoning level or capability mode while no turn is running; the exact current expectedRevision is required.",
-    "POST /api/agent-runtime/threads/{threadId}/attachments": "Upload one bounded image or file as strict base64 into the backend-owned immutable store. The browser never supplies or receives a filesystem path; only validated images may enter Chat turns.",
+    "POST /api/agent-runtime/threads/{threadId}/attachments": "Upload one bounded image or file as strict base64 into the backend-owned immutable store. The browser never supplies or receives a filesystem path. Images use native vision input; source and document text is actually extracted and validated before admission, with explicit size and extraction limitations.",
     "GET /api/agent-runtime/threads/{threadId}/artifacts/{artifactId}": "Return one thread-bound opaque artifact with no-store and nosniff headers. Cross-thread IDs return not found.",
     "POST /api/agent-runtime/threads/{threadId}/turn": "Queue one idempotent user turn with optional opaque attachmentIds. Attachment IDs and hashes are part of the persisted turn request. Every real execution must be bound to a Mission, owner Agent, Audit events and a Report.",
     "POST /api/agent-runtime/threads/{threadId}/interrupt": "Request interruption of the exact active Codex turn and persist the request/result without inventing completion.",
@@ -32,11 +32,11 @@
       "externalEffects": false
     },
     "workspace": {
-      "description": "Workspace is visible but remains fail-closed until a one-shot user approval broker and UI bind every write or escalation.",
-      "sandbox": "read-only-until-approved",
+      "description": "An explicit user mode selection authorizes ordinary file and command work in one isolated per-thread workspace. Escalations retain one-shot approvals.",
+      "sandbox": "workspace-write",
       "defaultReady": false,
       "approvalRequired": true,
-      "approvalPolicy": "explicit-once-required",
+      "approvalPolicy": "on-request",
       "network": false,
       "externalApps": false,
       "dangerFullAccess": false
@@ -48,7 +48,10 @@
       "silentApprovalAllowed": false
     },
     "full": {
-      "description": "Workspace, MCP, plugins and Computer Use combined only when every adapter is verified and the HQ approval surface is active.",
+      "description": "Codex native full filesystem access after an explicit durable user grant for this thread. Optional MCP, plugin and Computer Use availability is reported independently and never inferred from this permission level.",
+      "sandbox": "danger-full-access",
+      "approvalPolicy": "on-request",
+      "requiresAccessGrant": true,
       "defaultReady": false,
       "approvalRequired": true,
       "silentApprovalAllowed": false
@@ -62,7 +65,7 @@
     "mcpElicitationDefaultDecision": "decline",
     "dynamicClientToolDefault": "fail",
     "unknownServerRequestDefault": "deny",
-    "dangerFullAccessAllowed": false,
+    "dangerFullAccessAllowed": "only_with_backend_validated_explicit_thread_grant",
     "workspaceWriteWithoutInteractiveBrokerAllowed": false
   },
   "media": {
@@ -80,8 +83,16 @@
       "browserFilesystemPathAllowed": false
     },
     "fileAndSlideInput": {
-      "chatReady": false,
-      "requiresVerifiedToolMode": true
+      "chatReady": true,
+      "requiresVerifiedToolMode": false,
+      "sourceEncodings": ["UTF-8", "UTF-8 BOM", "UTF-16 with BOM"],
+      "textExtraction": ["source and text", "PDF text", "DOCX text and tables", "XLSX raw cells and cached formula values", "PPTX slide and note text", "ZIP inventory and text members"],
+      "maxExtractedCharactersPerFile": 32000,
+      "maxExtractedCharactersPerTurn": 48000,
+      "silentTruncationAllowed": false,
+      "scannedPdfOcrClaimed": false,
+      "largeOrBinaryFilesRequireScopedTools": true,
+      "uploadedCodeMayExecuteAutomatically": false
     },
     "generatedArtifacts": {
       "chatReady": false,
@@ -112,9 +123,15 @@
   },
   "workspaceActivation": {
     "ready": false,
-    "liveSentinelStatus": "failed_unapproved_write",
+    "liveSentinelStatus": "replaced_by_explicit_thread_grant_policy",
     "failedSentinelMayBeOverriddenByFrontend": false,
-    "wholeWorkspacePreTurnGrantSupported": false
+    "wholeWorkspacePreTurnGrantSupported": true,
+    "grantScope": "thread",
+    "grantAuthorization": "user_selected_mode",
+    "legacyThreadGrantInferred": false,
+    "ordinaryAuthorizedWritesRequireRepeatedApproval": false,
+    "workspaceRoot": "isolated sibling AI-Agent-Workspaces / hash(threadId)",
+    "liveTradingAuthorizationInherited": false
   },
   "executionEvidence": {
     "missionRequired": true,

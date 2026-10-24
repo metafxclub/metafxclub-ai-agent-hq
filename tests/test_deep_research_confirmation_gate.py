@@ -780,6 +780,179 @@ class DeepResearchConfirmationGateTests(unittest.TestCase):
         self.assertEqual(len(store["records"]), 1)
         self.assertTrue(self.bridge._deep_research_report_is_human_confirmed(report))
 
+    def test_http_synced_confirmation_survives_factory_block_and_replay_does_not_rewrite_sheet(self) -> None:
+        report = self.deep_report()
+        self.persist_report_and_mission(report)
+        self.configure_active_sheet()
+        payload = {
+            "researchReportId": report["id"],
+            "confirmBriefDigest": self.digest_for(report),
+            "confirmSaveToGoogleSheet": True,
+        }
+        with (
+            mock.patch.object(
+                self.bridge.google_sheet_hub, "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            mock.patch.object(
+                self.bridge.google_sheet_hub, "upsert_row",
+                return_value={"verified": True},
+            ) as upsert,
+            mock.patch.object(self.bridge, "_refresh_research_sheet_cache"),
+            mock.patch.object(
+                self.bridge, "_deep_research_catalog_read_model",
+                return_value={"systems": []},
+            ),
+            mock.patch.object(
+                self.bridge, "ea_factory_read_model",
+                side_effect=self.bridge.DataIntegrityError("Factory evidence does not match"),
+            ),
+        ):
+            server = self.bridge.BridgeHTTPServer(("127.0.0.1", 0), self.bridge.BridgeHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                first_status, first = self.request(server.server_port, payload)
+                second_status, second = self.request(server.server_port, payload)
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                connection.request("GET", "/api/props/right_server_racks/ea-factory")
+                response = connection.getresponse()
+                factory_status = response.status
+                factory_body = json.loads(response.read().decode("utf-8"))
+                connection.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+        self.assertEqual((first_status, second_status), (200, 200))
+        for result in (first, second):
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["kind"], "deep_research_confirmed_and_saved")
+            self.assertTrue(result["sheetDelivery"]["synced"])
+            self.assertEqual(result["confirmation"]["briefDigest"], payload["confirmBriefDigest"])
+            self.assertNotIn("eaFactory", result)
+            self.assertEqual(result["eaFactoryReadResult"]["status"], "deferred")
+            self.assertFalse(result["eaFactoryReadResult"]["readinessConfirmed"])
+            self.assertNotIn("ok", result["eaFactoryReadResult"])
+            self.assertNotIn("_httpStatus", result["eaFactoryReadResult"])
+            self.assertIn("บันทึก Strategy Brief A-J ลง Google Sheet สำเร็จแล้ว", result["messageTh"])
+            self.assertNotIn("พร้อมเลือกในโรงงาน", result["messageTh"])
+        self.assertFalse(first["idempotentReplay"])
+        self.assertTrue(second["idempotentReplay"])
+        self.assertEqual(first["sheetDelivery"]["syncedThisRequest"], 1)
+        self.assertEqual(second["sheetDelivery"]["syncedThisRequest"], 0)
+        upsert.assert_called_once()
+        store = self.bridge.read_json(self.bridge.DEEP_RESEARCH_CONFIRMATIONS_PATH, {})
+        self.assertEqual(len(store["records"]), 1)
+        self.assertEqual(factory_status, 409)
+        self.assertFalse(factory_body["ok"])
+        self.assertEqual(factory_body["kind"], "ea_factory_integrity_blocked")
+        self.assertFalse(factory_body["oneClick"]["commandsAllowed"])
+
+    def test_http_synced_confirmation_never_waits_for_optional_workspace_projections(self) -> None:
+        report = self.deep_report()
+        self.persist_report_and_mission(report)
+        self.configure_active_sheet()
+        with (
+            mock.patch.object(
+                self.bridge.google_sheet_hub, "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            mock.patch.object(
+                self.bridge.google_sheet_hub, "upsert_row",
+                return_value={"verified": True},
+            ) as upsert,
+            mock.patch.object(self.bridge, "_refresh_research_sheet_cache"),
+            mock.patch.object(
+                self.bridge, "_deep_research_catalog_read_model",
+                side_effect=AssertionError("Save must not assemble the optional catalog"),
+            ) as catalog,
+            mock.patch.object(
+                self.bridge, "ea_factory_read_result",
+                side_effect=AssertionError("Save must not wait for Factory evidence reads"),
+            ) as factory,
+        ):
+            server = self.bridge.BridgeHTTPServer(("127.0.0.1", 0), self.bridge.BridgeHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, result = self.request(server.server_port, {
+                    "researchReportId": report["id"],
+                    "confirmBriefDigest": self.digest_for(report),
+                    "confirmSaveToGoogleSheet": True,
+                })
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["sheetDelivery"]["synced"])
+        self.assertNotIn("researchCatalog", result)
+        self.assertEqual(result["researchCatalogReadResult"], {
+            "kind": "research_catalog_refresh_deferred",
+            "status": "deferred",
+            "refreshEndpoint": "/api/props/left_server_racks/report",
+        })
+        self.assertEqual(result["eaFactoryReadResult"], {
+            "kind": "ea_factory_refresh_deferred",
+            "status": "deferred",
+            "refreshEndpoint": "/api/props/right_server_racks/ea-factory",
+            "readinessConfirmed": False,
+        })
+        self.assertNotIn("eaFactory", result)
+        catalog.assert_not_called()
+        factory.assert_not_called()
+        upsert.assert_called_once()
+
+    def test_http_required_store_corruption_still_blocks_before_sheet_write(self) -> None:
+        report = self.deep_report()
+        self.persist_report_and_mission(report)
+        self.configure_active_sheet()
+        paths = (
+            self.reports / f"{report['id']}.json",
+            self.bridge.DEEP_RESEARCH_CONFIRMATIONS_PATH,
+            self.bridge.RESEARCH_SHEET_OUTBOX_PATH,
+        )
+        with (
+            mock.patch.object(
+                self.bridge.google_sheet_hub, "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            mock.patch.object(self.bridge.google_sheet_hub, "upsert_row") as upsert,
+            mock.patch.object(self.bridge, "ea_factory_read_model") as factory,
+        ):
+            server = self.bridge.BridgeHTTPServer(("127.0.0.1", 0), self.bridge.BridgeHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for path in paths:
+                    with self.subTest(store=path.name):
+                        previous = path.read_bytes() if path.exists() else None
+                        path.write_text("{invalid-json", encoding="utf-8")
+                        try:
+                            status, result = self.request(server.server_port, {
+                                "researchReportId": report["id"],
+                                "confirmBriefDigest": self.digest_for(report),
+                                "confirmSaveToGoogleSheet": True,
+                            })
+                            self.assertEqual(status, 503)
+                            self.assertFalse(result["ok"])
+                            self.assertEqual(result["kind"], "data_integrity_error")
+                            self.assertEqual(path.read_text(encoding="utf-8"), "{invalid-json")
+                        finally:
+                            if previous is None:
+                                path.unlink()
+                            else:
+                                path.write_bytes(previous)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+        upsert.assert_not_called()
+        factory.assert_not_called()
+
     def test_ready_ten_columns_round_trip_to_build_payload_for_mt4_and_mt5(self) -> None:
         report = self.deep_report()
         self.configure_active_sheet()

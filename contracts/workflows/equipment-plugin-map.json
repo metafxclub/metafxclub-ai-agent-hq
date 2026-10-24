@@ -400,6 +400,8 @@
           "frontendInvocationAllowed": false,
           "schedulerOnly": true,
           "inputPreset": {"query": "ค้นหา Indicator, EA หรือ Tool ใหม่ที่มีแหล่งเผยแพร่สาธารณะ", "platform": "any", "category": "any", "maxItems": 6},
+          "currentInputPresetV2": {"radarPublicationVersion": 2, "maxItems": 3},
+          "publicationPolicyV2": {"mode": "up_to_maximum", "minimumItemCount": 0, "maximumItemCount": 3, "resultProfile": "radar_website_tool_v2", "mainProcessSlots": 1, "correctiveChildSlots": 0, "verifiedEmptyIsSuccessful": true, "scarcityRetryAllowed": false, "policyRef": "contracts/research/radar-website-source-policy-v1.json#/publicationPolicies/current"},
           "outputFields": ["entries"],
           "entryContract": {
             "containerField": "entries",
@@ -437,15 +439,43 @@
       }
     },
     "left_signal_cube": {
-      "titleTh": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
+      "titleTh": "แนวโน้ม 28 คู่เงินและข่าวตลาด",
       "primaryProcedureId": "official-structured-fx-news-direct",
-      "ownerAgentId": null,
-      "serviceMode": "deterministic_backend_direct",
-      "allowedActionIds": [],
-      "legacyGenericActionIdsRejected": ["save_news_bias_schedule", "refresh_daily_market_news", "analyze_daily_market_news", "build_fx_pair_bias"],
-      "directEndpoints": {"refresh": "/api/props/left_signal_cube/news/refresh", "schedule": "/api/props/left_signal_cube/news/schedule"},
-      "schedule": {"supported": true, "defaultEnabled": true, "timezone": "Asia/Bangkok", "defaultTimes": ["00:00", "12:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": [], "manualOrAgentHandoffActions": [], "directBackendHandler": "news_bias_direct_refresh"},
-      "legacyActionDefinitionsOnly": true,
+      "ownerAgentId": "codex_mcp_operator",
+      "serviceMode": "deterministic_price_snapshot_and_guarded_codex_with_direct_news",
+      "allowedActionIds": [
+        "analyze_fx28_trends"
+      ],
+      "legacyGenericActionIdsRejected": [
+        "save_news_bias_schedule",
+        "refresh_daily_market_news",
+        "analyze_daily_market_news",
+        "build_fx_pair_bias"
+      ],
+      "directEndpoints": {
+        "refresh": "/api/props/left_signal_cube/news/refresh",
+        "schedule": "/api/props/left_signal_cube/news/schedule"
+      },
+      "schedule": {
+        "supported": true,
+        "defaultEnabled": true,
+        "timezone": "Asia/Bangkok",
+        "defaultTimes": [
+          "00:00",
+          "12:00"
+        ],
+        "maximumTimes": 2,
+        "maximumRunsPerDay": 2,
+        "hardRuntimeEnforced": true,
+        "counterPersistence": "backend_local_settings",
+        "countingPolicy": "pre_dispatch_fail_closed_reservation",
+        "stalePendingPolicy": "expire_at_bangkok_day_boundary",
+        "catchUpPolicy": "latest_same_day_slot_only",
+        "actions": [],
+        "manualOrAgentHandoffActions": [],
+        "directBackendHandler": "news_bias_direct_refresh"
+      },
+      "legacyActionDefinitionsOnly": false,
       "actions": {
         "analyze_daily_market_news": {
           "retired": true,
@@ -454,9 +484,31 @@
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "scheduled_read_only",
-          "inputPreset": {"minimumImpact": "low", "brief": "งานเดียว: สร้างปฏิทินข่าว Forex ประจำวันต้นฉบับของระบบ ช่วงระวัง EA และ Bias ระยะสั้น กลาง ยาวครบ 28 คู่ จากแหล่งสาธารณะต้นทางที่อนุญาต; Forex Factory/Fair Economy เป็นลิงก์อ้างอิงให้ผู้ใช้เท่านั้นและห้ามใช้เป็นหลักฐานหรืออ่าน Feed/Export/HTML/JSON อัตโนมัติ"},
-          "outputFields": ["marketDate", "sourceStatus", "quietDay", "events", "dangerWindows", "pairBias", "sourceLinks", "checkedAt", "updatedAt", "limitations"],
-          "evidenceRequired": ["source_url", "published_or_event_time", "checked_at", "28_pair_rows", "source_url_per_supported_bias", "unknown_when_unverified", "updated_at"],
+          "inputPreset": {
+            "minimumImpact": "low",
+            "brief": "งานเดียว: สร้างปฏิทินข่าว Forex ประจำวันต้นฉบับของระบบ ช่วงระวัง EA และ Bias ระยะสั้น กลาง ยาวครบ 28 คู่ จากแหล่งสาธารณะต้นทางที่อนุญาต; Forex Factory/Fair Economy เป็นลิงก์อ้างอิงให้ผู้ใช้เท่านั้นและห้ามใช้เป็นหลักฐานหรืออ่าน Feed/Export/HTML/JSON อัตโนมัติ"
+          },
+          "outputFields": [
+            "marketDate",
+            "sourceStatus",
+            "quietDay",
+            "events",
+            "dangerWindows",
+            "pairBias",
+            "sourceLinks",
+            "checkedAt",
+            "updatedAt",
+            "limitations"
+          ],
+          "evidenceRequired": [
+            "source_url",
+            "published_or_event_time",
+            "checked_at",
+            "28_pair_rows",
+            "source_url_per_supported_bias",
+            "unknown_when_unverified",
+            "updated_at"
+          ],
           "screenshotPolicy": "not_required",
           "reportType": "fx_news_bias_report",
           "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และแหล่งข่าว หากไม่มีหลักฐานให้แสดง unknown และไม่สร้างข่าวแทน"
@@ -469,10 +521,23 @@
           "procedureKind": "backend_procedure",
           "automationMode": "mission_on_demand",
           "legacyManualCompatibility": true,
-          "requiredInputs": ["sourceReportId"],
-          "inputPreset": {"brief": "โหมด Legacy/manual: สร้าง Bias ระยะสั้น กลาง ยาว ครบ 28 คู่ โดยทุกแถวอ้างอิงข่าวต้นทางหรือใช้ insufficient_data"},
-          "outputFields": ["pairBias", "sourceLinks", "updatedAt"],
-          "evidenceRequired": ["28_pair_rows", "source_url_per_supported_bias", "unknown_when_unverified", "updated_at"],
+          "requiredInputs": [
+            "sourceReportId"
+          ],
+          "inputPreset": {
+            "brief": "โหมด Legacy/manual: สร้าง Bias ระยะสั้น กลาง ยาว ครบ 28 คู่ โดยทุกแถวอ้างอิงข่าวต้นทางหรือใช้ insufficient_data"
+          },
+          "outputFields": [
+            "pairBias",
+            "sourceLinks",
+            "updatedAt"
+          ],
+          "evidenceRequired": [
+            "28_pair_rows",
+            "source_url_per_supported_bias",
+            "unknown_when_unverified",
+            "updated_at"
+          ],
           "screenshotPolicy": "not_required",
           "reportType": "fx_news_bias_report",
           "failureHelpTh": "ให้ Agent ส่งรายงานข่าวที่เสร็จแล้วมายังแท็บนี้ก่อน หากหลักฐานไม่พอคู่เงินนั้นต้องเป็น unknown"
@@ -484,13 +549,89 @@
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "settings_only",
-          "inputPreset": {"enabled": true, "times": ["00:00", "12:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "timezone": "Asia/Bangkok", "minimumImpact": "low"},
-          "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "timezone", "minimumImpact", "lastRunStatus", "savedAt"],
-          "evidenceRequired": ["local_settings_record", "scheduler_state"],
+          "inputPreset": {
+            "enabled": true,
+            "times": [
+              "00:00",
+              "12:00"
+            ],
+            "maximumTimes": 2,
+            "maximumRunsPerDay": 2,
+            "timezone": "Asia/Bangkok",
+            "minimumImpact": "low"
+          },
+          "outputFields": [
+            "requestedEnabled",
+            "effectiveEnabled",
+            "times",
+            "timezone",
+            "minimumImpact",
+            "lastRunStatus",
+            "savedAt"
+          ],
+          "evidenceRequired": [
+            "local_settings_record",
+            "scheduler_state"
+          ],
           "screenshotPolicy": "not_required",
           "reportType": "fx_news_bias_report",
           "failureHelpTh": "ตรวจว่า Local Runner และ Scheduler ทำงานอยู่ แล้วบันทึกเวลาและระดับความสำคัญของข่าวใหม่อีกครั้ง"
+        },
+        "analyze_fx28_trends": {
+          "pluginSkillId": "backend.fx28-trend-daily-v1",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "scheduled_read_only",
+          "inputPreset": {},
+          "outputFields": [
+            "fxTrendAnalysis"
+          ],
+          "evidenceRequired": [
+            "locked_price_snapshot",
+            "28_pair_explanations"
+          ],
+          "screenshotPolicy": "not_required",
+          "reportType": "fx28_trend_report",
+          "failureHelpTh": "ตรวจข้อมูลราคาปิดของ MT5 ที่เลือกและสถานะ Codex แสดงเหตุผลเมื่อข้อมูลหรือโควตาไม่พร้อม โดยไม่สร้างราคาหรือทิศทางแทน"
         }
+      },
+      "trendSchedule": {
+        "supported": true,
+        "defaultEnabled": true,
+        "timezone": "Asia/Bangkok",
+        "defaultTimes": [
+          "08:00"
+        ],
+        "maximumTimes": 1,
+        "maximumRunsPerDay": 1,
+        "catchUpPolicy": "latest_same_day_slot_only",
+        "stalePendingPolicy": "expire_at_bangkok_day_boundary",
+        "singleMissionPerSlot": true,
+        "maximumAttemptsPerMission": 2,
+        "infrastructureRetry": {"maximumRetries": 1, "failureCodes": ["timeout", "runner_failed"], "delayMinutes": 5, "sameMissionAndAssignment": true, "sameBangkokDayOnly": true, "normalQuotaRequired": true, "quotaRefundAllowed": false},
+        "maximumChildProcesses": 0,
+        "quotaPolicy": "existing_codex_quota_and_reserve_guards"
+      },
+      "trendPipeline": {
+        "resultProfile": "fx_trend_daily_v1",
+        "actionId": "analyze_fx28_trends",
+        "reportType": "fx28_trend_report",
+        "pairCount": 28,
+        "horizons": [
+          "short",
+          "medium",
+          "long"
+        ],
+        "priceAuthority": "backend_deterministic_closed_bar_snapshot",
+        "codexRole": "grounded_thai_explanations_only",
+        "snapshotDigestRequired": true,
+        "sourceRefsRequired": true,
+        "nativeDirectOpenRequiredForNews": true,
+        "newsContextOptional": true,
+        "freshPriceVisibleWhileAiPending": true,
+        "aiOnGetAllowed": false,
+        "orderSubmissionAllowed": false,
+        "secretAccessAllowed": false
       }
     },
     "terminal_workstation": {

@@ -950,6 +950,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                     read_only_work=True,
                     result_profile=self.runner.EA_FACTORY_SOURCE_RESULT_PROFILE,
                     scoped_workspace_write_root=source,
+                    validated_strategy_context=self.runner._ea_factory_source_semantic_repair_context(prompt, relative),
                 )
 
         required_fragments = (
@@ -3301,11 +3302,18 @@ int OnCalculate(const int rates_total, const int prev_calculated,
 
     def test_repair_prompt_injects_certified_scaffold_as_trusted_baseline(self) -> None:
         scaffold = self.SOURCE_CONTENT
-        prompt = self.runner.build_ea_factory_source_semantic_repair_prompt(
-            "ORIGINAL_TRUSTED_PROMPT",
-            ["ea_closed_bar_execution_guard_missing"],
-            certified_scaffold=scaffold,
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            relative, _source, original_prompt, _record_digest, _spec_digest = self._factory_fixture(root)
+            patches = self._patch_roots(root)
+            with patches[0], patches[1]:
+                context = self.runner._ea_factory_source_semantic_repair_context(original_prompt, relative)
+            prompt = self.runner.build_ea_factory_source_semantic_repair_prompt(
+                original_prompt,
+                ["ea_closed_bar_execution_guard_missing"],
+                certified_scaffold=scaffold,
+                validated_strategy_context=context,
+            )
 
         self.assertIn("Validator-certified structural baseline", prompt)
         self.assertIn("same digest-bound Strategy Brief", prompt)
@@ -3402,17 +3410,24 @@ int OnCalculate(const int rates_total, const int prev_calculated,
 
     def test_semantic_repair_prompt_omits_candidate_beyond_context_bound(self) -> None:
         marker = "OVERSIZED_CANDIDATE_MARKER"
-        prompt = self.runner.build_ea_factory_source_semantic_repair_prompt(
-            "ORIGINAL_TRUSTED_PROMPT",
-            ["ea_display_behavior_missing"],
-            validated_candidate={
-                "fileName": "Oversized.mq4",
-                "content": marker + "x" * (
-                    self.runner.EA_FACTORY_SEMANTIC_REPAIR_SOURCE_MAX_CHARS + 1
-                ),
-            },
-            policy_guidance="TRUSTED_POLICY_GUIDANCE",
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            relative, _source, original_prompt, _record_digest, _spec_digest = self._factory_fixture(root)
+            patches = self._patch_roots(root)
+            with patches[0], patches[1]:
+                context = self.runner._ea_factory_source_semantic_repair_context(original_prompt, relative)
+            prompt = self.runner.build_ea_factory_source_semantic_repair_prompt(
+                original_prompt,
+                ["ea_display_behavior_missing"],
+                validated_candidate={
+                    "fileName": "Oversized.mq4",
+                    "content": marker + "x" * (
+                        self.runner.EA_FACTORY_SEMANTIC_REPAIR_SOURCE_MAX_CHARS + 1
+                    ),
+                },
+                policy_guidance="TRUSTED_POLICY_GUIDANCE",
+                validated_strategy_context=context,
+            )
 
         self.assertNotIn(marker, prompt)
         self.assertIn("candidate was omitted", prompt)

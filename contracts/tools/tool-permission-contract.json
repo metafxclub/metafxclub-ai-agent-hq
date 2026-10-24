@@ -473,6 +473,19 @@
       "mirrorUrlsAreOneProduct": true,
       "googleSheetCompared": false,
       "sourcePolicyRef": "contracts/research/radar-website-source-policy-v1.json",
+      "publicationPolicyV2": {
+        "versionInputField": "radarPublicationVersion",
+        "resultProfile": "radar_website_tool_v2",
+        "minimumEvidenceUrls": 0,
+        "maximumEvidenceUrls": 3,
+        "minimumCompletedSearchCount": 1,
+        "completedSearchEventProofRequired": true,
+        "eachPublishedSourceRequiresMainProcessOpen": true,
+        "mainProcessSlots": 1,
+        "correctiveChildSlots": 0,
+        "verifiedEmptyIsSuccessful": true,
+        "legacyMinimumEvidenceRulePreserved": true
+      },
       "sourceSelectionMode": "free_first_daily_rotation",
       "mql5FallbackMaximumPerSixItemBatch": 1,
       "scheduledPaidEntriesAllowed": false,
@@ -564,6 +577,41 @@
         "left_audit_crystals": "Indicator_EA_Tool"
       },
       "excludedPropIds": ["right_tool_console", "terminal_workstation"]
+    },
+    {
+      "id": "analyze_fx28_trends",
+      "label": "วิเคราะห์แนวโน้มราคา 28 คู่เงิน",
+      "defaultMode": "locked_price_read_only",
+      "linkedPropIds": [
+        "left_signal_cube"
+      ],
+      "adapterStatus": "implemented_guarded_codex_price_analysis",
+      "realExecutionAvailable": true,
+      "autoRunnable": true,
+      "approvalRequired": false,
+      "requiresMission": true,
+      "requiresAuditLog": true,
+      "workflowEnvelopeRequired": true,
+      "reportType": "fx28_trend_report",
+      "reportTargetPropId": "left_signal_cube",
+      "risk": "low",
+      "allowedAgents": [
+        "codex_mcp_operator"
+      ],
+      "modelTier": "specialist_balanced",
+      "frontendIntentFields": [
+        "propId",
+        "actionId",
+        "inputs",
+        "idempotencyKey"
+      ],
+      "resultProfile": "fx_trend_daily_v1",
+      "lockedSnapshotRequired": true,
+      "minimumEvidenceUrls": 0,
+      "nativeDirectOpenRequiredForNews": true,
+      "maximumChildProcesses": 0,
+      "orderSubmissionAllowed": false,
+      "secretAccessAllowed": false
     },
     {
       "id": "analyze_daily_market_news",

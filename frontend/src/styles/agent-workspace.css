@@ -1090,7 +1090,7 @@
 
 @media (min-width: 1440px) {
   .game-modal.agent-modal #modalChatPanel.active {
-    grid-template-columns: minmax(300px, 0.9fr) minmax(0, 1.2fr);
+    grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
     gap: 14px;
     overflow: hidden;
@@ -1101,6 +1101,44 @@
     min-height: 0;
     overflow-y: auto;
   }
+}
+
+/* Conversation gets the main canvas; permissions remain available in a
+   compact rail, with optional tool connectivity separate from permissions. */
+.game-modal.agent-modal .agent-runtime-console { padding: 12px; gap: 10px; }
+.game-modal.agent-modal details.agent-runtime-capability-matrix { display: block; }
+.game-modal.agent-modal .agent-runtime-capability-matrix > summary {
+  cursor: pointer; color: var(--ui-muted); font-size: 12px; line-height: 1.6;
+}
+.game-modal.agent-modal .agent-runtime-capability-matrix[open] > header { margin: 10px 0; }
+.game-modal.agent-modal .agent-runtime-capability-matrix[open] .agent-runtime-lock-guidance { margin-top: 8px; }
+.game-modal.agent-modal .agent-runtime-readiness { gap: 5px; }
+.game-modal.agent-modal .chat-line.agent { width: min(100%, 92ch); }
+.game-modal.agent-modal .agent-message-content {
+  min-width: 0; color: var(--ui-text); font-size: 14px; line-height: 1.75;
+  overflow-wrap: anywhere; white-space: normal;
+}
+.game-modal.agent-modal .chat-line.user .agent-message-content { white-space: pre-wrap; }
+.game-modal.agent-modal .agent-message-content :is(p, ul, ol, blockquote, h4) { margin: 0 0 10px; }
+.game-modal.agent-modal .agent-message-content :is(ul, ol) { padding-left: 22px; }
+.game-modal.agent-modal .agent-message-content li { margin: 3px 0; }
+.game-modal.agent-modal .agent-message-content strong { color: inherit; font-size: inherit; display: inline; }
+.game-modal.agent-modal .agent-message-content span { display: inline; color: inherit; font-size: inherit; line-height: inherit; white-space: inherit; }
+.game-modal.agent-modal .agent-message-content blockquote { border-left: 3px solid var(--ui-line); padding-left: 12px; }
+.game-modal.agent-modal .agent-message-content :is(a, summary),
+.game-modal.agent-modal .agent-runtime-artifact-download,
+.game-modal.agent-modal .agent-runtime-input-attachment-list a { color: var(--ui-accent); text-decoration: underline; text-underline-offset: 3px; }
+.game-modal.agent-modal .agent-message-content code { font-family: Consolas, monospace; font-size: 12px; background: var(--ui-bg); padding: 1px 4px; }
+.game-modal.agent-modal .agent-message-content pre {
+  max-width: 100%; max-height: 480px; overflow: auto; padding: 12px; margin: 8px 0 12px;
+  border: 1px solid var(--ui-line); border-radius: 8px; background: var(--ui-bg); white-space: pre;
+}
+.game-modal.agent-modal .agent-message-content pre code { display: block; padding: 0; line-height: 1.6; }
+.game-modal.agent-modal .agent-message-code-details > summary { cursor: pointer; padding: 6px 0; }
+.game-modal.agent-modal .agent-runtime-input-attachment-list a { font-size: 12px; padding: 5px 8px; border: 1px solid var(--ui-line); border-radius: 6px; }
+.game-modal.agent-modal .agent-runtime-artifact-download { display: inline-block; margin-top: 8px; font-size: 12px; }
+.game-modal.agent-modal :is(.agent-message-content a, .agent-message-content summary, .agent-runtime-artifact-download):focus-visible {
+  outline: 2px solid var(--ui-blue); outline-offset: 3px;
 }
 
 @media (min-width: 901px) {

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "metafx-hq-mt5-ea-compile-proof-v1",
+  "packageVersion": "1.07",
+  "candidateStatus": "compile_verified_source_only",
+  "sourceFile": "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5",
+  "sourceSha256": "2E2D42EABDA1E82B454DC19DA28AB89C7302DFF53BDBEF5E6E3B86C2C2FC30D0",
+  "sourceBytes": 271472,
+  "releasePolicy": "source_only",
+  "compiledBinaryIncluded": false,
+  "compiledBinaryEligibleForDistribution": false,
+  "localCompileBinarySha256": "676BD3C7FE1D9B29AD09627B287FC9D371C134C736416C734E8ED004D87ADBD4",
+  "localCompileBinaryBytes": 315720,
+  "compileEvidence": {
+    "status": "passed",
+    "mode": "visible_metaeditor64_exact_source",
+    "compilerVersion": "5.0.0.6230",
+    "errors": 0,
+    "warnings": 0,
+    "elapsedMs": 10010,
+    "cpuTarget": "AVX2+FMA3",
+    "compiledAtUtc": "2026-10-22T09:14:49.829402+00:00",
+    "compiledSourceSha256": "2E2D42EABDA1E82B454DC19DA28AB89C7302DFF53BDBEF5E6E3B86C2C2FC30D0",
+    "currentSourceMatchesCompiledSource": true,
+    "screenshot": "COMPILE_PROOF.png",
+    "screenshotSha256": "D1006B43B3E94940731DEC231E1787F0970574675ACE738F7411F80B9570B5E2"
+  },
+  "selectedTerminal": {
+    "product": "RoboForex MT5 Terminal",
+    "accountClass": "real",
+    "marginMode": "hedge"
+  },
+  "safety": {
+    "scope": "Compile only. Candidate v1.07 was not attached; existing v1.06 remained on its chart. No Inputs, Algo Trading, active binary, orders or command replay changed by this compile.",
+    "terminalStayedOpen": true,
+    "eaAttachedToChart": false,
+    "algoTradingChanged": false,
+    "orderOrTradeCommandSent": false,
+    "demoExecutionValidated": false,
+    "liveExecutionValidated": false
+  },
+  "tests": {
+    "focusedStaticAndContract": {
+      "result": "passed",
+      "count": 82,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  }
+}

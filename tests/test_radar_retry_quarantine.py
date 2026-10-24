@@ -66,15 +66,17 @@ class RadarRetryQuarantineTests(unittest.TestCase):
 
     def scheduled_radar(self, slot_date: str) -> tuple[dict, str]:
         slot_key = f"indicatorScoutSchedule:{slot_date}:0900"
-        response = self.bridge.run_dashboard_workflow_action(
-            "left_audit_crystals",
-            {
-                "actionId": "discover_new_indicators",
-                "form": {},
-                "idempotencyKey": f"dashboard-schedule:{slot_key}",
-            },
-            trusted_trigger_source="schedule",
-        )
+        # Recreate historical v1 inputs before signing; production defaults remain v2.
+        with mock.patch.object(self.bridge, "_radar_current_publication_inputs", side_effect=lambda form: dict(form)):
+            response = self.bridge.run_dashboard_workflow_action(
+                "left_audit_crystals",
+                {
+                    "actionId": "discover_new_indicators",
+                    "form": {},
+                    "idempotencyKey": f"dashboard-schedule:{slot_key}",
+                },
+                trusted_trigger_source="schedule",
+            )
         mission = response["mission"]
         self.bridge._dashboard_workflow_update_schedule_state(
             "indicatorScoutSchedule",

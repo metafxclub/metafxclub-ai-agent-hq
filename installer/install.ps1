@@ -63,6 +63,44 @@ $validatedGoogleClientJsonPath = ""
 $preservedRepairSource = $null
 $selectedBridgePort = 0
 $previousBridgeRestored = $false
+$sentimentStatus = 'not_requested'
+$sentimentTaskXml = $null
+$sentimentPrepared = $false
+$sentimentSetupComplete = $false
+$sentimentWasRunning = $false
+
+function Suspend-SentimentForUpdate {
+    if ($PackageSmoke) { return }
+    $helper = Join-Path $installRoot 'scripts\sentiment-universe.ps1'
+    $register = Join-Path $installRoot 'scripts\register-sentiment-autostart.ps1'
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { return }
+    $raw = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helper -Action Status
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect sentiment process ownership before update.' }
+    $state = $raw | ConvertFrom-Json
+    $script:sentimentWasRunning = $state.supervisorOwned -eq $true -or $state.status -eq 'healthy'
+    $task = Get-ScheduledTask -TaskName 'Metafxclub Sentiment Universe' -ErrorAction SilentlyContinue
+    if ($task) { $script:sentimentTaskXml = Export-ScheduledTask -TaskName 'Metafxclub Sentiment Universe' }
+    # The registration helper verifies the exact action and current user before
+    # removing anything. The old task cannot relaunch a worker during publish.
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $register -Remove
+    if ($LASTEXITCODE -ne 0) { throw 'Sentiment autostart identity could not be verified; no application files changed.' }
+    $script:sentimentPrepared = $true
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helper -Action Stop
+    if ($LASTEXITCODE -ne 0) { throw 'Sentiment process identity could not be verified; no application files changed.' }
+}
+
+function Restore-SentimentAfterUpdateFailure {
+    if (-not $sentimentPrepared -or $sentimentSetupComplete -or $rollbackIncomplete -or $PackageSmoke) { return }
+    if ($sentimentTaskXml -and -not $SkipAutostart) {
+        if (-not (Get-ScheduledTask -TaskName 'Metafxclub Sentiment Universe' -ErrorAction SilentlyContinue)) {
+            Register-ScheduledTask -TaskName 'Metafxclub Sentiment Universe' -Xml $sentimentTaskXml -Force | Out-Null
+        }
+    }
+    if ($sentimentWasRunning -and -not $SkipLaunch) {
+        & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $installRoot 'scripts\sentiment-universe.ps1') -Action Ensure
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'Sentiment needs its separate setup repair; saved account and source cache were preserved.' }
+    }
+}
 
 $gitProvenanceValues = @($ExpectedGitRepository, $ExpectedGitTag, $ExpectedSourceVersion)
 $gitProvenanceValueCount = @($gitProvenanceValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
@@ -926,9 +964,42 @@ function Assert-SafeSource {
     Assert-ExpectedGitSource
 
     $requiredFiles = @(
+        "backend\local-runner\sentiment_universe\live_backend\__init__.py",
+        "backend\local-runner\sentiment_universe\live_backend\connect.html",
+        "backend\local-runner\sentiment_universe\live_backend\connect.js",
+        "backend\local-runner\sentiment_universe\live_backend\correlation.py",
+        "backend\local-runner\sentiment_universe\live_backend\mt5_reader.py",
+        "backend\local-runner\sentiment_universe\live_backend\mt5_setup.py",
+        "backend\local-runner\sentiment_universe\live_backend\myfxbook.py",
+        "backend\local-runner\sentiment_universe\live_backend\news.py",
+        "backend\local-runner\sentiment_universe\live_backend\public_snapshot.py",
+        "backend\local-runner\sentiment_universe\live_backend\secure_store.py",
+        "backend\local-runner\sentiment_universe\live_backend\server.py",
+        "backend\local-runner\sentiment_universe\scripts\start-live.py",
+                "backend\local-runner\sentiment_universe\scripts\patch-hq-sentiment.py",
+                "backend\local-runner\sentiment_universe\scripts\hq-embed-runtime.js",
+                "backend\local-runner\sentiment_universe\scripts\hq-embed-layout.css",
+                "backend\local-runner\sentiment_universe\tests\__init__.py",
+                "backend\local-runner\sentiment_universe\tests\test_hq_embed_patch.py",
+                "backend\local-runner\sentiment_universe\tests\test_hq_market_service.py",
+                "backend\local-runner\sentiment_universe\tests\test_live_correlation.py",
+                "backend\local-runner\sentiment_universe\tests\test_live_mt5_setup.py",
+                "backend\local-runner\sentiment_universe\tests\test_live_myfxbook.py",
+                "backend\local-runner\sentiment_universe\tests\test_live_news.py",
+                "backend\local-runner\sentiment_universe\tests\test_live_server.py",
+        "frontend\public\sentiment-universe\index.html",
+                "frontend\public\sentiment-universe\sentiment-universe.js",
+        "scripts\sentiment-universe.ps1",
+        "scripts\setup-sentiment-universe.ps1",
+        "scripts\register-sentiment-autostart.ps1",
+        "scripts\run-sentiment-hidden.vbs",
+        "docs\sentiment-universe-setup-th.md",
+        "tests\test_sentiment_lifecycle.py",
+        "tests\test_sentiment_package.py",
         "backend\local-runner\hq_backend\__init__.py",
         "backend\local-runner\hq_backend\chat\__init__.py",
         "backend\local-runner\hq_backend\chat\full_agent_artifacts.py",
+        "backend\local-runner\hq_backend\chat\full_agent_file_inputs.py",
         "backend\local-runner\hq_backend\chat\full_agent_runtime.py",
         "backend\local-runner\hq_backend\ea\__init__.py",
         "backend\local-runner\hq_backend\ea\ea_factory_blueprint_coverage.py",
@@ -947,8 +1018,18 @@ function Assert-SafeSource {
         "backend\local-runner\hq_backend\paths.py",
         "backend\local-runner\hq_backend\research\__init__.py",
         "backend\local-runner\hq_backend\research\fx_news_direct.py",
+        "backend\local-runner\hq_backend\research\fx_trend.py",
+        "backend\local-runner\hq_backend\research\fx_trend_mt5.py",
         "backend\local-runner\hq_backend\research\radar_image_adapter.py",
+        "backend\local-runner\hq_backend\research\radar_prompt.py",
+        "backend\local-runner\hq_backend\research\radar_publication.py",
+        "contracts\research\radar-website-source-policy-v1.json",
+        "contracts\research\radar-website-tool-compatibility-v1.json",
+        "contracts\reports\report-contract.json",
+        "contracts\tools\tool-permission-contract.json",
+        "contracts\workflows\equipment-plugin-map.json",
         "backend\local-runner\hq_backend\runtime\__init__.py",
+        "backend\local-runner\hq_backend\runtime\codex_quota.py",
         "backend\local-runner\hq_backend\runtime\manager_parallel.py",
         "backend\local-runner\hq_backend\runtime\manager_analysis.py",
         "backend\local-runner\hq_backend\trading\__init__.py",
@@ -988,12 +1069,12 @@ function Assert-SafeSource {
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\BUILD_LOG.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_PROOF.png",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\COMPILE_PROOF.png",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\README_TH.md",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\AUDIT_TH.md",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\SHA256SUMS.txt",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\BUILD_LOG.txt",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\MANIFEST.json",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\COMPILE_PROOF.png",
         "runner\codex_cli_runner.py",
         "runner\codex_app_server_gateway.py",
         "scripts\register-bridge-autostart.ps1",
@@ -1006,6 +1087,10 @@ function Assert-SafeSource {
         "tests\release_secret_scan.py",
         "tests\test_codex_app_server_gateway.py",
         "tests\test_full_agent_artifacts.py",
+        "tests\test_full_agent_file_inputs.py",
+        "tests\test_full_agent_file_integration.py",
+        "tests\test_full_agent_native_images.py",
+        "tests\test_agent_chat_files_frontend.py",
         "tests\test_full_agent_bridge_api.py",
         "tests\test_full_agent_contract.py",
         "tests\test_full_agent_frontend.py",
@@ -1227,7 +1312,7 @@ function Assert-EaArtifactIntegrity {
 function Assert-Mt5CompileArtifactIntegrity {
     param([string]$CandidateRoot = $sourceRoot)
 
-    $artifactRelativePath = "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
+    $artifactRelativePath = "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness"
     $artifactDirectory = Join-Path $CandidateRoot $artifactRelativePath
     $checksumPath = Join-Path $artifactDirectory "SHA256SUMS.txt"
     $expectedHashes = @{}
@@ -1294,7 +1379,7 @@ function Assert-Mt5CompileArtifactIntegrity {
     }
     if (
         [string]$manifest.schemaVersion -cne "metafx-hq-mt5-ea-compile-proof-v1" -or
-        [string]$manifest.packageVersion -cne "1.03" -or
+        [string]$manifest.packageVersion -cne "1.07" -or
         [string]$manifest.candidateStatus -cne "compile_verified_source_only" -or
         [string]$manifest.sourceFile -cne "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5" -or
         [string]$manifest.sourceSha256 -cne $sourceHash -or
@@ -1317,12 +1402,12 @@ function Assert-Mt5CompileArtifactIntegrity {
         $manifest.safety.liveExecutionValidated -ne $false -or
         $pngSignature -cne "89504E470D0A1A0A"
     ) {
-        throw "หยุดติดตั้ง: MANIFEST/Compile proof ของ MT5 v1.03 ไม่ตรงกับ Source หรือหลักฐานที่อนุมัติ"
+        throw "หยุดติดตั้ง: MANIFEST/Compile proof ของ MT5 v1.07 ไม่ตรงกับ Source หรือหลักฐานที่อนุมัติ"
     }
 
     $buildLog = Get-Content -LiteralPath (Join-Path $artifactDirectory "BUILD_LOG.txt") -Raw -Encoding UTF8
     if (
-        $buildLog -notmatch '(?m)^PackageVersion:\s*1\.03\s*$' -or
+        $buildLog -notmatch '(?m)^PackageVersion:\s*1\.07\s*$' -or
         $buildLog -notmatch '(?m)^CandidateStatus:\s*COMPILE_VERIFIED_SOURCE_ONLY\s*$' -or
         $buildLog -notmatch '(?m)^CompileResult:\s*PASS\s*$' -or
         $buildLog -notmatch '(?m)^CompileMode:\s*VISIBLE_METAEDITOR64_EXACT_SOURCE\s*$' -or
@@ -1407,11 +1492,11 @@ function Assert-NoEmbeddedHighConfidenceSecrets {
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\BUILD_LOG.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\SHA256SUMS.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json"
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\README_TH.md",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\AUDIT_TH.md",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\BUILD_LOG.txt",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\SHA256SUMS.txt",
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness\MANIFEST.json"
     )
     foreach ($relativePath in $additionalTextFiles) {
         $path = Join-Path $CandidateRoot $relativePath
@@ -1795,7 +1880,7 @@ function Copy-ApplicationFiles {
         Sync-Directory -DirectoryName $directoryName -DestinationRoot $DestinationRoot
     }
     Sync-Directory -DirectoryName "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness" -DestinationRoot $DestinationRoot
-    Sync-Directory -DirectoryName "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness" -DestinationRoot $DestinationRoot
+    Sync-Directory -DirectoryName "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness" -DestinationRoot $DestinationRoot
 
     $rootFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
@@ -1826,7 +1911,7 @@ function Export-VerifiedGitSource {
     $releasePaths = @(
         ".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests",
         "artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness",
-        "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness",
+        "artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness",
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
         "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat", "2-SETUP-GOOGLE-HQ.bat",
         "AGENTS.md", ".gitattributes", ".gitignore", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
@@ -2274,7 +2359,7 @@ function Publish-StagedApplication {
     }
     foreach ($artifactDirectory in @(
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
+        "artifacts\mt5-trade-gateway-v1.07-visible-compile-readiness"
     )) {
         $artifactSource = Join-Path $StagingRoot $artifactDirectory
         $artifactDestination = Join-Path $installRoot $artifactDirectory
@@ -3265,6 +3350,13 @@ function Write-InstallResult {
                 status = $(if ($googleSetupFailure) { "repair_required" } else { $googleSetupStatus })
                 source = $googleSetupSource
             }
+            sentiment_universe = [ordered]@{
+                status = $sentimentStatus
+                port = 4197
+                account_setup = 'per_windows_user'
+                state_preserved = $true
+                repair_command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $installRoot 'scripts\setup-sentiment-universe.ps1')
+            }
         }
         safety = [ordered]@{
             loopback_only = $true
@@ -3366,6 +3458,7 @@ try {
     }
     $bridgeTaskWasEnabled = $false
     try {
+        Suspend-SentimentForUpdate
         $bridgeTaskWasEnabled = Suspend-BridgeScheduledTask
         if (
             $SkipLaunch -and
@@ -3454,6 +3547,29 @@ try {
         }
         else {
             $watchdogStatus = "skipped_no_launch"
+        }
+        if ($PackageSmoke) {
+            $script:sentimentStatus = 'skipped_package_smoke'
+        }
+        elseif ($SkipLaunch) {
+            $script:sentimentStatus = 'skipped_no_launch'
+        }
+        else {
+            try {
+                $sentimentArgs = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $installRoot 'scripts\setup-sentiment-universe.ps1'),'-OpenSetupIfNeeded')
+                if ($SkipAutostart) { $sentimentArgs += '-SkipAutostart' }
+                & powershell.exe @sentimentArgs
+                if ($LASTEXITCODE -ne 0) { throw 'Sentiment service or its own autostart did not pass verification.' }
+                $script:sentimentStatus = 'ready'
+                $script:sentimentSetupComplete = $true
+            }
+            catch {
+                $script:sentimentStatus = 'repair_required'
+                $watchdogFailure = $true
+                $sentimentMessage = 'Sentiment Universe needs separate setup repair; HQ remains installed. Run scripts\setup-sentiment-universe.ps1.'
+                [void]$postInstallFailures.Add($sentimentMessage)
+                Write-Warning "${sentimentMessage} $($_.Exception.Message)"
+            }
         }
         try {
             Invoke-GoogleOAuthFirstRunSetup -CandidateRoot $installRoot
@@ -3545,6 +3661,7 @@ try {
         throw $installError
     }
     finally {
+        Restore-SentimentAfterUpdateFailure
         if ($script:rollbackIncomplete) {
             Write-Warning "คง Watchdog ไว้ในสถานะปิด เพราะ Rollback ไม่สมบูรณ์ กรุณาตรวจ Last-good ที่แจ้งไว้ก่อนเปิดระบบ"
         }

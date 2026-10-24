@@ -272,13 +272,19 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             self.assertEqual(workflow["displayOrder"], expected_order)
             self.assertTrue(workflow["independent"])
             if prop_id == "left_signal_cube":
-                self.assertEqual(workflow["coordinationMode"], "deterministic_backend_direct")
+                self.assertEqual(workflow["coordinationMode"], "direct_news_plus_independent_fx28_mission")
                 self.assertFalse(workflow["agentTransferOnly"])
                 self.assertFalse(workflow["directDashboardDependency"])
                 self.assertEqual(workflow["transferPolicy"]["mode"], "none")
                 self.assertFalse(workflow["transferPolicy"]["missionCreated"])
                 self.assertFalse(workflow["transferPolicy"]["agentUsed"])
                 self.assertFalse(workflow["transferPolicy"]["aiUsed"])
+                self.assertEqual(workflow["transferPolicy"]["scope"], "direct_news_only")
+                trend = self.role_map["properties"][prop_id]["trendPipeline"]
+                self.assertEqual(trend["resultProfile"], "fx_trend_daily_v1")
+                self.assertTrue(trend["snapshotDigestRequired"])
+                self.assertFalse(trend["aiOnGetAllowed"])
+                self.assertFalse(trend["orderSubmissionAllowed"])
                 continue
             if prop_id == "left_server_racks":
                 self.assertEqual(
@@ -353,9 +359,16 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 self.assertTrue(tool["workflowEnvelopeRequired"])
 
         direct_role = self.role_map["properties"]["left_signal_cube"]
-        self.assertEqual(direct_role["allowedDashboardActions"], [])
-        self.assertEqual(direct_role["ownerAgents"], [])
-        self.assertEqual(direct_role["workflow"]["coordinationMode"], "deterministic_backend_direct")
+        self.assertEqual(direct_role["allowedDashboardActions"], ["analyze_fx28_trends"])
+        self.assertEqual(direct_role["ownerAgents"], ["codex_mcp_operator"])
+        self.assertEqual(direct_role["workflow"]["coordinationMode"], "direct_news_plus_independent_fx28_mission")
+        action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["analyze_fx28_trends"]
+        tool = tool_rows["analyze_fx28_trends"]
+        self.assertEqual(action["ownerAgentId"], "codex_mcp_operator")
+        self.assertEqual(action["reportType"], "fx28_trend_report")
+        self.assertEqual(tool["reportType"], "fx28_trend_report")
+        self.assertTrue(tool["requiresMission"])
+        self.assertTrue(tool["workflowEnvelopeRequired"])
 
     def test_google_sheet_template_and_backend_projection_are_exactly_42_fields(self) -> None:
         template = PROJECT_ROOT / "contracts" / "research" / "trading-system-sheet-template.csv"
@@ -376,7 +389,7 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         for action_id, action in self.bridge.DASHBOARD_WORKFLOW_ACTIONS.items():
             prop_id = action["propId"]
             role = self.role_map["properties"][prop_id]
-            if prop_id == "left_signal_cube":
+            if prop_id == "left_signal_cube" and action_id in role["legacyGenericActionIdsRejected"]:
                 self.assertNotIn(action_id, role["allowedDashboardActions"])
                 self.assertIn(action_id, role["legacyGenericActionIdsRejected"])
                 continue

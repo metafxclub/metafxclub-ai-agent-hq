@@ -14,6 +14,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
 
+# Frozen pre-workflow-change payload. Do not derive it from either production
+# profile constant: that would let a policy edit silently rewrite this fixture.
+HISTORICAL_EMA_PAYLOAD = {
+    "platform": "mt5",
+    "artifactKind": "expert_advisor",
+    "systemName": "EMA 10/60 Closed-Bar Smoke EA",
+    "systemOverview": "Deterministic MT5 smoke strategy using EMA 10 and EMA 60 on the chart symbol and timeframe.",
+    "entryRules": "On one new bar only, BUY when EMA(10) at closed bar 2 is less than or equal to EMA(60) and EMA(10) at closed bar 1 is greater than EMA(60). SELL on the exact inverse closed-bar crossover.",
+    "recoveryRules": "No recovery, grid, martingale, averaging, pyramiding, or hedging.",
+    "exitRules": "StopLossPips and TakeProfitPips are positive EA inputs. Close an existing position on the opposite confirmed crossover before opening the reverse direction.",
+    "moneyManagement": "Use one normalized tester-safe fixed lot of 0.01 and never hold more than one position for this symbol and magic number.",
+    "orderExecution": "Use market orders in Strategy Tester only after closed-bar confirmation; normalize price and broker stop distance and reject invalid orders safely.",
+    "displayRequirements": "Show fast and slow EMA values plus BUY signals, SELL signals, BUY orders, SELL orders, and the latest execution result.",
+    "additionalNotes": "The acceptance loop must compile, run a Visual backtest, verify entry markers against the crossover, optimize TP/SL, and save a report.",
+}
+HISTORICAL_RECORD_ID = "ea-source-03553f5747269fbf74711066"
+HISTORICAL_RECORD_DIGEST = "825fab84570e6ea19c3d18f7185af62bcb10a2ea60ad88364abc2160043dc337"
+HISTORICAL_BRIEF_DIGEST = "58c0201ba101238400df35f74d6652ec17d361ba7dfe1d412a58714f37b432cb"
+
 
 def load_bridge():
     spec = importlib.util.spec_from_file_location(
@@ -93,6 +112,214 @@ class EaFactoryCustomEmaProfileGateTests(unittest.TestCase):
             self.bridge._ea_factory_canonical_json_sha256(manifest)
         )
         return manifest
+
+    def persisted_profile_fixture(self, root: Path, *, historical=True, suffix="history", payload_override=None):
+        """Materialize sealed generation evidence without using the recognizer."""
+        payload = HISTORICAL_EMA_PAYLOAD if historical else self.bridge.EA_FACTORY_CUSTOM_EMA_SMOKE_PROFILE_PAYLOAD
+        if payload_override is not None:
+            payload = payload_override
+        record = self.bridge._ea_factory_custom_source_record(copy.deepcopy(payload))
+        build_id = f"ea-build-profile-{suffix}"
+        workspace = self.bridge._ea_factory_create_build_workspace(build_id, record, "mt5", "expert_advisor")
+        mission = {"id": f"mission-profile-{suffix}-spec"}
+        report = {"id": f"report-profile-{suffix}-spec"}
+        now = "2026-10-16T00:00:00Z"
+        build = {
+            "schemaVersion": "ea-factory-build-v1", "id": build_id,
+            "sourceRecordId": record["sourceRecordId"], "sourceDisplayName": record["displayName"],
+            "sourceRecordDigest": record["recordDigest"], "sourceReportId": report["id"],
+            "sourceMissionId": mission["id"], "platform": "mt5", "artifactKind": "expert_advisor",
+            "brief": "", "status": "ready", "workspace": workspace,
+            "stages": self.bridge._ea_factory_initial_stages("mt5", mission, report, "expert_advisor"),
+            "versions": [], "createIdempotencyKey": None, "createIdempotencyKeys": [],
+            "createRequestDigest": self.bridge._ea_factory_create_request_digest(record["sourceRecordId"], "mt5", "", "expert_advisor"),
+            "createdAt": now, "updatedAt": now,
+        }
+        strategy_artifacts = self.bridge._ea_factory_register_artifacts(build, [{
+            "relativePath": workspace["strategySpecFile"], "stageId": "strategy_spec",
+            "reportId": report["id"], "artifactKind": "strategy_spec",
+        }])
+        self.bridge._ea_factory_stage_row(build, "strategy_spec")["artifacts"] = [row["fileId"] for row in strategy_artifacts]
+        folder = root / "workspace" / "ea-factory" / build_id
+        spec = self.bridge.read_json(folder / "Source/strategy-spec-v01.json", None)
+        source = self.runner._render_ea_factory_custom_ema_smoke_certified_source(
+            source_record_digest=record["recordDigest"], strategy_spec_digest=workspace["strategySpecDigest"],
+            strategy_brief_digest=record["strategyBriefDigest"],
+        )
+        source_path = folder / "Source/CertifiedCustomEmaSmokeMT5.mq5"
+        version_path = folder / "EA_Versions/CertifiedCustomEmaSmokeMT5_v01.mq5"
+        source_path.write_text(source, encoding="utf-8", newline="\n")
+        version_path.write_text(source, encoding="utf-8", newline="\n")
+        source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        manifest = self.certified_manifest(source_digest)
+        manifest.update({"schemaVersion": "ea-factory-compact-ea-source-manifest/1.2.0",
+                         "coverageMode": "custom_ema_certified_profile_v3_exact_source_review",
+                         "strategyBriefDigest": record["strategyBriefDigest"],
+                         "strategySpecDigest": workspace["strategySpecDigest"]})
+        manifest.pop("manifestDigest")
+        manifest["manifestDigest"] = self.bridge._ea_factory_canonical_json_sha256(manifest)
+        generation_report = f"report-profile-{suffix}-generation"
+        build["versions"] = [{"version": 1, "fileName": version_path.name, "sourceDigest": source_digest,
+                              "sourceFile": f"Source/{source_path.name}", "versionFile": f"EA_Versions/{version_path.name}",
+                              "sourceReportId": generation_report, "immutable": True, "createdAt": now}]
+        build["blueprintCoverageManifest"] = copy.deepcopy(manifest)
+        artifacts = self.bridge._ea_factory_register_artifacts(build, [
+            {"relativePath": f"Source/{source_path.name}", "stageId": "generate_source", "reportId": generation_report, "artifactKind": "generated_source"},
+            {"relativePath": f"EA_Versions/{version_path.name}", "stageId": "generate_source", "reportId": generation_report, "artifactKind": "immutable_version"},
+        ])
+        self.bridge._ea_factory_stage_row(build, "generate_source").update({
+            "status": "completed", "missionId": f"mission-profile-{suffix}-generation", "reportId": generation_report,
+            "evidenceVerified": True, "artifacts": [row["fileId"] for row in artifacts],
+            "blueprintCoverageManifest": copy.deepcopy(manifest),
+        })
+        return record, spec, build, source_path, version_path
+
+    def test_historical_profile_frozen_identity_and_source_remain_valid(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.bridge, "PROJECT_ROOT", Path(tmp)):
+            record, spec, build, source_path, _version = self.persisted_profile_fixture(Path(tmp))
+            self.assertEqual(record["sourceRecordId"], HISTORICAL_RECORD_ID)
+            self.assertEqual(record["recordDigest"], HISTORICAL_RECORD_DIGEST)
+            self.assertEqual(record["strategyBriefDigest"], HISTORICAL_BRIEF_DIGEST)
+            self.assertNotEqual(HISTORICAL_EMA_PAYLOAD, self.bridge.EA_FACTORY_CUSTOM_EMA_SMOKE_PROFILE_PAYLOAD)
+            original = copy.deepcopy(build)
+            self.assertIsNotNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(spec, build=build))
+            self.assertEqual(self.bridge._ea_factory_custom_ema_smoke_source_findings(
+                spec, source_path.read_text("utf-8"), build=build, source_digest=build["versions"][0]["sourceDigest"]), [])
+            validated = self.bridge._ea_factory_revalidated_build(build)
+            self.assertEqual(validated["coverageStatus"], "compact_current")
+            self.assertFalse(validated["coverageUpgradeRequired"])
+            self.assertEqual(build, original)
+
+    def test_historical_profile_does_not_certify_fresh_or_unsealed_admission(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.bridge, "PROJECT_ROOT", Path(tmp)):
+            _record, spec, build, _source, _version = self.persisted_profile_fixture(Path(tmp))
+            self.assertIsNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(spec))
+            for field in ("versions", "blueprintCoverageManifest", "stages"):
+                fresh = copy.deepcopy(build)
+                fresh.pop(field)
+                with self.subTest(missing=field):
+                    self.assertIsNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(spec, build=fresh))
+            pending = copy.deepcopy(build)
+            self.bridge._ea_factory_stage_row(pending, "generate_source")["status"] = "pending"
+            self.assertIsNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(spec, build=pending))
+            current = self.bridge._ea_factory_custom_source_record(copy.deepcopy(self.bridge.EA_FACTORY_CUSTOM_EMA_SMOKE_PROFILE_PAYLOAD))
+            self.assertNotEqual(current["sourceRecordId"], HISTORICAL_RECORD_ID)
+
+    def test_historical_profile_malformed_stages_return_none(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.bridge, "PROJECT_ROOT", Path(tmp)):
+            _record, spec, build, _source, _version = self.persisted_profile_fixture(Path(tmp))
+            stages = build["stages"]
+            variants = [None, {}, [], [None] * len(stages), stages[:-1], stages + [stages[-1]],
+                        [stages[0]] * len(stages), list(reversed(stages))]
+            for variant in variants:
+                mutated = copy.deepcopy(build)
+                mutated["stages"] = copy.deepcopy(variant)
+                with self.subTest(stages=variant):
+                    self.assertIsNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(spec, build=mutated))
+
+    def test_historical_profile_rejects_note_and_identity_variants(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.bridge, "PROJECT_ROOT", Path(tmp)):
+            _record, spec, build, _source, _version = self.persisted_profile_fixture(Path(tmp))
+            mutations = []
+            for field, value in (("sourceRecordId", "ea-source-nearby"), ("sourceKey", "nearby"),
+                                 ("recordDigest", "0" * 64), ("strategyBriefDigest", "0" * 64),
+                                 ("targetPlatform", "mt4"), ("buildId", "ea-build-other"), ("immutable", False)):
+                changed = copy.deepcopy(spec); changed[field] = value; mutations.append((field, changed))
+            changed = copy.deepcopy(spec); changed["strategyBrief"]["additionalNotes"] += " Extra scope."; mutations.append(("notes", changed))
+            changed = copy.deepcopy(spec); changed["core"]["record_id"] = "nearby-record"; mutations.append(("core", changed))
+            for name, changed in mutations:
+                with self.subTest(field=name):
+                    self.assertIsNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(changed, build=build))
+            for field, value in (("sourceRecordId", "ea-source-nearby"), ("sourceRecordDigest", "0" * 64), ("platform", "mt4")):
+                changed = copy.deepcopy(build); changed[field] = value
+                with self.subTest(build_field=field):
+                    self.assertIsNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(spec, build=changed))
+            nearby_payload = copy.deepcopy(HISTORICAL_EMA_PAYLOAD)
+            nearby_payload["additionalNotes"] += " Extra scope."
+            _record, nearby_spec, nearby_build, _source, _version = self.persisted_profile_fixture(
+                Path(tmp), suffix="nearby", payload_override=nearby_payload)
+            self.assertIsNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(nearby_spec, build=nearby_build))
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_build(nearby_build)
+
+    def test_historical_profile_rejects_manifest_tampering_and_generation_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.bridge, "PROJECT_ROOT", Path(tmp)):
+            _record, spec, build, _source, _version = self.persisted_profile_fixture(Path(tmp))
+            variants = []
+            for field, value in (("manifestDigest", "0" * 64), ("sourceDigest", "0" * 64),
+                                 ("strategyBriefDigest", "0" * 64), ("strategySpecDigest", "0" * 64),
+                                 ("complete", False), ("schemaVersion", "ea-factory-compact-ea-source-manifest/9.0.0")):
+                changed = copy.deepcopy(build); changed["blueprintCoverageManifest"][field] = value
+                if field != "manifestDigest":
+                    manifest = changed["blueprintCoverageManifest"]
+                    manifest.pop("manifestDigest")
+                    manifest["manifestDigest"] = self.bridge._ea_factory_canonical_json_sha256(manifest)
+                    self.bridge._ea_factory_stage_row(changed, "generate_source")["blueprintCoverageManifest"] = copy.deepcopy(manifest)
+                variants.append((field, changed))
+            changed = copy.deepcopy(build)
+            self.bridge._ea_factory_stage_row(changed, "generate_source")["blueprintCoverageManifest"]["manifestDigest"] = "0" * 64
+            variants.append(("generation", changed))
+            for name, changed in variants:
+                with self.subTest(field=name):
+                    self.assertIsNone(self.bridge._ea_factory_trusted_custom_ema_smoke_profile(spec, build=changed))
+                    with self.assertRaises(self.bridge.DataIntegrityError):
+                        self.bridge._ea_factory_revalidated_build(changed)
+
+    def test_historical_profile_source_bytes_remain_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.bridge, "PROJECT_ROOT", Path(tmp)):
+            _record, spec, build, source_path, version_path = self.persisted_profile_fixture(Path(tmp))
+            source = source_path.read_text("utf-8")
+            tampered = source.replace("MQLInfoInteger(MQL_TESTER) == 0", "MQLInfoInteger(MQL_TESTER) == 1", 1)
+            self.assertNotEqual(tampered, source)
+            source_path.write_text(tampered, encoding="utf-8", newline="\n")
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_build(build)
+            self.assertEqual(version_path.read_text("utf-8"), source)
+            findings = self.bridge._ea_factory_custom_ema_smoke_source_findings(
+                spec, tampered, build=build, source_digest=hashlib.sha256(tampered.encode()).hexdigest())
+            self.assertIn("custom_ema_certified_source_mismatch", findings)
+            self.assertIn("custom_ema_tester_guard_missing", findings)
+
+    def test_mixed_historical_and_current_state_loads_without_rewriting_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); runtime = root / "data/runtime"; runtime.mkdir(parents=True)
+            with mock.patch.object(self.bridge, "PROJECT_ROOT", root), mock.patch.object(self.bridge, "RUNTIME_DIR", runtime):
+                _old, _spec, historical, _source, _version = self.persisted_profile_fixture(root)
+                _new, _spec, current, _source, _version = self.persisted_profile_fixture(root, historical=False, suffix="current")
+                state = self.bridge._empty_ea_factory_state(); state["builds"] = [historical, current]
+                self.bridge.write_json(self.bridge._ea_factory_state_path(), state)
+                before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+                with mock.patch.object(self.bridge, "write_json") as write, mock.patch.object(self.bridge, "append_audit") as audit:
+                    loaded = self.bridge._load_ea_factory_state_uncached()
+                write.assert_not_called(); audit.assert_not_called()
+                self.assertEqual([row["id"] for row in loaded["builds"]], [historical["id"], current["id"]])
+                self.assertTrue(all(row["coverageStatus"] == "compact_current" for row in loaded["builds"]))
+                after = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+                self.assertEqual(before, after)
+                state["builds"][0]["blueprintCoverageManifest"]["manifestDigest"] = "0" * 64
+                self.bridge.write_json(self.bridge._ea_factory_state_path(), state)
+                with self.assertRaises(self.bridge.DataIntegrityError):
+                    self.bridge._load_ea_factory_state_uncached()
+
+    def test_historical_legacy_v2_stays_read_only_after_compatibility(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.bridge, "PROJECT_ROOT", Path(tmp)):
+            _record, _spec, build, _source, _version = self.persisted_profile_fixture(Path(tmp))
+            manifest = build["blueprintCoverageManifest"]
+            manifest["schemaVersion"] = self.bridge.EA_FACTORY_LEGACY_CERTIFIED_EMA_SMOKE_MANIFEST_SCHEMA
+            manifest["coverageMode"] = self.bridge.EA_FACTORY_LEGACY_CERTIFIED_EMA_SMOKE_COVERAGE_MODE
+            manifest["checks"].pop("zeroBasedRequestIdentity"); manifest.pop("manifestDigest")
+            manifest["manifestDigest"] = self.bridge._ea_factory_canonical_json_sha256(manifest)
+            self.bridge._ea_factory_stage_row(build, "generate_source")["blueprintCoverageManifest"] = copy.deepcopy(manifest)
+            validated = self.bridge._ea_factory_revalidated_build(build)
+            self.assertTrue(validated["coverageUpgradeRequired"])
+            self.assertFalse(self.bridge._ea_factory_stage_can_advance(validated, "source_review"))
+            state = self.bridge._empty_ea_factory_state(); state["builds"] = [validated]
+            with mock.patch.object(self.bridge, "_load_ea_factory_state_unlocked", return_value=state), mock.patch.object(self.bridge, "_ea_factory_require_top_header_locks"):
+                with self.assertRaises(self.bridge.OptimizationDomainError):
+                    self.bridge._ea_factory_optimization_build_context(build["id"])
+                with self.assertRaises(self.bridge.RequestError) as failure:
+                    self.bridge.restart_ea_factory_build_backtest_only(build["id"], {"runId": "ea-run-historical", "idempotencyKey": "historical-restart"})
+                self.assertEqual(failure.exception.code, "backtest_restart_coverage_upgrade_required")
 
     def test_logic_recheck_accepts_only_current_sealed_certified_manifest(self) -> None:
         source_digest = "b" * 64

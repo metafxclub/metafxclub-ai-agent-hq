@@ -35,6 +35,7 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
         parent = {
             "analysisContext": {
                 "kind": "ai_trade_council_parent",
+                "automation": {"tradeCommandAllowed": True},
                 "snapshotId": snapshot_id,
                 "referencePrice": 2400.0,
                 "analysisQuote": {

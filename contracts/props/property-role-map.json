@@ -576,64 +576,283 @@
     },
     "left_signal_cube": {
       "functionName": "Daily Market News & FX Bias",
-      "displayTitle": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
+      "displayTitle": "แนวโน้ม 28 คู่เงินและข่าวตลาด",
       "purpose": "สรุปข่าวแรงและช่วงเวลาที่ควรระวัง EA พร้อมสร้างมุมมอง Bullish, Bearish หรือ Sideway สำหรับ 28 คู่เงินในระยะสั้น กลาง และยาวจากแหล่งข้อมูลสาธารณะที่ตรวจย้อนกลับได้ โดยเป็นข้อมูลประกอบการตัดสินใจ ไม่ใช่คำสั่งเทรด",
       "interactionMode": "dashboard",
       "connectionProfileId": "left_signal_cube",
       "departmentId": "daily_market_intelligence",
       "departmentName": "Daily Market Intelligence",
-      "primaryOwnerAgentId": null,
+      "primaryOwnerAgentId": "codex_mcp_operator",
       "contributorAgentIds": [],
       "reviewerAgentIds": [],
       "approverAgentIds": [],
-      "primaryReportType": "fx_news_bias_report",
-      "acceptedReportTypes": ["fx_news_bias_report", "dashboard_connection_report"],
-      "localTabs": [
-        {"id": "pair_bias", "labelTh": "มุมมอง 28 คู่เงิน", "purpose": "ดูผลประเมินแบบ deterministic จากข้อมูลข่าวทางการรอบล่าสุด", "actionIds": []},
-        {"id": "today", "labelTh": "ข่าวตลาดวันนี้", "purpose": "ดูข่าว เวลาประกาศ คู่เงินที่กระทบ และช่วงระวัง EA", "actionIds": [], "viewOnly": true},
-        {"id": "history", "labelTh": "ประวัติข่าว", "purpose": "ดูข่าวย้อนหลังจาก Direct Store และเปิดหลักฐานจากแหล่งทางการ", "actionIds": [], "viewOnly": true}
+      "primaryReportType": "fx28_trend_report",
+      "acceptedReportTypes": [
+        "fx_news_bias_report",
+        "dashboard_connection_report",
+        "fx28_trend_report"
       ],
-      "dashboardSections": ["current_news", "ea_caution_windows", "fx_pair_bias", "source_evidence"],
-      "allowedDashboardActions": [],
-      "legacyGenericActionIdsRejected": ["save_news_bias_schedule", "refresh_daily_market_news", "analyze_daily_market_news", "build_fx_pair_bias"],
-      "reportType": "fx_news_bias_report",
-      "ownerAgents": [],
+      "localTabs": [
+        {
+          "id": "pair_bias",
+          "labelTh": "มุมมอง 28 คู่เงิน",
+          "purpose": "ดูแนวโน้มจากแท่งราคาปิดและคำอธิบาย Codex ที่ผูกกับ snapshot เดียวกัน",
+          "actionIds": []
+        },
+        {
+          "id": "today",
+          "labelTh": "ข่าวตลาดวันนี้",
+          "purpose": "ดูข่าว เวลาประกาศ คู่เงินที่กระทบ และช่วงระวัง EA",
+          "actionIds": [],
+          "viewOnly": true
+        },
+        {
+          "id": "history",
+          "labelTh": "ประวัติข่าว",
+          "purpose": "ดูข่าวย้อนหลังจาก Direct Store และเปิดหลักฐานจากแหล่งทางการ",
+          "actionIds": [],
+          "viewOnly": true
+        }
+      ],
+      "dashboardSections": [
+        "current_news",
+        "ea_caution_windows",
+        "fx_pair_bias",
+        "source_evidence"
+      ],
+      "allowedDashboardActions": ["analyze_fx28_trends"],
+      "legacyGenericActionIdsRejected": [
+        "save_news_bias_schedule",
+        "refresh_daily_market_news",
+        "analyze_daily_market_news",
+        "build_fx_pair_bias"
+      ],
+      "reportType": "fx28_trend_report",
+      "ownerAgents": [
+        "codex_mcp_operator"
+      ],
       "defaultTab": "pair_bias",
       "dashboardUx": {
         "mainWorkTabId": "pair_bias",
         "historyReportTabId": "history",
         "historyReportTabPosition": "last",
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "Backend Direct Service เปิดค่าเริ่มต้น 00:00 และ 12:00 เวลาไทย สูงสุด 2 รอบต่อวัน; ผู้ใช้แก้ได้เฉพาะเปิด/ปิดและเวลา", "mode": "direct_backend_preference", "endpoint": "/api/props/left_signal_cube/news/schedule", "fields": ["enabled", "times"]},
-          {"id": "refresh", "labelTh": "อัปเดตตอนนี้", "purpose": "ดึงข้อมูลจากแหล่งทางการโดยตรงโดยไม่สร้าง Mission หรือเรียก Agent/AI", "mode": "direct_backend_action", "endpoint": "/api/props/left_signal_cube/news/refresh"},
-          {"id": "source_status", "labelTh": "สถานะแหล่งข้อมูล", "purpose": "แสดงสุขภาพแหล่งทางการต่อสกุลเงิน; ห้าม scrape Forex Factory และ Fair Economy", "mode": "backend_read_only"}
+          {
+            "id": "schedule",
+            "labelTh": "ตั้งเวลา",
+            "purpose": "Backend Direct Service เปิดค่าเริ่มต้น 00:00 และ 12:00 เวลาไทย สูงสุด 2 รอบต่อวัน; ผู้ใช้แก้ได้เฉพาะเปิด/ปิดและเวลา",
+            "mode": "direct_backend_preference",
+            "endpoint": "/api/props/left_signal_cube/news/schedule",
+            "fields": [
+              "enabled",
+              "times"
+            ]
+          },
+          {
+            "id": "refresh",
+            "labelTh": "อัปเดตตอนนี้",
+            "purpose": "ดึงข้อมูลจากแหล่งทางการโดยตรงโดยไม่สร้าง Mission หรือเรียก Agent/AI",
+            "mode": "direct_backend_action",
+            "endpoint": "/api/props/left_signal_cube/news/refresh"
+          },
+          {
+            "id": "source_status",
+            "labelTh": "สถานะแหล่งข้อมูล",
+            "purpose": "แสดงสุขภาพแหล่งทางการต่อสกุลเงิน; ห้าม scrape Forex Factory และ Fair Economy",
+            "mode": "backend_read_only"
+          }
         ],
         "crossDevicePolicy": "direct_local_service_only",
         "directDashboardPipeline": true,
         "missionStrategyTableRole": null
       },
-      "shows": ["current public-source news", "EA caution windows", "28-pair bias", "short medium long horizons", "source links", "prior release history with official source links"],
-      "accepts": ["วิเคราะห์ข่าวตลาดและ Bias 28 คู่ในรอบเดียว", "หาเวลาที่ควรระวัง EA", "ตั้งเวลาอัปเดตสูงสุดวันละ 2 รอบ"],
-      "actions": ["Refresh official news directly", "Save enabled and schedule times", "Open official source evidence"],
-      "dataSources": ["official structured source allowlist", "data/runtime/fx-daily-news-direct-state.json"],
+      "shows": [
+        "current public-source news",
+        "EA caution windows",
+        "28-pair bias",
+        "short medium long horizons",
+        "source links",
+        "prior release history with official source links"
+      ],
+      "accepts": [
+        "วิเคราะห์ข่าวตลาดและ Bias 28 คู่ในรอบเดียว",
+        "หาเวลาที่ควรระวัง EA",
+        "ตั้งเวลาอัปเดตสูงสุดวันละ 2 รอบ"
+      ],
+      "actions": [
+        "Refresh official news directly",
+        "Save enabled and schedule times",
+        "Open official source evidence"
+      ],
+      "dataSources": [
+        "official structured source allowlist",
+        "data/runtime/fx-daily-news-direct-state.json"
+      ],
       "workflow": {
         "id": "daily_market_news_fx_bias",
         "displayOrder": 6,
         "independent": true,
-        "coordinationMode": "deterministic_backend_direct",
+        "coordinationMode": "direct_news_plus_independent_fx28_mission",
         "agentTransferOnly": false,
         "directDashboardDependency": false,
-        "transferPolicy": {"mode": "none", "missionCreated": false, "agentUsed": false, "aiUsed": false},
-        "fxPairs": ["AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY", "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD", "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD", "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
-        "horizons": ["short", "medium", "long"],
-        "biasVocabulary": ["bullish", "bearish", "sideway", "insufficient_data"],
-        "schedule": {"preferenceRunsPerDay": [1, 2], "defaultTimes": ["00:00", "12:00"], "minimumImpact": "low", "minimumImpactEditable": false, "maximumTimes": 2, "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_direct_backend", "readiness": "ready_direct_backend", "defaultEnabled": true, "timezone": "Asia/Bangkok", "scheduledActionIds": [], "legacyManualActionIds": [], "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule", "refreshEndpoint": "/api/props/left_signal_cube/news/refresh"},
-        "readiness": {"officialStructuredSources": "ready_allowlisted_read_only", "directStoreAudit": "ready", "authoritativePublicSourcesRequired": true, "forexFactoryScraping": false, "fairEconomyScraping": false, "economicCalendarMode": "official_structured_direct", "recurringScheduler": "ready_direct_backend"}
+        "transferPolicy": {
+          "mode": "none",
+          "missionCreated": false,
+          "agentUsed": false,
+          "aiUsed": false,
+          "scope": "direct_news_only"
+        },
+        "fxPairs": [
+          "AUDCAD",
+          "AUDCHF",
+          "AUDJPY",
+          "AUDNZD",
+          "AUDUSD",
+          "CADCHF",
+          "CADJPY",
+          "CHFJPY",
+          "EURAUD",
+          "EURCAD",
+          "EURCHF",
+          "EURGBP",
+          "EURJPY",
+          "EURNZD",
+          "EURUSD",
+          "GBPAUD",
+          "GBPCAD",
+          "GBPCHF",
+          "GBPJPY",
+          "GBPNZD",
+          "GBPUSD",
+          "NZDCAD",
+          "NZDCHF",
+          "NZDJPY",
+          "NZDUSD",
+          "USDCAD",
+          "USDCHF",
+          "USDJPY"
+        ],
+        "horizons": [
+          "short",
+          "medium",
+          "long"
+        ],
+        "biasVocabulary": [
+          "bullish",
+          "bearish",
+          "sideway",
+          "insufficient_data"
+        ],
+        "schedule": {
+          "preferenceRunsPerDay": [
+            1,
+            2
+          ],
+          "defaultTimes": [
+            "00:00",
+            "12:00"
+          ],
+          "minimumImpact": "low",
+          "minimumImpactEditable": false,
+          "maximumTimes": 2,
+          "maximumRunsPerDay": 2,
+          "hardRuntimeEnforced": true,
+          "counterPersistence": "backend_local_settings",
+          "countingPolicy": "pre_dispatch_fail_closed_reservation",
+          "stalePendingPolicy": "expire_at_bangkok_day_boundary",
+          "catchUpPolicy": "latest_same_day_slot_only",
+          "configurationIntentReady": true,
+          "recurringSchedulerAdapterStatus": "implemented_direct_backend",
+          "readiness": "ready_direct_backend",
+          "defaultEnabled": true,
+          "timezone": "Asia/Bangkok",
+          "scheduledActionIds": [],
+          "legacyManualActionIds": [],
+          "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule",
+          "refreshEndpoint": "/api/props/left_signal_cube/news/refresh"
+        },
+        "readiness": {
+          "officialStructuredSources": "ready_allowlisted_read_only",
+          "directStoreAudit": "ready",
+          "authoritativePublicSourcesRequired": true,
+          "forexFactoryScraping": false,
+          "fairEconomyScraping": false,
+          "economicCalendarMode": "official_structured_direct",
+          "recurringScheduler": "ready_direct_backend"
+        }
       },
-      "workflowTracking": {"required": true, "fields": ["snapshotId", "marketDate", "providerMode", "sourceHealth", "coverageCurrencies", "failedCurrencies", "timestamps", "status"], "missionFields": []},
-      "executionPolicy": {"mode": "analysis_only", "liveTradingEnabled": false, "orderSubmissionEnabled": false, "frontendMayEnableExecution": false},
-      "doNotShow": ["broker credentials", "account number", "tokens", "cookies", "private feeds without permission"],
-      "openingMessage": "จุดนี้สรุปข่าวตลาดและ Bias ของ 28 คู่เงินครับ ทุกข้อสรุปต้องมีแหล่งอ้างอิง และผลเป็นเพียงข้อมูลประกอบ ไม่ส่งคำสั่งซื้อขาย"
+      "workflowTracking": {
+        "required": true,
+        "fields": [
+          "snapshotId",
+          "marketDate",
+          "providerMode",
+          "sourceHealth",
+          "coverageCurrencies",
+          "failedCurrencies",
+          "timestamps",
+          "status"
+        ],
+        "missionFields": [
+          "missionId",
+          "snapshotId",
+          "snapshotDigest",
+          "reportId",
+          "status"
+        ]
+      },
+      "executionPolicy": {
+        "mode": "analysis_only",
+        "liveTradingEnabled": false,
+        "orderSubmissionEnabled": false,
+        "frontendMayEnableExecution": false
+      },
+      "doNotShow": [
+        "broker credentials",
+        "account number",
+        "tokens",
+        "cookies",
+        "private feeds without permission"
+      ],
+      "openingMessage": "จุดนี้สรุปข่าวตลาดและ Bias ของ 28 คู่เงินครับ ทุกข้อสรุปต้องมีแหล่งอ้างอิง และผลเป็นเพียงข้อมูลประกอบ ไม่ส่งคำสั่งซื้อขาย",
+      "trendPipeline": {
+        "resultProfile": "fx_trend_daily_v1",
+        "actionId": "analyze_fx28_trends",
+        "reportType": "fx28_trend_report",
+        "pairCount": 28,
+        "horizons": [
+          "short",
+          "medium",
+          "long"
+        ],
+        "priceAuthority": "backend_deterministic_closed_bar_snapshot",
+        "codexRole": "grounded_thai_explanations_only",
+        "snapshotDigestRequired": true,
+        "sourceRefsRequired": true,
+        "nativeDirectOpenRequiredForNews": true,
+        "newsContextOptional": true,
+        "freshPriceVisibleWhileAiPending": true,
+        "aiOnGetAllowed": false,
+        "orderSubmissionAllowed": false,
+        "secretAccessAllowed": false
+      },
+      "trendSchedule": {
+        "supported": true,
+        "defaultEnabled": true,
+        "timezone": "Asia/Bangkok",
+        "defaultTimes": [
+          "08:00"
+        ],
+        "maximumTimes": 1,
+        "maximumRunsPerDay": 1,
+        "catchUpPolicy": "latest_same_day_slot_only",
+        "stalePendingPolicy": "expire_at_bangkok_day_boundary",
+        "singleMissionPerSlot": true,
+        "maximumAttemptsPerMission": 2,
+        "infrastructureRetry": {"maximumRetries": 1, "failureCodes": ["timeout", "runner_failed"], "delayMinutes": 5, "sameMissionAndAssignment": true, "sameBangkokDayOnly": true, "normalQuotaRequired": true, "quotaRefundAllowed": false},
+        "maximumChildProcesses": 0,
+        "quotaPolicy": "existing_codex_quota_and_reserve_guards"
+      }
     },
     "right_status_crystals": {
       "functionName": "HQ Equipment Connection Center",

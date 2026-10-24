@@ -1,0 +1,7 @@
+:host{display:block;height:100%;min-height:0;min-width:0;contain:layout style;isolation:isolate;overflow:auto;background:#020a12}
+.sentiment-embed-root{height:100%;min-height:0;min-width:0}
+.app-shell{height:100%;min-height:0}
+.embed-error{padding:40px;color:#d8edf8;font:400 15px/1.7 Sarabun,sans-serif}
+.embed-error h2{font-size:22px}.embed-error div{display:flex;gap:20px;align-items:center}.embed-error button{border:1px solid #31556d;border-radius:6px;padding:10px 18px;background:#133849}
+@media(min-width:901px){.app-main{height:auto;min-height:0}}
+@media(max-width:900px){.app-shell{height:auto;min-height:100%}}

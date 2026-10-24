@@ -169,10 +169,10 @@ class WorkspaceSentinelTests(unittest.TestCase):
         self.assertNotIn(workspace, serialized)
         self.assertNotIn("decisionNonce", serialized)
 
-    def test_failed_attestation_cannot_enable_production_workspace_gate(self):
-        source = BRIDGE.read_text(encoding="utf-8")
-        self.assertIn('FULL_AGENT_EXECUTABLE_MODES = frozenset({"chat"})', source)
-        self.assertIn("FULL_AGENT_INTERACTIVE_APPROVAL_BROKER_ENABLED = False", source)
+    def test_legacy_verifier_cannot_change_runtime_permission_policy(self):
+        # The old every-write expectation is not a workspace-write guarantee.
+        # Keep this historical verifier inert; explicit thread grants and
+        # real sandbox/approval behavior are verified in the runtime tests.
         self.assertNotIn("bridge_server.py", SCRIPT.read_text(encoding="utf-8"))
 
     def test_preapproval_mutation_fails_closed(self):

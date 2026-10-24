@@ -676,7 +676,8 @@ console.log(JSON.stringify({{
             "{ configRevision: normalizedConfigRevision, idempotencyKey }",
             sync,
         )
-        self.assertIn("syncEaFactoryGoogleSheet(currentCatalog.configRevision)", sync)
+        self.assertIn("syncEaFactoryGoogleSheet(intent.configRevision, {", sync)
+        self.assertIn("recordId, configRevision: currentCatalog.configRevision", sync)
         self.assertNotIn("googleSheetUrlOrId", sync)
         self.assertIn("sheetSchema.sourceRequiredHeaders", schema_renderer)
         self.assertIn("sheetSchema.sheetTabDefault", schema_renderer)

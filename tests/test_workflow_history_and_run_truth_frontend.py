@@ -26,7 +26,7 @@ class WorkflowHistoryAndRunTruthFrontendTests(unittest.TestCase):
         return self.main[match.start():match.end() + end.start()] if end else self.main[match.start():]
 
     def run_node(self, script):
-        result = subprocess.run([self.node, "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=15)
+        result = subprocess.run([self.node, "-"], input=script, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
@@ -70,7 +70,7 @@ process.stdout.write(JSON.stringify({history, today}));
             "safeDashboardDisplayText", "workflowDomainObject", "workflowDomainArray", "workflowReportRows", "indicatorScoutObjectRows",
             "indicatorScoutBangkokDateKey", "filterIndicatorScoutToday", "filterIndicatorScoutRollingSevenDays",
             "normalizeRadarSchedule", "normalizeRadarServiceHealth", "normalizeRadarRunStatus", "radarBangkokMinuteOfDay",
-            "getRadarTodayRunState", "normalizeIndicatorScoutDomain",
+            "normalizeRadarPublicationPolicy", "radarPublicationCountLabel", "getRadarTodayRunState", "normalizeIndicatorScoutDomain",
         ])
         script = r"""
 const INDICATOR_SCOUT_DEFAULT_TIME = '09:00', INDICATOR_SCOUT_TIMEZONE = 'Asia/Bangkok', INDICATOR_SCOUT_EXPECTED_BATCH_SIZE = 6;
@@ -102,7 +102,7 @@ process.stdout.write(JSON.stringify({run, reserved: domain.schedule.runsReserved
             "safeDashboardDisplayText", "workflowDomainObject", "workflowDomainArray", "workflowReportRows", "indicatorScoutObjectRows",
             "indicatorScoutBangkokDateKey", "filterIndicatorScoutToday", "filterIndicatorScoutRollingSevenDays",
             "normalizeRadarSchedule", "normalizeRadarServiceHealth", "normalizeRadarRunStatus", "radarBangkokMinuteOfDay",
-            "getRadarTodayRunState", "normalizeIndicatorScoutDomain", "createRadarTodayRunNotice",
+            "normalizeRadarPublicationPolicy", "radarPublicationCountLabel", "getRadarTodayRunState", "normalizeIndicatorScoutDomain", "createRadarTodayRunNotice",
         ])
         script = r"""
 const INDICATOR_SCOUT_DEFAULT_TIME = '09:00', INDICATOR_SCOUT_TIMEZONE = 'Asia/Bangkok', INDICATOR_SCOUT_EXPECTED_BATCH_SIZE = 6;
@@ -155,7 +155,7 @@ process.stdout.write(JSON.stringify({rows, validRepair}));
             self.assertTrue(row["unchanged"])
             self.assertEqual(row["remaining"], 0)
             self.assertFalse(row["retryAvailable"])
-        self.assertEqual(result["validRepair"]["state"], "corrective_running")
+        self.assertEqual(result["validRepair"]["state"], "queued")
 
 
 if __name__ == "__main__":

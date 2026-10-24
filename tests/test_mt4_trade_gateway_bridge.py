@@ -240,6 +240,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "id": "mission-council-test-01",
             "analysisContext": {
                 "kind": "ai_trade_council_parent",
+                "automation": {"tradeCommandAllowed": True},
                 "snapshotId": "a" * 64,
                 "referencePrice": 100.0,
                 "analysisQuote": {
@@ -732,6 +733,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "terminal_selection_changed_during_status_read",
         )
         self.assertIsNone(status["selectedCandidateId"])
+        self.assertIsNone(status["selectionRevision"])
         self.assertFalse(status["shadowValidationAvailable"])
         self.assertFalse(status["demoOrderExecutionAvailable"])
         self.assertFalse(status["liveOrderExecutionAvailable"])
@@ -781,6 +783,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
 
         self.assertFalse(status["connected"])
         self.assertEqual(status["status"], "awaiting_ea")
+        self.assertEqual(status["selectionRevision"], 1)
         self.assertEqual(status["observabilityStatus"], "degraded")
         self.assertEqual(
             set(status["observabilityWarnings"]),
@@ -967,6 +970,43 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "คู่เงินหรือ Timeframe ของกราฟไม่อยู่ในรายการที่อนุญาต",
             self.bridge._mt4_trade_gateway_init_status_message_th(init_status),
         )
+
+    def test_resident_blocked_init_diagnostic_keeps_identity_without_execution_authority(self) -> None:
+        self.write_ea_init_status(
+            eaVersion="1.04", gatewayMode="live", accountMode="live",
+            severity="error", stage="money_management",
+            reasonCode="LIVE_COMMISSION_POLICY_UNCONFIRMED",
+            eaAttached=True, runtimeReady=False,
+        )
+        with self.selected_candidate():
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+        self.assertEqual(status["selectionRevision"], 1)
+        self.assertEqual(status["selectedCandidateId"], self.candidate["candidateId"])
+        self.assertFalse(status["connected"])
+        self.assertFalse(status["liveOrderExecutionAvailable"])
+        self.assertFalse(status["demoOrderExecutionAvailable"])
+        self.assertFalse(status["shadowValidationAvailable"])
+        diagnostic = status["initStatus"]
+        self.assertTrue(diagnostic["eaAttached"])
+        self.assertFalse(diagnostic["runtimeReady"])
+        message = self.bridge._mt4_trade_gateway_init_status_message_th(diagnostic)
+        self.assertIn("EA ยังอยู่บนกราฟ", message)
+        self.assertIn("ไม่ส่งคำสั่งเทรด", message)
+        self.assertIn("ค่าคอมมิชชัน", message)
+        self.assertIn("LIVE_COMMISSION_POLICY_UNCONFIRMED", message)
+
+    def test_optional_resident_init_fields_require_complete_boolean_pair(self) -> None:
+        for extra in (
+            {"eaAttached": True}, {"runtimeReady": False},
+            {"eaAttached": "true", "runtimeReady": False},
+            {"eaAttached": True, "runtimeReady": 0},
+            {"eaAttached": True, "runtimeReady": False, "unexpected": True},
+        ):
+            with self.subTest(extra=extra):
+                self.write_ea_init_status(**extra)
+                diagnostic = self.bridge._read_mt4_trade_gateway_init_status(self.candidate)
+                self.assertFalse(diagnostic["available"])
+                self.assertEqual(diagnostic["readReasonCode"], "gateway_init_status_schema_invalid")
 
     def test_gateway_status_accepts_exact_v216_ready_init_diagnostic_shape(self) -> None:
         self.write_ea_init_status(
@@ -1606,6 +1646,123 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "single_windows_user_file_common_only",
         )
         self.assertFalse(status["crossVpsDistributedLock"])
+
+    def write_mt5_price_risk_status(self, **overrides) -> dict:
+        self.candidate["platform"] = "mt5"
+        values = {
+            **self.confirmed_live_policy_status(),
+            "eaVersion": "1.05", "terminalPlatform": "mt5",
+            "accountBindingId": "b" * 64,
+            "singleHostLiveAcknowledged": True,
+            "liveSafetyScope": "single_windows_user_file_common_only",
+            "mode": "live", "demoAccount": False, "accountMode": "live",
+            "liveArmed": True, "autoTradingAllowed": True, "tradeAllowed": True,
+            "riskCostBasis": "price_and_slippage_excluding_commission",
+            "estimatedCommissionPerLot": 0.0,
+            "commissionFreeAccountConfirmed": False,
+            **overrides,
+        }
+        return self.write_ea_status(**values)
+
+    def mt5_price_risk_read_model(self) -> dict:
+        with self.selected_candidate(), mock.patch.object(
+            self.bridge, "_read_mt5_snapshot_wire_binding",
+            return_value=({
+                "terminalPlatform": "mt5", "accountBindingId": "b" * 64,
+                "snapshotId": "price-risk-policy-snapshot",
+            }, "ready"),
+        ):
+            return self.bridge.mt4_trade_gateway_status_read_model()
+
+    def test_mt5_explicit_price_risk_policy_accepts_zero_reserve_without_claiming_free_account(self) -> None:
+        self.write_mt5_price_risk_status()
+        status = self.mt5_price_risk_read_model()
+        self.assertEqual(status["status"], "live_ready")
+        self.assertTrue(status["liveOrderExecutionAvailable"])
+        self.assertEqual(status["estimatedCommissionPerLot"], 0.0)
+        self.assertIs(status["commissionFreeAccountConfirmed"], False)
+        self.assertEqual(status["riskCostBasis"], "price_and_slippage_excluding_commission")
+        result = self.bridge._ai_trade_council_gateway_result(
+            status="no_trade", reason_code="manual_analysis_only", gateway_status=status,
+        )
+        self.assertEqual(result["riskCostBasis"], status["riskCostBasis"])
+        self.assertEqual(result["estimatedCommissionPerLot"], 0.0)
+        self.assertFalse(result["commandPublished"])
+        self.assertIsNone(result["command"])
+
+    def test_mt5_price_risk_policy_rejects_malformed_basis_and_nonzero_or_invalid_reserve(self) -> None:
+        cases = [
+            {"riskCostBasis": value}
+            for value in (None, True, 0, [], {}, "", "PRICE_AND_SLIPPAGE_EXCLUDING_COMMISSION",
+                          "price_and_slippage_excluding_commission ", "commission_free")
+        ] + [
+            {"estimatedCommissionPerLot": value}
+            for value in (7, -1, 0.000000001, False, "0", None, float("nan"), float("inf"))
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                self.write_mt5_price_risk_status(**fields)
+                parsed, reason = self.bridge._read_mt4_trade_gateway_ea_status(self.candidate)
+                self.assertIsNone(parsed)
+                self.assertIn(reason, {"gateway_status_risk_cost_basis_invalid", "gateway_status_sizing_policy_invalid"})
+                status = self.mt5_price_risk_read_model()
+                self.assertFalse(status["connected"])
+                self.assertFalse(status["liveOrderExecutionAvailable"])
+
+    def test_risk_cost_basis_cannot_be_added_to_mt4_status(self) -> None:
+        self.write_ea_status(
+            **self.confirmed_live_policy_status(),
+            riskCostBasis="price_and_slippage_excluding_commission", eaVersion="1.05",
+        )
+        parsed, reason = self.bridge._read_mt4_trade_gateway_ea_status(self.candidate)
+        self.assertIsNone(parsed)
+        self.assertEqual(reason, "gateway_status_schema_invalid")
+
+    def test_mt5_price_risk_policy_requires_complete_status_shape(self) -> None:
+        for missing in (
+            "commissionFreeAccountConfirmed", "singleHostLiveAcknowledged",
+            "liveSafetyScope", "terminalPlatform", "accountBindingId",
+        ):
+            with self.subTest(missing=missing):
+                payload = self.write_mt5_price_risk_status()
+                payload.pop(missing)
+                self.status_path().write_text(json.dumps(payload), encoding="ascii")
+                parsed, reason = self.bridge._read_mt4_trade_gateway_ea_status(self.candidate)
+                self.assertIsNone(parsed)
+                self.assertEqual(reason, "gateway_status_schema_invalid")
+                self.assertFalse(self.mt5_price_risk_read_model()["liveOrderExecutionAvailable"])
+
+    def test_mt5_version_without_risk_cost_basis_preserves_legacy_commission_guard(self) -> None:
+        for version in ("1.04", "1.05", "9.99"):
+            with self.subTest(version=version):
+                payload = self.write_mt5_price_risk_status(eaVersion=version)
+                payload.pop("riskCostBasis")
+                self.status_path().write_text(json.dumps(payload), encoding="ascii")
+                status = self.mt5_price_risk_read_model()
+                self.assertTrue(status["connected"])
+                self.assertIsNone(status["riskCostBasis"])
+                self.assertFalse(status["liveOrderExecutionAvailable"])
+                self.assertEqual(status["executionGuardReason"], "LIVE_COMMISSION_POLICY_UNCONFIRMED")
+
+    def test_mt5_price_risk_policy_never_bypasses_other_execution_guards(self) -> None:
+        cases = (
+            {"liveArmed": False}, {"singleHostLiveAcknowledged": False},
+            {"signedCommandVerificationAvailable": False}, {"signingKeyPinned": False},
+            {"activeSigningKeyId": "hk-" + "f" * 64},
+            {"executionGuardReady": False, "executionGuardReason": "MAX_MANAGED_POSITIONS_REACHED"},
+            {"killSwitchActive": True}, {"autoTradingAllowed": False}, {"tradeAllowed": False},
+            {"allowedSymbols": "EURUSD"}, {"demoAccount": True, "accountMode": "demo"},
+            {"portfolioPolicyStatus": "not_ready"}, {"portfolioPolicyDigest": "invalid"},
+            {"accountBindingId": "c" * 64}, {"terminalPlatform": "mt4"},
+            {"observedAt": int(time.time()) - 60},
+        )
+        for fields in cases:
+            with self.subTest(fields=fields):
+                self.write_mt5_price_risk_status(**fields)
+                status = self.mt5_price_risk_read_model()
+                self.assertFalse(status["liveOrderExecutionAvailable"])
+                self.assertNotEqual(status["status"], "live_ready")
+                self.assertNotEqual(status["executionGuardReason"], "LIVE_COMMISSION_POLICY_UNCONFIRMED")
 
     def test_live_status_blocks_unverified_unpinned_or_mismatched_ea_key(self) -> None:
         provisioned_key_id = self.signing_key_id()

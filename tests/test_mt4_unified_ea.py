@@ -2348,7 +2348,32 @@ class MT4UnifiedEATests(unittest.TestCase):
                 "maxAccountEquityDrawdownPercent",
             ],
         )
-        self.assertEqual(policy_fields, mt5_policy_fields)
+        # MT5 v1.05 has an explicit commission-excluded cost basis. MT4 keeps
+        # its commission-confirmation policy; their digests must stay distinct.
+        self.assertEqual(
+            mt5_policy_fields,
+            [
+                "managedMagicNumbers",
+                "positionSizingMode",
+                "riskPercent",
+                "riskCapitalBase",
+                "riskCostBasis",
+                "estimatedCommissionPerLot",
+                "maxManagedOpenPositions",
+                "maxManagedTotalLots",
+                "maxTradesPerBrokerDay",
+                "maxDailyLossPercent",
+                "maxManagedWeeklyLossPercent",
+                "maxConsecutiveManagedLosses",
+                "consecutiveLossCooldownMinutes",
+                "maxAccountEquityDrawdownPercent",
+            ],
+        )
+        self.assertEqual(
+            [field for field in policy_fields if field != "commissionFreeAccountConfirmed"],
+            [field for field in mt5_policy_fields if field != "riskCostBasis"],
+        )
+        self.assertIn("Sha256TextHex", mt5_policy)
         self.assertIn("Sha256TextHex", policy)
         self.assertIn("AccountIdentityDigest", directory)
         self.assertNotIn("SnapshotChannel", directory)

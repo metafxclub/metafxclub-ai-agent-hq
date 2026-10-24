@@ -1252,7 +1252,9 @@ def _validate_target(
     }
 
 
-def _validate_request(raw: object, expected_stage: str) -> dict:
+def _validate_request(
+    raw: object, expected_stage: str, *, diagnostic_only: bool = False
+) -> dict:
     if not isinstance(raw, dict):
         raise VisibleTerminalAdapterError("visible_request_invalid")
     required = {
@@ -1316,8 +1318,13 @@ def _validate_request(raw: object, expected_stage: str) -> dict:
         or not isinstance(operation, dict)
         or not SAFE_OPERATION_ID.fullmatch(str(operation.get("operationId") or ""))
         or operation.get("stageId") != expected_stage
-        or operation.get("state") != "reserved"
-        or operation.get("requiresExplicitResume") is not False
+        or not (
+            (operation.get("state") == "reserved"
+             and operation.get("requiresExplicitResume") is False)
+            or (diagnostic_only and expected_stage in {"compile_validate", "backtest_recheck"}
+                and operation.get("state") == "uncertain"
+                and operation.get("requiresExplicitResume") is True)
+        )
         or not isinstance(safety, dict)
         or safety_keys not in {frozenset(base_safety_keys), frozenset(base_safety_keys | dynamic_safety_keys)}
         or (
@@ -4967,6 +4974,41 @@ def _powershell_executable() -> Path:
     return candidate.resolve(strict=True)
 
 
+def _tester_pane_failure_observation(raw: object, code: str) -> dict | None:
+    """Accept only bounded diagnostic metadata; never readiness or raw captions."""
+    if (not isinstance(raw, dict) or set(raw) != {
+            "schemaVersion", "diagnosticOnly", "startInvoked", "testerVerified", "reasonCode",
+            "checkpoint", "signedRoot", "foreground", "foregroundStable"}
+            or raw.get("schemaVersion") != "mt5-tester-pane-failure-diagnostic-v1"
+            or raw.get("diagnosticOnly") is not True or raw.get("startInvoked") is not False
+            or raw.get("testerVerified") is not False or raw.get("reasonCode") != code
+            or code not in {"mt5_tester_pane_focus_before_reveal_failed", "mt5_tester_pane_restore_focus_lost",
+                            "mt5_tester_pane_restore_timeout", "mt5_tester_pane_reveal_focus_lost",
+                            "mt5_tester_pane_reveal_timeout"}
+            or raw.get("checkpoint") not in ("tester_pane_focus_before_reveal", "tester_pane_restore_readback",
+                                             "tester_pane_reveal_readback")
+            or type(raw.get("foregroundStable")) is not bool):
+        return None
+    root, foreground = raw.get("signedRoot"), raw.get("foreground")
+    if (not isinstance(root, dict) or set(root) != {"handle", "processId", "nativeRect", "clientRect"}
+            or not isinstance(foreground, dict) or set(foreground) != {
+                "handle", "exists", "processId", "nativeClass", "rootHandle", "ownerHandle", "titleCategory"}
+            or any(type(root.get(key)) is not int or not 0 < root[key] < 2**63 for key in ("handle", "processId"))
+            or any(type(foreground.get(key)) is not int or not 0 <= foreground[key] < 2**63
+                   for key in ("handle", "processId", "rootHandle", "ownerHandle"))
+            or type(foreground.get("exists")) is not bool
+            or not isinstance(foreground.get("nativeClass"), str)
+            or re.fullmatch(r"[A-Za-z0-9_.#:?\-]{0,96}", foreground["nativeClass"]) is None
+            or foreground.get("titleCategory") not in ("strategy_tester", "metatrader", "other", "unavailable")):
+        return None
+    for key in ("nativeRect", "clientRect"):
+        rect = root[key]
+        if (not isinstance(rect, dict) or set(rect) != {"left", "top", "right", "bottom"}
+                or any(type(value) is not int or not -(2**31) <= value < 2**31 for value in rect.values())):
+            return None
+    return copy.deepcopy(raw)
+
+
 def _default_powershell_runner(
     payload: dict, *, response_path: Path, timeout_seconds: int
 ) -> dict:
@@ -5091,9 +5133,15 @@ def _default_powershell_runner(
             action_response_path.unlink(missing_ok=True)
         except OSError:
             pass
-        raise VisibleTerminalAdapterError(
-            code, retryable=code.endswith(("_timeout", "_not_ready"))
-        )
+        error = VisibleTerminalAdapterError(code, retryable=code.endswith(("_timeout", "_not_ready")))
+        if (action == "probe" and payload.get("diagnosticFailureObservation") is True
+                and isinstance(raw, dict) and raw.get("schemaVersion") == POWERSHELL_RESULT_SCHEMA
+                and raw.get("action") == action and raw.get("operationId") == operation_id
+                and raw.get("ok") is False):
+            observation = _tester_pane_failure_observation(raw.get("testerPaneFailure"), code)
+            if observation is not None:
+                error.tester_pane_failure = observation
+        raise error
     # A successful Start action response is part of the exact-once recovery
     # boundary.  Keep it until the canonical Python receipt is fsynced; a
     # process crash after this return can then consume the completed evidence
@@ -5895,6 +5943,7 @@ class VisibleFrontOfficeAdapterMt5:
         visible_operation: dict,
         resolved_target: dict | None = None,
         tester_settings: dict | None = None,
+        diagnostic_failure_observation: bool = False,
     ) -> dict:
         common = {
             "ready": False,
@@ -5930,6 +5979,8 @@ class VisibleFrontOfficeAdapterMt5:
             ),
         }
         try:
+            if type(diagnostic_failure_observation) is not bool:
+                raise VisibleTerminalAdapterError("tester_pane_diagnostic_option_invalid")
             if platform != "mt5":
                 raise VisibleTerminalAdapterError("mt5_platform_required")
             if stage_id not in {"compile_validate", "backtest_recheck", "optimize"}:
@@ -5968,6 +6019,7 @@ class VisibleFrontOfficeAdapterMt5:
                         "compilerPath": str(target["compilerPath"]),
                         "dataPath": str(target["dataPath"]),
                         "requiredAutomationIds": common["automationIds"],
+                        **({"diagnosticFailureObservation": True} if diagnostic_failure_observation else {}),
                     },
                     response_path=Path(temporary) / "probe-response.json",
                     timeout_seconds=20,
@@ -5993,6 +6045,10 @@ class VisibleFrontOfficeAdapterMt5:
             common["terminalProcessProbe"] = terminal_probe
         except VisibleTerminalAdapterError as error:
             common["reasonCode"] = error.code
+            if diagnostic_failure_observation is True:
+                observation = _tester_pane_failure_observation(getattr(error, "tester_pane_failure", None), error.code)
+                if observation is not None:
+                    common["testerPaneFailure"] = observation
             return common
         except Exception:
             common["reasonCode"] = "terminal_capability_probe_failed"
@@ -6176,6 +6232,258 @@ class VisibleFrontOfficeAdapterMt5:
             if _path_has_reparse_component(resolved) or not _is_relative_to(resolved, workspace):
                 raise VisibleTerminalAdapterError("evidence_directory_unsafe")
             result[name] = resolved
+        return result
+
+    def compile_diagnostic(self, *, request: dict) -> dict:
+        """Inspect the already-open exact compiler without consuming a retry.
+
+        This deliberately produces no receipt, stage result or success evidence.
+        Only temporary transport files are written; the accepted source, working
+        copy, existing binary and durable intent must remain byte-for-byte stable.
+        """
+        context = _validate_request(request, "compile_validate", diagnostic_only=True)
+        target = self._target(request, context)
+        operation_id = context["operation"]["operationId"]
+        workspace = context["workspace"]
+        source_digest = context["source"]["digest"]
+        working_root = _resolved_directory(
+            target["dataPath"] / "MQL5" / "Experts" / "Metafxclub" / "AgentHQ" / operation_id,
+            "compile_diagnostic_working_copy_missing",
+        )
+        working_source = _resolved_file(
+            working_root / f"agenthq_{operation_id.removeprefix('ea-visible-')}.mq5",
+            "compile_diagnostic_working_copy_missing", maximum_bytes=MAX_SOURCE_BYTES,
+        )
+        if not secrets.compare_digest(
+            _stable_digest(working_source, maximum_bytes=MAX_SOURCE_BYTES)[0], source_digest
+        ):
+            raise VisibleTerminalAdapterError("compile_working_source_changed")
+        intent_path = _managed_path(
+            workspace, f"Summaries/{operation_id}-compile-intent.json",
+            "visible_action_intent_invalid",
+        )
+        expected_intent = {
+            "schemaVersion": ACTION_INTENT_SCHEMA,
+            "operationId": operation_id,
+            "stageId": "compile_validate",
+            "terminalCandidateId": target["candidateId"],
+            "terminalSelectionRevision": target["selectionRevision"],
+            "terminalBindingDigest": target["bindingDigest"],
+            "sourceDigest": source_digest,
+            "platform": "mt5",
+        }
+        if _read_json_object(intent_path, "visible_action_intent_invalid") != expected_intent:
+            raise VisibleTerminalAdapterError("visible_action_intent_mismatch")
+        observed_paths = [context["source"]["path"], working_source, intent_path]
+        binary = working_source.with_suffix(".ex5")
+        if binary.exists():
+            observed_paths.append(_resolved_file(
+                binary, "compile_diagnostic_binary_invalid", maximum_bytes=MAX_BINARY_BYTES,
+            ))
+
+        def snapshots() -> dict:
+            return {
+                str(path): (_stable_digest(path, maximum_bytes=MAX_BINARY_BYTES),
+                            path.stat().st_mtime_ns)
+                for path in observed_paths
+            }
+
+        before = snapshots()
+        binary_existed = binary.exists()
+        with tempfile.TemporaryDirectory(prefix="metafx-mt5-compile-diagnostic-") as temporary:
+            transport = Path(temporary)
+            probe = self._powershell_runner({
+                "schemaVersion": POWERSHELL_REQUEST_SCHEMA, "action": "probe",
+                "platform": "mt5", "stageId": "compile_validate", "operationId": operation_id,
+                "terminalPath": str(target["terminalPath"]),
+                "compilerPath": str(target["compilerPath"]), "dataPath": str(target["dataPath"]),
+                "requiredAutomationIds": {},
+            }, response_path=transport / "probe.json", timeout_seconds=20)
+            if (not isinstance(probe, dict) or probe.get("ok") is not True
+                    or probe.get("schemaVersion") != POWERSHELL_RESULT_SCHEMA
+                    or probe.get("action") != "probe" or probe.get("operationId") != operation_id):
+                raise VisibleTerminalAdapterError("terminal_process_probe_invalid")
+            terminal_probe = _validate_probe(probe.get("terminalProbe"), target)
+            raw = self._powershell_runner({
+                "schemaVersion": POWERSHELL_REQUEST_SCHEMA, "action": "diagnose_compile",
+                "platform": "mt5", "stageId": "compile_validate", "operationId": operation_id,
+                "terminalPath": str(target["terminalPath"]),
+                "compilerPath": str(target["compilerPath"]), "dataPath": str(target["dataPath"]),
+                "sourcePath": str(working_source), "expectedSourceDigest": source_digest,
+                "expectedTerminalProcessId": terminal_probe["processId"],
+                "expectedTerminalWindowHandle": terminal_probe["windowHandle"],
+            }, response_path=transport / "diagnostic.json", timeout_seconds=30)
+        if snapshots() != before or binary.exists() is not binary_existed:
+            raise VisibleTerminalAdapterError("compile_diagnostic_artifact_changed")
+        required = {
+            "schemaVersion", "ok", "action", "operationId", "diagnosticOnly",
+            "compileInvoked", "compileVerified", "workingSourceSha256",
+            "editorProcessId", "editorWindowHandle", "sourceWindowBound", "observation",
+        }
+        if (not isinstance(raw, dict) or set(raw) - {"pythonObservedDurationMs"} != required
+                or len(_canonical_json(raw)) > 16 * 1024
+                or raw.get("schemaVersion") != POWERSHELL_RESULT_SCHEMA
+                or raw.get("ok") is not True or raw.get("action") != "diagnose_compile"
+                or raw.get("operationId") != operation_id or raw.get("diagnosticOnly") is not True
+                or raw.get("compileInvoked") is not False or raw.get("compileVerified") is not False
+                or raw.get("workingSourceSha256") != source_digest
+                or raw.get("sourceWindowBound") is not True
+                or any(type(raw.get(key)) is not int or raw[key] <= 0
+                       for key in ("editorProcessId", "editorWindowHandle"))
+                or not isinstance(raw.get("observation"), dict)):
+            raise VisibleTerminalAdapterError("compile_diagnostic_result_invalid")
+        return copy.deepcopy(raw)
+
+    def tester_diagnostic(self, *, request: dict, compile_operation_id: str,
+                          diagnostic_screenshot_path: str | Path | None = None,
+                          allow_focus_change: bool = False) -> dict:
+        """Observe an uncertain Backtest's existing controls; never normalize or run.
+
+        This is not a capability, receipt or completion proof. The caller supplies
+        the original successful Compile operation, whose immutable evidence must
+        match this Backtest's accepted Source, binary and terminal selection.
+        Optional task-output capture explicitly permits focusing the exact bound
+        terminal only. The PNG is never a Build artifact or execution proof.
+        """
+        context = _validate_request(request, "backtest_recheck", diagnostic_only=True)
+        operation = context["operation"]
+        if (operation.get("state") != "uncertain"
+                or operation.get("requiresExplicitResume") is not True
+                or not isinstance(compile_operation_id, str)
+                or not SAFE_OPERATION_ID.fullmatch(compile_operation_id)
+                or compile_operation_id == operation["operationId"]):
+            raise VisibleTerminalAdapterError("tester_diagnostic_operation_invalid")
+        target = self._target(request, context)
+        workspace, source = context["workspace"], context["source"]
+        output = None
+        if diagnostic_screenshot_path is not None:
+            proposed = Path(diagnostic_screenshot_path)
+            output_parent = _resolved_directory(proposed.parent, "tester_diagnostic_output_invalid")
+            output = output_parent / proposed.name
+            blocked_roots = [workspace, target["dataPath"], target["installPath"]]
+            # Reject the installed HQ tree as well as the specific Build; task
+            # outputs belong outside Runtime and outside MetaTrader data.
+            blocked_roots.extend(parent for parent in workspace.parents
+                                 if (parent / "backend" / "local-runner").is_dir())
+            if (allow_focus_change is not True or not proposed.is_absolute()
+                    or output_parent.name != "outputs" or output.suffix.lower() != ".png"
+                    or output.exists() or _path_has_reparse_component(output_parent)
+                    or any(_is_relative_to(output, root) for root in blocked_roots)):
+                raise VisibleTerminalAdapterError("tester_diagnostic_output_invalid")
+        elif allow_focus_change is not False:
+            raise VisibleTerminalAdapterError("tester_diagnostic_output_invalid")
+        deployment = _validate_compiled_deployment(
+            request.get("compiledDeployment"), workspace=workspace, source=source, target=target,
+        )
+        receipt_path = _managed_path(workspace,
+            f"Summaries/{compile_operation_id}-compile-receipt.json", "visible_receipt_invalid")
+        intent_path = _managed_path(workspace,
+            f"Summaries/{compile_operation_id}-compile-intent.json", "visible_action_intent_invalid")
+        screenshot = _managed_path(workspace,
+            f"Screenshots/{compile_operation_id}-metaeditor64.png", "visible_receipt_invalid")
+        log = _managed_path(workspace,
+            f"Reports/{compile_operation_id}-compile-mt5.txt", "visible_receipt_invalid")
+        receipt = _read_json_object(receipt_path, "visible_receipt_invalid")
+        expected_intent = {
+            "schemaVersion": ACTION_INTENT_SCHEMA, "operationId": compile_operation_id,
+            "stageId": "compile_validate", "platform": "mt5", "sourceDigest": source["digest"],
+            "terminalCandidateId": target["candidateId"],
+            "terminalSelectionRevision": target["selectionRevision"],
+            "terminalBindingDigest": target["bindingDigest"],
+        }
+        if _read_json_object(intent_path, "visible_action_intent_invalid") != expected_intent:
+            raise VisibleTerminalAdapterError("visible_action_intent_mismatch")
+        if (receipt.get("schemaVersion") != RECEIPT_SCHEMA
+                or receipt.get("operationId") != compile_operation_id
+                or receipt.get("stageId") != "compile_validate" or receipt.get("platform") != "mt5"
+                or receipt.get("status") != "verified"
+                or receipt.get("terminalCandidateId") != target["candidateId"]
+                or receipt.get("sourceDigest") != source["digest"]
+                or receipt.get("compiledBinarySha256") != deployment["binarySha256"]
+                or receipt.get("visibleWindowSha256") != _validate_png(screenshot)[0]
+                or receipt.get("compileLogSha256") != _stable_digest(log, maximum_bytes=MAX_EVIDENCE_BYTES)[0]
+                or receipt.get("zeroErrors") is not True or receipt.get("zeroWarnings") is not True
+                or ZERO_COMPILE_RESULT.fullmatch(str(receipt.get("resultLine") or "")) is None
+                or receipt.get("immutableSourcePreserved") is not True
+                or any(receipt.get(key) is not False for key in
+                       ("liveTradingExecuted", "autoTradingToggled", "chartAttached", "terminalClosedByAdapter"))):
+            raise VisibleTerminalAdapterError("visible_receipt_evidence_mismatch")
+        for name in ("processBinding", "postProcessBinding"):
+            binding = receipt.get(name)
+            if (not isinstance(binding, dict) or binding.get("schemaVersion") != PROCESS_BINDING_SCHEMA
+                    or binding.get("stageId") != "compile_validate"
+                    or binding.get("terminalCandidateId") != target["candidateId"]
+                    or binding.get("terminalSelectionRevision") != target["selectionRevision"]
+                    or binding.get("terminalBindingDigest") != target["bindingDigest"]
+                    or binding.get("processBindingDigest") != _process_binding_digest(binding)
+                    or receipt.get(name + "Digest") != binding.get("processBindingDigest")):
+                raise VisibleTerminalAdapterError("visible_receipt_evidence_mismatch")
+        observed = [source["path"], deployment["binaryPath"], receipt_path, intent_path, screenshot, log]
+
+        def snapshots() -> dict:
+            return {str(path): (_stable_digest(path, maximum_bytes=MAX_BINARY_BYTES), path.stat().st_mtime_ns)
+                    for path in observed}
+
+        before = snapshots()
+        screenshot_bytes = None
+        base = {"schemaVersion": POWERSHELL_REQUEST_SCHEMA, "platform": "mt5",
+                "operationId": operation["operationId"], "terminalPath": str(target["terminalPath"]),
+                "compilerPath": str(target["compilerPath"]), "dataPath": str(target["dataPath"])}
+        with tempfile.TemporaryDirectory(prefix="metafx-mt5-tester-diagnostic-") as temporary:
+            transport = Path(temporary)
+            # Compile-stage probe only reads process metadata. Backtest's ordinary
+            # capability probe normalizes controls and is forbidden here.
+            probe = self._powershell_runner({**base, "action": "probe", "stageId": "compile_validate",
+                                            "requiredAutomationIds": {}},
+                                           response_path=transport / "probe.json", timeout_seconds=20)
+            if (not isinstance(probe, dict) or probe.get("ok") is not True
+                    or probe.get("schemaVersion") != POWERSHELL_RESULT_SCHEMA
+                    or probe.get("action") != "probe" or probe.get("operationId") != operation["operationId"]):
+                raise VisibleTerminalAdapterError("terminal_process_probe_invalid")
+            process = _validate_probe(probe.get("terminalProbe"), target)
+            screenshot_transport = transport / "diagnostic-terminal.png"
+            capture = ({"diagnosticScreenshotPath": str(screenshot_transport), "allowDiagnosticFocusChange": True}
+                       if output is not None else {})
+            raw = self._powershell_runner({**base, "action": "diagnose_tester", "stageId": "backtest_recheck",
+                "requiredAutomationIds": copy.deepcopy(BACKTEST_TESTER_AUTOMATION_IDS),
+                "expectedTerminalProcessId": process["processId"],
+                "expectedTerminalWindowHandle": process["windowHandle"],
+                "expectedSourceDigest": source["digest"], "expectedBinaryDigest": deployment["binarySha256"], **capture},
+                response_path=transport / "diagnostic.json", timeout_seconds=30)
+            if output is not None:
+                screenshot_digest, screenshot_size = _validate_png(screenshot_transport)
+                screenshot_bytes, _, _ = _stable_single_link_bytes(
+                    screenshot_transport, maximum_bytes=MAX_EVIDENCE_BYTES,
+                    code="tester_diagnostic_screenshot_invalid")
+                if (_sha256_bytes(screenshot_bytes) != screenshot_digest or len(screenshot_bytes) != screenshot_size):
+                    raise VisibleTerminalAdapterError("tester_diagnostic_screenshot_invalid")
+        if snapshots() != before:
+            raise VisibleTerminalAdapterError("tester_diagnostic_artifact_changed")
+        required = {"schemaVersion", "ok", "action", "operationId", "diagnosticOnly", "startInvoked",
+                    "testerVerified", "sourceDigest", "compiledBinarySha256", "terminalProcessId",
+                    "terminalWindowHandle", "observation"}
+        if output is not None:
+            required |= {"diagnosticScreenshotCaptured", "focusMayHaveChanged"}
+        if (not isinstance(raw, dict) or set(raw) - {"pythonObservedDurationMs"} != required
+                or len(_canonical_json(raw)) > 24 * 1024
+                or raw.get("schemaVersion") != POWERSHELL_RESULT_SCHEMA or raw.get("ok") is not True
+                or raw.get("action") != "diagnose_tester" or raw.get("operationId") != operation["operationId"]
+                or raw.get("diagnosticOnly") is not True or raw.get("startInvoked") is not False
+                or raw.get("testerVerified") is not False or raw.get("sourceDigest") != source["digest"]
+                or raw.get("compiledBinarySha256") != deployment["binarySha256"]
+                or type(raw.get("terminalProcessId")) is not int or raw["terminalProcessId"] != process["processId"]
+                or type(raw.get("terminalWindowHandle")) is not int or raw["terminalWindowHandle"] != process["windowHandle"]
+                or (output is not None and (raw.get("diagnosticScreenshotCaptured") is not True
+                                            or raw.get("focusMayHaveChanged") is not True))
+                or not isinstance(raw.get("observation"), dict)):
+            raise VisibleTerminalAdapterError("tester_diagnostic_result_invalid")
+        result = copy.deepcopy(raw)
+        if output is not None:
+            _write_exclusive(output, screenshot_bytes, "tester_diagnostic_output_exists")
+            result["diagnosticScreenshot"] = {
+                "path": str(output), "sha256": screenshot_digest, "byteSize": screenshot_size,
+                "diagnosticOnly": True, "notStageEvidence": True, "focusMayHaveChanged": True,
+            }
         return result
 
     def compile_handler(self, *, request: dict) -> dict:

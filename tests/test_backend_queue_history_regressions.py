@@ -44,45 +44,39 @@ class BackendQueueHistoryRegressionTests(unittest.TestCase):
             "executionPolicy": "audit_only_no_stale_dispatch",
         }
 
-    def test_513_pending_rows_never_leave_visible_unrunnable_work(self) -> None:
+    def test_513_pending_rows_keep_durable_overflow_outside_runnable_window(self) -> None:
         rows = self.bridge._ai_trade_council_coverage_records(
             [self._coverage(index) for index in range(513)]
         )
 
         pending = [row for row in rows if row["status"] == "pending"]
         skipped = [row for row in rows if row["status"] == "skipped"]
-        queue = self.bridge._ai_trade_council_pending_records(rows)
+        store = self.bridge._ai_trade_council_automation_default_store()
+        store['state']['coverageRecords'] = rows
+        queue = self.bridge._ai_trade_council_automation_store_shape(store)['state']['pendingQueue']
 
         self.assertEqual(len(rows), 513)
-        self.assertEqual(len(pending), 512)
-        self.assertEqual(queue, pending)
-        self.assertEqual(len(skipped), 1)
-        self.assertEqual(
-            skipped[0]["reasonCode"],
-            "pending_queue_capacity_exceeded",
-        )
-        self.assertEqual(
-            skipped[0]["executionPolicy"],
-            "audit_only_no_stale_dispatch",
-        )
+        self.assertEqual(len(pending), 513)
+        self.assertEqual(queue, pending[:512])
+        self.assertEqual(len(skipped), 0)
         self.assertEqual(
             [row["closedBarTime"] for row in pending],
             sorted(row["closedBarTime"] for row in pending),
         )
 
-    def test_2049_pending_rows_preserve_fifo_head_and_terminalize_overflow(self) -> None:
+    def test_2049_pending_rows_survive_terminal_history_retention(self) -> None:
         source = [self._coverage(index) for index in range(2_049)]
         rows = self.bridge._ai_trade_council_coverage_records(source)
 
         pending = [row for row in rows if row["status"] == "pending"]
         skipped = [row for row in rows if row["status"] == "skipped"]
 
-        self.assertEqual(len(rows), 2_048)
-        self.assertEqual(len(pending), 512)
-        self.assertEqual(len(skipped), 1_536)
+        self.assertEqual(len(rows), 2_049)
+        self.assertEqual(len(pending), 2_049)
+        self.assertEqual(len(skipped), 0)
         self.assertEqual(
             [row["closedBarTime"] for row in pending],
-            [row["closedBarTime"] for row in source[:512]],
+            [row["closedBarTime"] for row in source],
         )
         self.assertTrue(
             all(
@@ -130,7 +124,7 @@ class BackendQueueHistoryRegressionTests(unittest.TestCase):
         self.assertEqual(model["state"]["pending"]["queueDepth"], 2)
         self.assertEqual(
             model["backlogPolicy"]["queueOrder"],
-            "oldest_closed_bar_first",
+            "current_closed_bar_then_audit_fifo",
         )
         self.assertEqual(model["backlogPolicy"]["staleTradeCommand"], "blocked")
 

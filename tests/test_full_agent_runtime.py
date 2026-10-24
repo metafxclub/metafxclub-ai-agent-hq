@@ -77,6 +77,36 @@ class FullAgentRuntimeTests(unittest.TestCase):
             all(not item["toolExecutionEnabled"] for item in status["capabilityModes"])
         )
 
+    def test_explicit_access_grant_survives_restart_and_chat_revokes_it(self) -> None:
+        thread = self.create_thread(mode="full")["thread"]
+        self.assertEqual(thread["accessGrant"]["scope"], "thread")
+        self.assertEqual(thread["accessGrant"]["authorization"], "user_selected_mode")
+        restarted = self.module.FullAgentRuntime(self.root)
+        restored = restarted.get_thread(thread["id"])
+        self.assertEqual(restored["accessGrant"], thread["accessGrant"])
+        changed = restarted.update_settings(thread["id"], mode="chat", expected_revision=restored["revision"])
+        self.assertIsNone(changed["accessGrant"])
+        self.assertIsNone(self.module.FullAgentRuntime(self.root).get_thread(thread["id"])["accessGrant"])
+
+    def test_legacy_mode_without_grant_does_not_infer_authorization(self) -> None:
+        thread = self.create_thread(mode="workspace")["thread"]
+        store_path = self.root / self.module.STORE_FILENAME
+        stored = json.loads(store_path.read_text(encoding="utf-8"))
+        stored["threads"][thread["id"]].pop("accessGrant")
+        store_path.write_text(json.dumps(stored), encoding="utf-8")
+        restored = self.module.FullAgentRuntime(self.root).get_thread(thread["id"])
+        self.assertIsNone(restored["accessGrant"])
+        changed = self.runtime.update_settings(thread["id"], mode="workspace", expected_revision=restored["revision"])
+        self.assertEqual(changed["accessGrant"]["mode"], "workspace")
+
+    def test_mismatched_grant_cannot_elevate_persisted_mode(self) -> None:
+        thread = self.create_thread(mode="workspace")["thread"]
+        store_path = self.root / self.module.STORE_FILENAME
+        stored = json.loads(store_path.read_text(encoding="utf-8"))
+        stored["threads"][thread["id"]]["accessGrant"]["mode"] = "full"
+        store_path.write_text(json.dumps(stored), encoding="utf-8")
+        self.assert_error("store_corrupt", lambda: self.runtime.get_thread(thread["id"]))
+
     def approval_request(self, **overrides):
         request = {
             "requestId": "approval-request-0001",

@@ -33,6 +33,7 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
             "POST /api/props/right_server_racks/ea-factory/builds",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/advance",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/retry",
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/recover-source",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/restart-backtest",
         }
@@ -72,6 +73,21 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         )
 
         shapes = factory["endpointShapes"]
+        recovery = shapes["recoverSource"]
+        self.assertEqual(recovery["allowedRequestFields"], [
+            "idempotencyKey", "strategySpecDigest", "failedMissionId",
+            "failureReportId", "fileName", "content",
+        ])
+        self.assertEqual(recovery["requiredRequestFields"], recovery["allowedRequestFields"])
+        self.assertEqual(recovery["maximumSourceBytes"], 48 * 1024)
+        self.assertEqual(recovery["maximumAcceptedRecoveriesPerBuild"], 1)
+        self.assertEqual(recovery["sourceOrigin"], "operator_recovery")
+        self.assertFalse(recovery["startsWorker"])
+        self.assertFalse(recovery["startsTerminal"])
+        self.assertFalse(recovery["buysCredits"])
+        self.assertIn("retry_count", recovery["preserves"])
+        self.assertIn("retry_history", recovery["preserves"])
+        self.assertIn("independent_source_review", recovery["downstreamGuards"])
         self.assertEqual(shapes["read"]["requestBody"], "none")
         self.assertFalse(shapes["read"]["sideEffects"])
         catalog = shapes["googleSheetCatalog"]

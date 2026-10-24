@@ -28,13 +28,15 @@ class FullAgentContractTests(unittest.TestCase):
         self.assertTrue(transport["mutationOriginMustMatchRequestAuthority"])
         self.assertFalse(transport["localProcessAuthenticationClaimed"])
 
-    def test_sdk_auto_approval_and_danger_full_access_are_forbidden(self) -> None:
+    def test_full_access_requires_a_durable_grant_and_keeps_escalation_defaults(self) -> None:
         policy = self.contract["approvalPolicy"]
         self.assertFalse(policy["sdkDefaultApprovalHandlerAllowed"])
         self.assertEqual(policy["commandExecutionDefaultDecision"], "decline")
         self.assertEqual(policy["fileChangeDefaultDecision"], "decline")
         self.assertEqual(policy["permissionEscalationDefault"], "grant_nothing")
-        self.assertFalse(policy["dangerFullAccessAllowed"])
+        self.assertEqual(policy["dangerFullAccessAllowed"], "only_with_backend_validated_explicit_thread_grant")
+        self.assertTrue(self.contract["modes"]["full"]["requiresAccessGrant"])
+        self.assertEqual(self.contract["modes"]["full"]["sandbox"], "danger-full-access")
         self.assertNotEqual(self.contract["modes"]["workspace"]["sandbox"], "danger-full-access")
 
     def test_tool_modes_fail_closed_until_approval_adapter_exists(self) -> None:
@@ -92,15 +94,17 @@ class FullAgentContractTests(unittest.TestCase):
         )
         self.assertTrue(projection["fullAgentSerializerIsEndpointSpecific"])
 
-    def test_failed_live_sentinel_keeps_workspace_fail_closed(self) -> None:
+    def test_workspace_requires_explicit_scope_instead_of_repeated_in_scope_approvals(self) -> None:
         activation = self.contract["workspaceActivation"]
         self.assertFalse(activation["ready"])
         self.assertEqual(
             activation["liveSentinelStatus"],
-            "failed_unapproved_write",
+            "replaced_by_explicit_thread_grant_policy",
         )
         self.assertFalse(activation["failedSentinelMayBeOverriddenByFrontend"])
-        self.assertFalse(activation["wholeWorkspacePreTurnGrantSupported"])
+        self.assertTrue(activation["wholeWorkspacePreTurnGrantSupported"])
+        self.assertFalse(activation["legacyThreadGrantInferred"])
+        self.assertFalse(activation["liveTradingAuthorizationInherited"])
 
 
 if __name__ == "__main__":
