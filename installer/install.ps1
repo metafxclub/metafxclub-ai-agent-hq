@@ -1686,6 +1686,17 @@ function Copy-ApplicationFiles {
     Sync-Directory -DirectoryName "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness" -DestinationRoot $DestinationRoot
     Sync-Directory -DirectoryName "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness" -DestinationRoot $DestinationRoot
 
+    # Keep arbitrary user/runtime *.log files excluded by Sync-Directory.
+    # Only these reviewed public native-compile logs belong to the release;
+    # New-StagedApplication checks their complete inventory and hashes again.
+    foreach ($artifactLogRelativePath in @(
+        "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_LOG.log",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\COMPILE_LOG.log"
+    )) {
+        Copy-Item -LiteralPath (Join-Path $sourceRoot $artifactLogRelativePath) `
+            -Destination (Join-Path $DestinationRoot $artifactLogRelativePath) -Force
+    }
+
     $rootFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
         "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat", "2-SETUP-GOOGLE-HQ.bat",

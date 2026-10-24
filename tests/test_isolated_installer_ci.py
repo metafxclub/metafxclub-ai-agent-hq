@@ -1,14 +1,33 @@
 """The native installer smoke may run only on actual isolated CI runners."""
 import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from tests.release_secret_scan import scan_embedded_secrets
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts/test-isolated-installer-ci.ps1'
 
 
 class IsolatedInstallerCiTests(unittest.TestCase):
+    def test_fixture_client_is_not_duplicated_in_the_distributed_generator(self):
+        # A literal fixture client ID in this distributed script is correctly
+        # rejected by release preflight after its client file is injected.
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            client = fixture / 'backend/local-runner/google_oauth_native_client.txt'
+            client.parent.mkdir(parents=True)
+            client_id = 'inert-smoke-fixture' + '.apps.googleusercontent.com'
+            client.write_text('client_id=' + client_id + '\nclient_secret=' + 'GOC' + 'SPX-' + 'INERT_SMOKE_FIXTURE_' * 2 + '\n', encoding='utf-8')
+            script = fixture / 'scripts/test-isolated-installer-ci.ps1'
+            script.parent.mkdir(parents=True)
+            script.write_bytes(SCRIPT.read_bytes())
+            self.assertEqual(scan_embedded_secrets(fixture, allow_central_native_client=True), [])
+        text = SCRIPT.read_text(encoding='utf-8-sig')
+        self.assertIn("$ciDummyClientId = 'inert-smoke-' + [Guid]::NewGuid()", text)
+        self.assertIn('client_id=$ciDummyClientId', text)
+
     def test_workflow_uses_read_only_ci_job_and_does_not_upload_fixture(self):
         workflow = (ROOT / '.github/workflows/verify.yml').read_text(encoding='utf-8-sig')
         job = workflow[workflow.index('  isolated-installer:'):]

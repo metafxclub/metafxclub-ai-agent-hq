@@ -4,12 +4,12 @@
 
 ## ขอบเขตของรุ่น 1.07
 
-- รองรับเฉพาะบัญชี MT5 แบบ **Hedging** เท่านั้น หากเป็น Netting หรือ Exchange EA จะหยุดตั้งแต่ `OnInit` ด้วย `MT5_HEDGING_ACCOUNT_REQUIRED`
+- รองรับเฉพาะบัญชี MT5 แบบ **Hedging** เท่านั้น หากเป็น Netting หรือ Exchange EA จะถูกบล็อกตั้งแต่ initialization ด้วย `MT5_HEDGING_ACCOUNT_REQUIRED` และคงอยู่บนกราฟแบบ `ATTACHED / BLOCKED` โดยไม่ส่งคำสั่งเทรด
 - ค่าเริ่มต้นคือ `GatewayMode = GATEWAY_SHADOW`, `LiveArmed = false` และ `SingleHostLiveAcknowledged = false`
 - รองรับคำสั่งตลาด `BUY` และ `SELL` ที่มี SL/TP เท่านั้น
 - เลือก Money Management จาก Input ของ EA ได้ 2 แบบ: `MONEY_MANAGEMENT_FIXED_LOT` ใช้ `FixedLot` และ `MONEY_MANAGEMENT_RISK_PERCENT` คำนวณ Lot จาก `RiskPercent` ของ `BALANCE` หรือ `EQUITY` ตาม `RiskCapitalBase`; คำสั่งจาก Backend/AI ไม่มีสิทธิ์กำหนด Lot, Risk หรือโหมด Money Management
-- โหมด Risk Percent คิดขาดทุนถึง SL ด้วย `OrderCalcProfit` ในหน่วยเงินของบัญชี เพิ่มระยะเผื่อราคาเสียเปรียบตาม `SlippagePoints` และสำรองค่าธรรมเนียมจาก `EstimatedCommissionPerLot` ซึ่งหมายถึง **ค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในหน่วยเงินของบัญชี** (ไม่ใช่ค่าต่อขาและไม่ใช่ USD เสมอ) ค่านี้ถูกปัดเป็น 8 ตำแหน่งก่อนใช้ใน Policy, Status และการคำนวณ จึงใช้หลักเดียวกันกับบัญชี Standard, Cent หรือ Pro-Cent โดยไม่มีการเดาชื่อบัญชีหรือคูณ/หาร 100
-- โหมด Live ทุกแบบจะไม่พร้อมทำงานถ้า `EstimatedCommissionPerLot` ที่ปัด 8 ตำแหน่งต่ำกว่า `0.00000001` เว้นแต่บัญชีนั้นไม่มีค่าคอมมิชชันจริงและผู้ควบคุมยืนยันด้วย `CommissionFreeAccountConfirmed = true`; หากยังไม่ยืนยันจะ fail-closed ด้วย `LIVE_COMMISSION_POLICY_UNCONFIRMED`
+- โหมด Risk Percent คิดขาดทุนถึง SL ด้วย `OrderCalcProfit` ในหน่วยเงินของบัญชี และเพิ่มระยะเผื่อราคาเสียเปรียบตาม `SlippagePoints` โดยรายงาน `riskCostBasis=price_and_slippage_excluding_commission` ขนาด Lot ของคำสั่งใหม่ **ไม่รวมค่าคอมมิชชันหรือ Swap** และไม่มีการเดาชื่อบัญชีหรือคูณ/หาร 100 สำหรับบัญชี Standard, Cent หรือ Pro-Cent
+- `EstimatedCommissionPerLot` และ `CommissionFreeAccountConfirmed` เป็น Inputs เก่าที่คงไว้เพื่ออ่านไฟล์ SET เดิม รุ่น 1.07 ไม่ใช้สองค่านี้ในการคำนวณ Lot ใหม่หรือเป็นเงื่อนไขเปิด Live (`EffectiveEstimatedCommissionPerLot()` คืนค่า `0.0`) จึงไม่ต้องเปิดคำยืนยันว่าบัญชีไม่มีค่าคอมมิชชัน ทั้งนี้ไม่ได้หมายความว่าโบรกเกอร์ไม่คิดค่าธรรมเนียม การกู้ execution-attempt เก่ายังคงใช้ค่าที่บันทึกไว้ตอนส่งคำสั่งนั้น ไม่คำนวณใหม่จาก Inputs ปัจจุบัน
 - โหมด Shadow/Demo อนุญาตการจับคู่ชื่อ Symbol แบบ prefix/suffix ที่มีขอบเขตเพื่อช่วยทดสอบกับชื่อโบรกเกอร์ แต่โหมด Live ต้องใส่ชื่อเต็มของกราฟปัจจุบัน (เช่น `mXAUUSD` หรือ `XAUUSD.a`) เป็น token ตรงตัวใน `AllowedSymbols`; มิฉะนั้นจะ fail-closed ด้วย `LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST`
 - Lot ที่คำนวณได้จะปัดลงตาม `SYMBOL_VOLUME_MIN/MAX/STEP`, ไม่ฝืนส่งขั้นต่ำหาก Risk Budget ต่ำกว่า Lot ขั้นต่ำ, เคารพ `SYMBOL_VOLUME_LIMIT`, `MaxManagedTotalLots`, Margin และ `OrderCheck`; ถ้าคำนวณ SL, มูลค่าความเสี่ยง หรือข้อมูลโบรกเกอร์ไม่ได้ ระบบจะ fail-closed
 - ขนาด Lot จะคำนวณเพียงครั้งเดียวต่อคำสั่งและบันทึกลง execution-attempt ก่อน `OrderSend`; หาก EA/Terminal รีสตาร์ต การตรวจหลักฐานจะใช้ Lot ที่บันทึกไว้นั้น ไม่คำนวณใหม่จาก Equity หรือ Tick ที่เปลี่ยนไป
@@ -35,7 +35,7 @@
 
 EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เหมือน MT4 และใช้ namespace `MT4|<login>|<server>` สำหรับ account execution lock โดยตั้งใจ เพื่อประสาน MT4 กับ MT5 ที่ใช้บัญชีเดียวกันภายใต้ Windows user และเครื่องเดียวกัน
 
-รุ่น 1.07 เปิด `GATEWAY_LIVE` ได้เฉพาะรูปแบบ **Single-host Live** โดยถือ account-owner lock แบบค้างตลอดอายุ EA ตาม Login + Server ภายใต้ `FILE_COMMON` หากมี Gateway MT5 รุ่นที่รองรับ lock นี้เป็นเจ้าของบัญชีเดียวกันอยู่แล้ว ตัวที่สองจะหยุดด้วย `LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE` และหากมีการเปลี่ยน Login หรือ Server หลังเริ่มทำงาน คำสั่งจะถูกปฏิเสธด้วย `LIVE_ACCOUNT_BINDING_CHANGED`
+รุ่น 1.07 เปิด `GATEWAY_LIVE` ได้เฉพาะรูปแบบ **Single-host Live** โดยถือ account-owner lock แบบค้างตลอดอายุ EA ตาม Login + Server ภายใต้ `FILE_COMMON` หากมี Gateway MT5 รุ่นที่รองรับ lock นี้เป็นเจ้าของบัญชีเดียวกันอยู่แล้ว ตัวที่สองจะถูกบล็อกด้วย `LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE` โดยไม่ส่งคำสั่ง และหากมีการเปลี่ยน Login หรือ Server หลังเริ่มทำงาน คำสั่งจะถูกปฏิเสธด้วย `LIVE_ACCOUNT_BINDING_CHANGED`
 
 ข้อจำกัดสำคัญ: `FILE_COMMON` **ไม่ใช่ Distributed Lock** และไม่สามารถกัน Terminal ที่อยู่คนละ Windows user, คนละเครื่อง หรือคนละ VPS ได้ ค่า Status จึงยังรายงาน `crossVpsDistributedLock=false` และ `liveSafetyScope=single_windows_user_file_common_only` ตามความจริง ห้ามเปิด Live ของบัญชีเดียวกันซ้ำบน Windows user/เครื่อง/VPS อื่น หากต้องการรันข้ามหลายเครื่องต้องเพิ่ม remote account-scoped fenced lease ที่ Backend ก่อน
 
@@ -49,7 +49,7 @@ EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เ�
 6. เลือก `MoneyManagementMode`:
    - `MONEY_MANAGEMENT_FIXED_LOT`: ตั้ง `FixedLot`
    - `MONEY_MANAGEMENT_RISK_PERCENT`: ตั้ง `RiskPercent` (ต้องไม่เกิน `MaxLossPerTradePercent`) และเลือก `RiskCapitalBase` เป็น `EQUITY` หรือ `BALANCE`
-   - ทั้งสองโหมด: ตั้ง `EstimatedCommissionPerLot` เป็นค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในหน่วยเงินของบัญชี หากบัญชีไม่มีค่าคอมมิชชันจริงเท่านั้นจึงตั้ง `0` และเปิด `CommissionFreeAccountConfirmed`
+   - ทั้งสองโหมด: สอง Inputs เดิม `EstimatedCommissionPerLot` และ `CommissionFreeAccountConfirmed` ไม่มีผลกับ Lot ของคำสั่งใหม่ในรุ่น 1.07 ประเมินค่าคอมมิชชันและ Swap แยกจากตัวเลขความเสี่ยงที่ EA รายงาน โดยอิงเงื่อนไขบัญชีจริงของโบรกเกอร์
 7. เริ่มด้วย `GATEWAY_SHADOW` และตรวจว่า Snapshot, Status และ Shadow ACK ปรากฏครบ รวมถึง `positionSizingMode`, `riskPercent`, `riskCapitalBase` และ Broker volume limits
 8. ใช้บัญชี Demo เปลี่ยนเป็น `GATEWAY_DEMO` แล้วทดสอบคำสั่งจริงแบบมองเห็นได้ก่อนเสมอ
 
@@ -61,13 +61,13 @@ EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เ�
 2. ใช้บัญชี MT5 แบบ **Real + Hedging** เท่านั้น เปิด Algo Trading และอนุญาต EA ให้เทรด
 3. ตั้ง `GatewayMode = GATEWAY_LIVE`
 4. ใส่ชื่อ Symbol เต็มที่ MT5 แสดงในกราฟปัจจุบันเป็น token ตรงตัวใน `AllowedSymbols` รวม prefix/suffix ของโบรกเกอร์ทุกตัวอักษร
-5. ตั้ง `EstimatedCommissionPerLot` เป็นค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในสกุลเงิน/หน่วยเงินของบัญชี หรือเปิด `CommissionFreeAccountConfirmed` เฉพาะบัญชีที่ไม่มีค่าคอมมิชชันจริง
+5. ตรวจ Money Management และเพดานความเสี่ยงของบัญชี โดยเข้าใจว่า `riskCostBasis=price_and_slippage_excluding_commission` ไม่รวมค่าคอมมิชชันและ Swap; Inputs ค่าคอมมิชชันเดิมไม่ใช่สวิตช์ปลดล็อก Live ในรุ่นนี้
 6. ตั้ง `TrustedSigningKeyId` เป็น Key ID ที่ Local Runner ใช้อยู่จริง ห้ามเว้นว่าง และต้องผ่าน HMAC verification
 7. ตั้ง `LiveArmed = true`
 8. อ่านข้อจำกัด Single-host ด้านบน แล้วตั้ง `SingleHostLiveAcknowledged = true` เฉพาะเมื่อยืนยันว่าจะไม่รันบัญชีเดียวกันบน Windows user/เครื่อง/VPS อื่น
 9. ตรวจข้อความบนกราฟให้เป็น `Live Owner Lock: ready`, `Risk Guard: READY` และยืนยันว่าแสดง `Cross-VPS Distributed Lock: false` ก่อนเริ่ม
 
-หากขาด Real account, ค่าคอมมิชชัน/คำยืนยันบัญชีปลอดค่าคอมมิชชัน, exact Symbol allowlist, `LiveArmed`, acknowledgement, signing pin/HMAC, heartbeat, owner lock หรือ Risk Guard ใด ๆ EA จะ fail-closed และไม่เรียก `OrderSend`
+หากขาด Real + Hedging account, exact Symbol allowlist, `LiveArmed`, acknowledgement, signing pin/HMAC, heartbeat, owner lock หรือ Risk Guard ใด ๆ EA จะ fail-closed และไม่เรียก `OrderSend`
 
 การเลือก Terminal ใหม่ที่ Backend จะต้องทำเมื่อไม่มีคำสั่งค้าง/สถานะไม่แน่นอน/Position ที่ระบบดูแลอยู่เท่านั้น แต่ account-owner lock รุ่นนี้ครอบคลุมเฉพาะ Local Gateway ที่รองรับ lock ภายใต้ Windows user และ host เดียว ไม่ได้พิสูจน์ความเป็นเจ้าของข้าม VPS
 
@@ -77,7 +77,7 @@ EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เ�
 
 `OrderSend()` ที่คืนค่า `true` เพียงอย่างเดียวไม่ถือว่าสำเร็จ, `TRADE_RETCODE_DONE_PARTIAL` และ `TRADE_RETCODE_PLACED` ไม่ถูกยกระดับเป็น `EXECUTED`
 
-`estimatedRiskMoney` เป็นค่าประมาณก่อนส่งคำสั่ง ไม่ใช่การรับประกันขาดทุนสูงสุดจริง เพราะราคา Gap, Slippage ที่มากกว่าค่าที่เผื่อไว้, Swap และค่าธรรมเนียมจริงที่ต่างจาก `EstimatedCommissionPerLot` อาจทำให้ผลขาดทุนจริงสูงกว่าได้ ต้องตั้งค่าจากเงื่อนไขบัญชีของโบรกเกอร์และทดลองบน Demo ก่อน Live เสมอ
+`estimatedRiskMoney` ของคำสั่งใหม่เป็นค่าประมาณก่อนส่งคำสั่งจากราคาและ Slippage ที่เผื่อไว้ ไม่ใช่การรับประกันขาดทุนสูงสุดจริง เพราะราคา Gap, Slippage ที่มากกว่าค่าที่เผื่อไว้ รวมถึง Swap และค่าคอมมิชชันที่ไม่ได้รวมในตัวเลขนี้ อาจทำให้ผลขาดทุนจริงสูงกว่าได้ ต้องพิจารณาเงื่อนไขบัญชีของโบรกเกอร์และทดลองบน Demo ก่อน Live เสมอ
 
 ## การ Compile ที่ตรวจแล้ว
 

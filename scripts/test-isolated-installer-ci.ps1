@@ -38,8 +38,9 @@ try {
     # Inert syntax fixture only: never log in, publish or upload this package.
     # Release packaging continues to inject its real client from CI secrets.
     $ciClientPath = Join-Path $ciPackageRoot 'backend\local-runner\google_oauth_native_client.txt'
+    $ciDummyClientId = 'inert-smoke-' + [Guid]::NewGuid().ToString('N') + '.apps.googleusercontent.com'
     $ciDummySecret = 'GOC' + 'SPX-' + ('INERT_SMOKE_FIXTURE_' * 2)
-    [IO.File]::WriteAllText($ciClientPath, "client_id=inert-smoke-fixture.apps.googleusercontent.com`nclient_secret=$ciDummySecret`n", $ciUtf8)
+    [IO.File]::WriteAllText($ciClientPath, "client_id=$ciDummyClientId`nclient_secret=$ciDummySecret`n", $ciUtf8)
     $env:LOCALAPPDATA = $ciDataRoot
     $env:APPDATA = Join-Path $ciSmokeRoot 'AppData'
     $env:CODEX_HOME = Join-Path $ciSmokeRoot 'CodexHome'

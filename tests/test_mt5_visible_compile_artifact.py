@@ -111,6 +111,56 @@ class Mt5NativeCompileArtifactTests(unittest.TestCase):
         result = run_gates(ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows pure copy and validation functions')
+    def test_actual_allowlisted_copy_and_publish_preserve_only_curated_compile_logs(self) -> None:
+        # Exercise the real robocopy /XF policy, not shutil as a stand-in for
+        # installer staging. All source, staged and installed paths are owned
+        # temporary fixtures; the installer entrypoint is never invoked.
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary)
+            source, staged, installed = (sandbox / name for name in ('source', 'stage', 'installed'))
+            stage_minimum(source)
+            for rel in ('backend/local-runner/private.log', 'backend/local-runner/COMPILE_LOG.log',
+                        'integrations/mt5-trade-gateway/private.log', 'integrations/mt5-trade-gateway/COMPILE_LOG.log',
+                        'data/runtime/never-copy.txt', 'workspace/never-copy.txt'):
+                file = source / rel
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text('synthetic excluded fixture', encoding='utf-8')
+            (source / 'backend/local-runner/keep.py').write_text('value = 1\n', encoding='utf-8')
+            def quoted(path):
+                return str(path.resolve()).replace("'", "''")
+            script = """$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('INSTALLER',[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'Installer parse failed' }
+foreach ($name in @('Get-ComparablePath','Get-Sha256Hex','Sync-Directory','Copy-ApplicationFiles','Publish-StagedApplication','Assert-NativeCompileArtifactIntegrity','Assert-EaArtifactIntegrity','Assert-Mt5CompileArtifactIntegrity')) {
+    $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+    if (-not $node) { throw 'Missing pure copy/validation function' }
+    Invoke-Expression $node.Extent.Text
+}
+function Write-Step { param([string]$Message) }
+$sourceRoot='SOURCE'
+$installRoot='INSTALLED'
+$requirementsName='requirements-runner.txt'
+Copy-ApplicationFiles -DestinationRoot 'STAGED'
+Assert-EaArtifactIntegrity -CandidateRoot 'STAGED'
+Assert-Mt5CompileArtifactIntegrity -CandidateRoot 'STAGED'
+Publish-StagedApplication -StagingRoot 'STAGED'
+Assert-EaArtifactIntegrity -CandidateRoot 'INSTALLED'
+Assert-Mt5CompileArtifactIntegrity -CandidateRoot 'INSTALLED'
+""".replace('INSTALLER', quoted(ROOT / 'installer/install.ps1')).replace('SOURCE', quoted(source)).replace('STAGED', quoted(staged)).replace('INSTALLED', quoted(installed))
+            result = subprocess.run(['powershell.exe','-NoLogo','-NoProfile','-NonInteractive','-Command',script], cwd=ROOT, capture_output=True, encoding='utf-8', errors='replace', timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            expected_logs = {str(rel / 'COMPILE_LOG.log') for rel in (MT4_REL, MT5_REL)}
+            for destination in (staged, installed):
+                self.assertEqual({str(p.relative_to(destination)) for p in destination.rglob('*.log')}, expected_logs)
+                self.assertTrue((destination / 'backend/local-runner/keep.py').is_file())
+                self.assertFalse((destination / 'data').exists())
+                self.assertFalse((destination / 'workspace').exists())
+                for rel in (MT4_REL, MT5_REL):
+                    self.assertEqual(sha256(destination / rel / 'COMPILE_LOG.log'), sha256(ROOT / rel / 'COMPILE_LOG.log'))
+
     @unittest.skipUnless(os.name == 'nt', 'Windows PowerShell validation only')
     def test_recomputed_checksums_do_not_approve_stale_forged_or_unreviewed_proof(self) -> None:
         # Rehash each corrupted local bundle. Merely self-consistent metadata
