@@ -39,6 +39,11 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
             / "ai-trade-council"
             / "snapshots"
         )
+        self.bridge.load_missions = lambda: []
+        self.bridge._active_ai_trade_council_parent = lambda: None
+        self.bridge.load_operator_mode_record = lambda: {"mode": "auto_guarded"}
+        self.bridge.bridge_status = lambda: {"codex": {"status": "ready_guarded"}}
+        self.bridge._collaboration_quota_gate = lambda *a, **kw: {"allowed": True}
         self.bridge.evaluate_ai_trade_council_outcomes = (
             lambda: {"updated": 0, "pending": 0}
         )
@@ -48,6 +53,14 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         self.bridge._active_global_metatrader_context = (
             lambda **kwargs: self._dual_locked_platform_context("mt4", **kwargs)
         )
+        # These cases test chart ownership, not EA age telemetry. Keep the
+        # selected current capture eligible so unavailable fake EA status does
+        # not deliberately yield to older audit work.
+        self.bridge._ai_trade_council_analysis_start_preflight = lambda *args: {
+            "status": "ready", "reasonCode": "analysis_snapshot_ready_before_start",
+            "analysisSnapshotAgeSeconds": 0, "maximumSnapshotAgeSeconds": 300,
+            "remainingSnapshotSeconds": 300, "checkedAt": self.bridge.utc_now(),
+        }
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -126,7 +139,7 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
             },
         }
 
-    def test_stream_change_terminalizes_previous_pending_and_baselines_new_chart(self) -> None:
+    def test_stream_change_skips_previous_pending_and_baselines_new_chart(self) -> None:
         old = self._record(
             candidate="mtc-chart-one",
             symbol="XAUUSD",
@@ -178,8 +191,8 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         self.assertEqual(result["reason"], "stream_change_baseline")
         saved = self.bridge.load_ai_trade_council_automation_store()["state"]
         self.assertEqual(saved["streamKey"], new_stream)
-        self.assertEqual(saved["coverageCursorClosedBarTime"], new_bar_time)
-        self.assertEqual(saved["pendingQueue"], [])
+        self.assertIsNone(saved["coverageCursorClosedBarTime"])
+        self.assertEqual(len(saved["pendingQueue"]), 0)
         old_saved = next(
             row for row in saved["coverageRecords"]
             if row["streamKey"] == old["streamKey"]
@@ -187,7 +200,7 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         self.assertEqual(old_saved["status"], "skipped")
         self.assertEqual(
             old_saved["reasonCode"],
-            "stream_changed_before_analysis",
+            "new_bar_only_stream_change_baseline",
         )
         self.assertEqual(
             old_saved["executionPolicy"],
@@ -231,7 +244,7 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         ]
         self.assertEqual(len(h1_pending), 1)
 
-    def test_restart_plus_stream_change_uses_stream_baseline_and_skips_old_pending(self) -> None:
+    def test_restart_plus_stream_change_skips_old_pending(self) -> None:
         old = self._record(
             candidate="mtc-chart-one",
             symbol="XAUUSD",
@@ -270,15 +283,15 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         saved = self.bridge.load_ai_trade_council_automation_store()["state"]
 
         self.assertEqual(result["reason"], "stream_change_baseline")
-        self.assertEqual(saved["pendingQueue"], [])
+        self.assertEqual(len(saved["pendingQueue"]), 0)
         old_saved = next(
             row for row in saved["coverageRecords"]
             if row["streamKey"] == old["streamKey"]
         )
         self.assertEqual(old_saved["status"], "skipped")
-        self.assertEqual(old_saved["reasonCode"], "stream_changed_before_analysis")
+        self.assertEqual(old_saved["reasonCode"], "new_bar_only_stream_change_baseline")
 
-    def test_missing_durable_fifo_head_terminalizes_before_transient_gates(self) -> None:
+    def test_legacy_backlog_terminalizes_before_transient_gates(self) -> None:
         candidate = "mtc-chart-one"
         symbol = "XAUUSD"
         timeframe = "M5"
@@ -349,51 +362,13 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         ):
             result = self.bridge.ai_trade_council_automation_tick()
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["kind"], "ai_trade_council_automation_skipped")
-        self.assertEqual(result["reason"], "durable_snapshot_unavailable")
-        runtime_state = result["automation"]["state"]
-        self.assertEqual(runtime_state["status"], "skipped")
-        self.assertEqual(runtime_state["reasonCode"], "durable_snapshot_unavailable")
-        self.assertEqual(runtime_state["pendingCount"], 1)
-        self.assertEqual(runtime_state["pending"]["closedBarTime"], second["closedBarTime"])
-        self.assertEqual(runtime_state["pending"]["queuePosition"], 1)
-        self.assertEqual(runtime_state["pending"]["queueDepth"], 1)
-        self.assertEqual(
-            runtime_state["coverage"],
-            {
-                "expected": 2,
-                "analyzed": 0,
-                "skipped": 1,
-                "pending": 1,
-                "queued": 0,
-                "reconciled": True,
-            },
-        )
+        self.assertEqual(result["kind"], "ai_trade_council_automation_idle")
         saved = self.bridge.load_ai_trade_council_automation_store()["state"]
-        terminal = next(
-            row for row in saved["coverageRecords"]
-            if row["closedBarTime"] == first["closedBarTime"]
-        )
-        self.assertEqual(terminal["status"], "skipped")
-        self.assertEqual(terminal["reasonCode"], "durable_snapshot_unavailable")
-        self.assertEqual(
-            [row["closedBarTime"] for row in saved["pendingQueue"]],
-            [second["closedBarTime"]],
-        )
-        audit_rows = [
-            json.loads(line)
-            for line in self.bridge.AUDIT_PATH.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        event = next(
-            row for row in audit_rows
-            if row.get("type") == "ai_trade_council.automation_skipped"
-            and row.get("reason") == "durable_snapshot_unavailable"
-        )
-        self.assertEqual(event["remainingPendingCount"], 1)
-        self.assertFalse(event["tradeCommandAllowed"])
-        self.assertFalse(event["terminalActions"])
+        self.assertEqual(saved["pendingQueue"], [])
+        self.assertEqual(len(saved["coverageRecords"]), 2)
+        self.assertTrue(all(row["status"] == "skipped" for row in saved["coverageRecords"]))
+        self.assertTrue(all(row["reasonCode"] == "new_bar_only_backlog_cancelled" for row in saved["coverageRecords"]))
+
 
     def test_old_terminal_round_cannot_overwrite_current_stream_cursors(self) -> None:
         old_stream = "a" * 64
@@ -1062,7 +1037,7 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         ):
             self.assertIsNone(projection[field])
 
-    def test_bangkok_day_rollover_expires_prior_day_pending_without_replay(self) -> None:
+    def test_bangkok_day_rollover_resets_count_and_preserves_pending(self) -> None:
         pending = self._record(
             candidate="mtc-rollover",
             symbol="EURUSD",
@@ -1097,23 +1072,9 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(rolled["state"]["dailyRunDate"], "2026-08-12")
         self.assertEqual(rolled["state"]["dailyRunCount"], 0)
-        self.assertEqual(rolled["state"]["pendingQueue"], [])
-        self.assertEqual(rolled["state"]["status"], "skipped")
-        self.assertEqual(
-            rolled["state"]["reason"],
-            "pending_expired_at_bangkok_day_boundary",
-        )
-        self.assertIsNone(rolled["state"]["pendingClosedBarTime"])
-        expired = rolled["state"]["coverageRecords"][0]
-        self.assertEqual(expired["status"], "skipped")
-        self.assertEqual(
-            expired["reasonCode"],
-            "pending_expired_at_bangkok_day_boundary",
-        )
-        self.assertEqual(
-            expired["executionPolicy"],
-            "audit_only_no_stale_dispatch",
-        )
+        self.assertEqual(rolled["state"]["pendingQueue"], [pending])
+        self.assertEqual(rolled["state"]["pendingClosedBarTime"], pending["closedBarTime"])
+        self.assertEqual(rolled["state"]["coverageRecords"], [pending])
 
     def test_legacy_selection_revision_migrates_and_next_generation_increments(self) -> None:
         candidate = "mtc-legacy-selection"

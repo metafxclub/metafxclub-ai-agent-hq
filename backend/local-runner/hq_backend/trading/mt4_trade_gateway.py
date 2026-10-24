@@ -117,6 +117,7 @@ ACK_ALLOWED_FIELDS = frozenset({
     "ticket",
     "filledPrice",
     "filledSlippagePoints",
+    "filledSlippageKnown",
     "actualStopLoss",
     "actualTakeProfit",
     "actualMagicNumber",
@@ -173,6 +174,10 @@ OUTCOME_FIELDS = (
     "comment",
     "closedPnl",
 )
+# Backward-compatible v1 extension: all five fields or none. They describe
+# broker history only and never become sizing inputs or a command policy.
+OUTCOME_COST_FIELDS = ("grossProfit", "commission", "swap", "fee")
+OUTCOME_DETAIL_FIELDS = ("closePrice",) + OUTCOME_COST_FIELDS
 FORBIDDEN_POLICY_NAMES = frozenset({
     "lot",
     "lots",
@@ -180,6 +185,7 @@ FORBIDDEN_POLICY_NAMES = frozenset({
     "fixedlot",
     "risk",
     "riskpercent",
+    "riskcostbasis",
     "riskamount",
     "moneymanagement",
     "mode",
@@ -1270,6 +1276,44 @@ class MT4TradeGateway:
                 outstanding_ids.append(command_id)
             stored_ack = entry.get("ack")
             if isinstance(stored_ack, dict):
+                if "filledSlippageKnown" in stored_ack:
+                    known = stored_ack["filledSlippageKnown"]
+                    points = stored_ack.get("filledSlippagePoints")
+                    recovery = entry.get("recovery")
+                    recovery_reason_valid = bool(
+                        stored_ack.get("reasonCode") == "RECOVERED_ORDER_FOUND"
+                        or (
+                            stored_ack.get("reasonCode") == "EXECUTION_RECONCILED_WITH_WARNING"
+                            and isinstance(recovery, dict)
+                            and recovery.get("action") in {
+                                "reconcile_terminal_ack", "reconcile_mt5_null_evidence_terminal_ack"
+                            }
+                            and recovery.get("barClaimRetained") is True
+                        )
+                    )
+                    if (
+                        not isinstance(known, bool)
+                        or stored_ack.get("status") not in {"EXECUTED", "EXECUTION_UNKNOWN"}
+                        or (known and (
+                            isinstance(points, bool)
+                            or not isinstance(points, (int, float))
+                            or not math.isfinite(float(points))
+                            or not 0 <= points <= 1_000_000_000
+                        ))
+                        or (not known and (
+                            points is not None
+                            or stored_ack.get("status") != "EXECUTED"
+                            or stored_ack.get("statePersisted") is not True
+                            or stored_ack.get("signatureVerificationStatus") != "VERIFIED"
+                            or stored_ack.get("executionState") not in {"OPEN", "CLOSED"}
+                            or stored_ack.get("verificationStatus")
+                            != f"VERIFIED_{stored_ack.get('executionState')}"
+                            or not recovery_reason_valid
+                        ))
+                    ):
+                        raise LedgerIntegrityError(
+                            "Trade ledger contains inconsistent slippage evidence."
+                        )
                 if "fixedLot" in stored_ack:
                     raise LedgerIntegrityError(
                         "Trade ledger contains unsanitized EA sizing data."
@@ -1941,6 +1985,27 @@ class MT4TradeGateway:
             raise AckValidationError(f"ACK {field} is out of range.", code=f"invalid_ack_{field}")
         return value
 
+    def _ack_ticket(self, value: object) -> int | None:
+        """Keep broker ticket identity exact within the platform's wire range.
+
+        MQL5 writes ulong tickets as decimal JSON integers. Never coerce a
+        float or string here: rounding an identifier can bind another trade.
+        Only the account-bound MT5 gateway receives the wider ticket range;
+        timestamps, error codes, magic numbers and the MT4 contract stay int32.
+        """
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AckValidationError(
+                "ACK ticket must be an integer.", code="invalid_ack_ticket"
+            )
+        maximum = (1 << 64) - 1 if self.wire_platform == "mt5" else 2_147_483_647
+        if not 1 <= value <= maximum:
+            raise AckValidationError(
+                "ACK ticket is out of range.", code="invalid_ack_ticket"
+            )
+        return value
+
     def _ack_optional_number(
         self,
         value: object,
@@ -2016,7 +2081,9 @@ class MT4TradeGateway:
         # legacy EA ACKs compatible, but require the complete extension when
         # any sizing field is present so partial or ambiguous risk telemetry
         # is rejected fail-closed.
-        required = set(ACK_ALLOWED_FIELDS - ACK_OPTIONAL_SIZING_FIELDS)
+        required = set(
+            ACK_ALLOWED_FIELDS - ACK_OPTIONAL_SIZING_FIELDS - {"filledSlippageKnown"}
+        )
         missing = sorted(required - set(ack))
         if missing:
             raise AckValidationError(
@@ -2081,10 +2148,7 @@ class MT4TradeGateway:
         observed_at = self._ack_number(ack.get("observedAt"), field="observed_at")
         if observed_at < 946684800:
             raise AckValidationError("Invalid ACK observedAt.", code="invalid_ack_observed_at")
-        ticket_value = ack.get("ticket")
-        ticket = None if ticket_value is None else self._ack_number(ticket_value, field="ticket")
-        if ticket is not None and ticket <= 0:
-            raise AckValidationError("ACK ticket must be positive.", code="invalid_ack_ticket")
+        ticket = self._ack_ticket(ack.get("ticket"))
         filled_price = self._ack_optional_number(
             ack.get("filledPrice"),
             field="filled_price",
@@ -2286,6 +2350,38 @@ class MT4TradeGateway:
                     "Unsized ACK cannot claim monetary sizing evidence.",
                     code="unexpected_ack_risk_evidence",
                 )
+        slippage_known = ack.get("filledSlippageKnown")
+        recovered_unknown_slippage = False
+        if "filledSlippageKnown" in ack:
+            if (
+                not isinstance(slippage_known, bool)
+                or self.wire_platform != "mt5"
+                or not isinstance(self.wire_account_binding_id, str)
+                or not SHA256_PATTERN.fullmatch(self.wire_account_binding_id)
+                or status not in {"EXECUTED", "EXECUTION_UNKNOWN"}
+            ):
+                raise AckValidationError(
+                    "Slippage knowledge requires an account-bound MT5 execution ACK.",
+                    code="invalid_ack_slippage_knowledge",
+                )
+            recovered_unknown_slippage = bool(
+                slippage_known is False
+                and filled_slippage_points is None
+                and status == "EXECUTED"
+                and reason_code == "RECOVERED_ORDER_FOUND"
+                and ack["statePersisted"] is True
+                and verification_status == f"VERIFIED_{execution_state}"
+                and execution_state in {"OPEN", "CLOSED"}
+            )
+            if not (
+                (slippage_known is True and filled_slippage_points is not None
+                 and filled_price is not None and ticket is not None)
+                or recovered_unknown_slippage
+            ):
+                raise AckValidationError(
+                    "Unknown slippage is allowed only for verified MT5 recovery; it must remain null.",
+                    code="invalid_ack_slippage_knowledge",
+                )
         execution_evidence = (
             filled_price,
             filled_slippage_points,
@@ -2296,7 +2392,10 @@ class MT4TradeGateway:
         if status == "EXECUTED":
             if (
                 ticket is None
-                or any(value is None for value in execution_evidence)
+                or any(value is None for value in (
+                    filled_price, actual_stop_loss, actual_take_profit, actual_magic_number
+                ))
+                or (filled_slippage_points is None and not recovered_unknown_slippage)
                 or not _broker_comment_matches_command(
                     actual_comment,
                     command_id,
@@ -2306,7 +2405,7 @@ class MT4TradeGateway:
                 or execution_state not in {"OPEN", "CLOSED"}
             ):
                 raise AckValidationError(
-                    "EXECUTED ACK lacks verified MT4 execution evidence.",
+                    "EXECUTED ACK lacks verified execution evidence.",
                     code="unverified_executed_ack",
                 )
         elif status == "EXECUTION_UNKNOWN":
@@ -2397,6 +2496,8 @@ class MT4TradeGateway:
             "sizingEvidenceSource": "ea_ack_read_only",
             "sizingEvidenceAuthoritative": False,
         }
+        if "filledSlippageKnown" in ack:
+            normalized["filledSlippageKnown"] = slippage_known
         _flat_json(normalized)
         return normalized, sizing_resolved
 
@@ -2627,20 +2728,20 @@ class MT4TradeGateway:
                     )
                 )
                 if unknown_reconciliation_upgrade:
-                    # A later EA recovery observation may report zero
-                    # slippage because the original submitted price is no
-                    # longer available after restart.  Preserve the original
+                    # Recovery cannot reconstruct the original submitted
+                    # price. Preserve any previously measured non-null
                     # fill-quality evidence and UTC provenance while allowing
                     # only the verified lifecycle fields to advance.
                     normalized = {
                         **normalized,
                         "reasonCode": "EXECUTION_RECONCILED_WITH_WARNING",
                         "observedAt": current_ack.get("observedAt"),
-                        "filledSlippagePoints": current_ack.get(
-                            "filledSlippagePoints"
-                        ),
                         "actualComment": current_ack.get("actualComment"),
                     }
+                    if current_ack.get("filledSlippagePoints") is not None:
+                        normalized["filledSlippagePoints"] = current_ack["filledSlippagePoints"]
+                        if "filledSlippageKnown" in normalized or "filledSlippageKnown" in current_ack:
+                            normalized["filledSlippageKnown"] = True
             if (
                 isinstance(current_ack, dict)
                 and self.wire_platform == "mt5"
@@ -2649,13 +2750,22 @@ class MT4TradeGateway:
                 and current_status == "ack_EXECUTION_UNKNOWN"
                 and current_ack.get("status") == "EXECUTION_UNKNOWN"
                 and current_ack.get("statePersisted") is True
-                and _is_mt5_null_evidence_uncertainty_reason(
-                    current_ack.get("reasonCode")
+                and (
+                    (
+                        _is_mt5_null_evidence_uncertainty_reason(current_ack.get("reasonCode"))
+                        and current_ack.get("ticket") is None
+                    )
+                    or (
+                        current_ack.get("reasonCode") == "EXECUTION_SLIPPAGE_EVIDENCE_UNAVAILABLE"
+                        and isinstance(current_ack.get("ticket"), int)
+                        and not isinstance(current_ack.get("ticket"), bool)
+                        and current_ack["ticket"] > 0
+                        and current_ack["ticket"] == normalized.get("ticket")
+                    )
                 )
                 and current_ack.get("verificationStatus")
                 in {"SELECT_FAILED", "MISMATCH"}
                 and current_ack.get("executionState") == "UNKNOWN"
-                and current_ack.get("ticket") is None
                 and current_ack.get("filledPrice") is None
                 and current_ack.get("filledSlippagePoints") is None
                 and current_ack.get("actualStopLoss") is None
@@ -2678,11 +2788,14 @@ class MT4TradeGateway:
                     normalized.get(field) is not None
                     for field in (
                         "filledPrice",
-                        "filledSlippagePoints",
                         "actualStopLoss",
                         "actualTakeProfit",
                         "actualMagicNumber",
                     )
+                )
+                and (
+                    normalized.get("filledSlippagePoints") is not None
+                    or normalized.get("filledSlippageKnown") is False
                 )
                 and _broker_comment_matches_command(
                     normalized.get("actualComment"),
@@ -2751,11 +2864,12 @@ class MT4TradeGateway:
                         **normalized,
                         "reasonCode": current_ack.get("reasonCode"),
                         "observedAt": current_ack.get("observedAt"),
-                        "filledSlippagePoints": current_ack.get(
-                            "filledSlippagePoints"
-                        ),
                         "actualComment": current_ack.get("actualComment"),
                     }
+                    if current_ack.get("filledSlippagePoints") is not None:
+                        normalized["filledSlippagePoints"] = current_ack["filledSlippagePoints"]
+                        if "filledSlippageKnown" in normalized or "filledSlippageKnown" in current_ack:
+                            normalized["filledSlippageKnown"] = True
             if (
                 current_status.startswith("ack_")
                 and not entry.get("outstanding")
@@ -3274,9 +3388,14 @@ class MT4TradeGateway:
                 "MT4 outcome file is unreadable.",
                 code="invalid_mt4_outcome",
             ) from error
+        outcome_fields = OUTCOME_FIELDS + (
+            OUTCOME_DETAIL_FIELDS
+            if any(field in outcome for field in OUTCOME_DETAIL_FIELDS)
+            else ()
+        )
         if (
             not isinstance(outcome, dict)
-            or set(outcome) != set(OUTCOME_FIELDS)
+            or set(outcome) != set(outcome_fields)
             or outcome.get("schemaVersion") != OUTCOME_SCHEMA_VERSION
             or outcome.get("channelId") != channel_id
             or outcome.get("commandId") != command_id
@@ -3287,7 +3406,7 @@ class MT4TradeGateway:
                 code="invalid_mt4_outcome",
             )
         try:
-            _flat_json(outcome, exact_fields=OUTCOME_FIELDS)
+            _flat_json(outcome, exact_fields=outcome_fields)
         except GatewayValidationError as error:
             raise GatewayValidationError(
                 "MT4 outcome file is outside the outcome contract.",
@@ -3313,6 +3432,16 @@ class MT4TradeGateway:
         ):
             raise GatewayValidationError(
                 "MT4 outcome integer evidence is invalid.",
+                code="invalid_mt4_outcome",
+            )
+        # Outcome readers are shared across channels and historically accepted
+        # positive integer tickets without an upper bound. Keep that reader
+        # independent of the active channel; cap it at the largest broker wire
+        # type and bind it to the exact persisted ACK below. ACK ingestion alone
+        # selects the platform-specific range from its trusted constructor.
+        if outcome["ticket"] > (1 << 64) - 1:
+            raise GatewayValidationError(
+                "Outcome ticket is outside the broker wire range.",
                 code="invalid_mt4_outcome",
             )
         numeric_fields = ("openPrice", "stopLoss", "takeProfit", "lots")
@@ -3403,7 +3532,35 @@ class MT4TradeGateway:
                 "MT4 closed outcome evidence is invalid.",
                 code="invalid_mt4_outcome",
             )
-        return _ordered_packet(outcome, OUTCOME_FIELDS)
+        if outcome_fields != OUTCOME_FIELDS:
+            costs = [outcome[field] for field in OUTCOME_COST_FIELDS]
+            if outcome["executionState"] == "OPEN":
+                valid_costs = outcome["closePrice"] is None and all(value is None for value in costs)
+            else:
+                close_price = outcome["closePrice"]
+                valid_costs = (
+                    not isinstance(close_price, bool)
+                    and isinstance(close_price, (int, float))
+                    and Decimal(str(close_price)).is_finite()
+                    and close_price > 0
+                ) and all(
+                    not isinstance(value, bool)
+                    and isinstance(value, (int, float))
+                    and Decimal(str(value)).is_finite()
+                    for value in costs
+                )
+                if valid_costs:
+                    # The EA rounds each of four components and the net PnL
+                    # independently to two decimals: their difference can be
+                    # at most two cents. Never invent a missing broker charge.
+                    total = sum((Decimal(str(value)) for value in costs), Decimal(0))
+                    valid_costs = abs(total - Decimal(str(outcome["closedPnl"]))) <= Decimal("0.02")
+            if not valid_costs:
+                raise GatewayValidationError(
+                    "Outcome broker cost breakdown is incomplete or inconsistent.",
+                    code="invalid_mt4_outcome",
+                )
+        return _ordered_packet(outcome, outcome_fields)
 
     def reconcile_execution_unknown(
         self,

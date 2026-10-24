@@ -152,16 +152,17 @@ class MetaTraderGatewaySourceDeliveryTests(unittest.TestCase):
             self.assertIn(f'"{relative_path}"', preflight)
         self.assertIn('".mq4", ".mq5", ".ps1"', installer)
 
-    def test_source_only_policy_ignores_uncurated_ex5_and_docs_are_portable(self) -> None:
+    def test_only_reviewed_ex5_is_distributed_and_docs_are_portable(self) -> None:
         ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         readme = (ROOT / MT5_README_RELATIVE).read_text(encoding="utf-8")
         self.assertIn("integrations/mt5-trade-gateway/*.ex5", ignore)
         self.assertEqual(
             list((ROOT / "integrations" / "mt5-trade-gateway").rglob("*.ex5")),
-            [],
+            [ROOT / "integrations/mt5-trade-gateway/MetafxHQTradeGateway.ex5"],
         )
+        self.assertIn("!integrations/mt5-trade-gateway/MetafxHQTradeGateway.ex5", ignore)
         self.assertIsNone(re.search(r"(?i)(?:[A-Z]:\\|/Users/|/home/)", readme))
-        self.assertNotIn("MetafxHQTradeGateway.ex5", readme)
+        self.assertIn("MetafxHQTradeGateway.ex5", readme)
 
 
 if __name__ == "__main__":

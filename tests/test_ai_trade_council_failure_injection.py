@@ -1056,10 +1056,9 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
             ["executionGuardReason"],
             "ATOMIC_SNAPSHOT_TEST",
         )
-        self.assertGreaterEqual(len(snapshot_calls), 2)
         self.assertEqual(
-            set(snapshot_calls),
-            {self.bridge.AI_TRADE_COUNCIL_PROP_ID},
+            snapshot_calls,
+            [self.bridge.AI_TRADE_COUNCIL_PROP_ID],
         )
         self.assertEqual(
             report["metatraderReadOnly"]["propId"],

@@ -9,6 +9,14 @@
     "liveOrderSubmissionAllowed": false,
     "runnerVoteTransport": "schema_bound_final_json_v1",
     "localSnapshotReadPolicy": "backend_validated_embedded_read_only",
+    "providerRetryPolicy": {
+      "schemaVersion": "council-provider-retry-v1",
+      "maximumRuns": 2,
+      "minimumBackoffSeconds": 30,
+      "retryOnly": "provider_http_429",
+      "sameMissionAndSnapshot": true,
+      "preserveRoundDeadline": true
+    },
     "unknownDataPolicy": "return_no_data",
     "secretPolicy": "ห้ามขอหรือแสดงเลขบัญชี รหัสผ่าน Broker, Token, Cookie, API Key, Ticket หรือ Secret ทุกชนิด",
     "evidencePolicy": "ห้ามเดาตัวเลข ห้ามสร้างแท่งเทียน ข่าว หรือผลการเทรดขึ้นเอง ใช้เฉพาะ Snapshot ที่ Backend ยืนยันและแหล่งข่าวที่เปิดอ่านได้จริง",

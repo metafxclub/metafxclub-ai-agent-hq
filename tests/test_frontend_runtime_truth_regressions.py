@@ -48,8 +48,11 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.fail("Node.js runtime is required")
 
     def run_node_json(self, script: str) -> dict[str, object]:
+        if "function signalTicketText(" not in script:
+            script = function_block(self.main, "function signalTicketText(") + "\n" + script
         result = subprocess.run(
-            [self.node_binary(), "-e", script],
+            [self.node_binary(), "-"],
+            input=script,
             check=True,
             capture_output=True,
             text=True,
@@ -106,7 +109,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         recovery = function_block(self.main, "function signalExecutionGuardRecoveryLabel(value)")
         summary = function_block(self.main, "function signalExecutionGuardSummary(runtime = {})")
 
-        self.assertIn('QUOTE_NOT_OBSERVED: "EA ยังไม่ส่งราคา Bid/Ask ที่ตรวจสอบได้"', reason)
+        self.assertIn('QUOTE_NOT_OBSERVED: "EA กำลังรอ Tick ใหม่จากกราฟหลังเริ่มทำงานหรือเชื่อมต่อ Broker ใหม่ จึงยังไม่ส่ง Order"', reason)
         self.assertIn("หากตลาดปิดให้รอ Tick แรกหลังตลาดเปิด", recovery)
         self.assertIn("ตรวจ Market Watch ว่าราคาเคลื่อนไหว", recovery)
         self.assertIn("Symbol กับ Timeframe ที่อนุญาต", recovery)
@@ -313,6 +316,10 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
                 reason,
                 recovery,
                 effective,
+                function_block(self.main, "function signalTradingReportPendingLabel(runtime = {})"),
+                "const aiTradeHeartbeatDisplayModel = () => null;",
+                "const signalCurrentGatewayStatusDisplay = () => null;",
+                function_block(self.main, "function signalCurrentInitFailureDisplay(runtime = {})"),
                 summary,
                 account,
                 "const blockedRuntime = {",
@@ -689,7 +696,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
 
         self.assertIn("lastMissionId,", automation)
         self.assertIn("newBarPending,", automation)
-        self.assertIn("lastObservedClosedBarTime > lastAnalyzedClosedBarTime", automation)
+        self.assertIn("const newBarPending = enabled && pendingTotalCount > 0;", automation)
         self.assertIn('const currentRun = pipeline.currentRun && typeof pipeline.currentRun === "object"', model)
         self.assertIn("const activeParent = parents.find", model)
         self.assertIn("const automationParent = automation.lastMissionId", model)
@@ -698,7 +705,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("children: []", model)
         self.assertIn("byAgent: new Map()", model)
         self.assertIn(
-            "const parent = activeParent\n    || currentRunParent\n    || automationParent\n    || consensusParent",
+            "const parent = activeParent\n    || currentRunParent\n    || newerCompletedConsensusParent\n    || automationParent\n    || consensusParent",
             model,
         )
         self.assertIn('String(item?.parentMissionId || "") === parentId', model)
@@ -710,8 +717,9 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
 
         self.assertIn("const consensusParentId = safeDashboardDisplayText(", model)
         self.assertIn("const automationParent = automation.lastMissionId", model)
-        self.assertIn("const consensusParent = !automation.lastMissionId && consensusParentId", model)
-        selection = "const parent = activeParent\n    || currentRunParent\n    || automationParent\n    || consensusParent"
+        self.assertIn("const consensusParent = consensusParentId", model)
+        self.assertIn('signalMissionUiState(automationParent) === "completed"', model)
+        selection = "const parent = activeParent\n    || currentRunParent\n    || newerCompletedConsensusParent\n    || automationParent\n    || consensusParent"
         self.assertIn(selection, model)
         selection_block = model[
             model.index("const parent = activeParent") : model.index("const parentId =")
@@ -795,9 +803,9 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
     def test_disabled_automation_ignores_stale_closed_bar_timestamps(self) -> None:
         automation = function_block(self.main, "function signalCouncilAutomationModel(report = {})")
 
-        self.assertIn("const newBarPending = enabled && (", automation)
-        self.assertIn("pendingCount > 0", automation)
-        self.assertIn("lastObservedClosedBarTime !== null", automation)
+        self.assertIn("const newBarPending = enabled && pendingTotalCount > 0;", automation)
+        self.assertIn("pendingTotalCount > 0", automation)
+        self.assertNotIn("lastObservedClosedBarTime > lastAnalyzedClosedBarTime", automation)
 
     def test_closed_bar_automation_presents_unlimited_backend_policy_truthfully(self) -> None:
         automation = function_block(self.main, "function signalCouncilAutomationModel(report = {})")
@@ -816,17 +824,16 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
 
         self.assertIn("แท่งปิดใหม่ • วันนี้", daily)
         self.assertIn("ไม่มีเพดานรายวัน", daily)
-        self.assertIn("เมื่อพบแท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม", daily)
-        self.assertIn("ทุกแท่งจะเข้าคิวถาวรตามลำดับ FIFO", daily)
-        self.assertIn("ประมวลผลคิวแท่งปิดตามลำดับ FIFO", daily)
-        self.assertIn("ห้ามส่ง Order เก่า", daily)
+        self.assertIn("วิเคราะห์เฉพาะแท่งปิดใหม่", daily)
+        self.assertIn("ไม่วิเคราะห์ย้อนหลัง", daily)
+        self.assertIn("โควตากลับมาระหว่างแท่งให้รอแท่งถัดไป", daily)
         self.assertNotIn("ใช้รอบล่าสุดเท่านั้น", daily)
         self.assertNotIn("${automation.dailyRunCount}/${automation.maxDailyRounds}", daily)
 
         self.assertIn('label: "รอบวิเคราะห์แท่งปิด"', round_health)
         self.assertIn("ไม่จำกัด • วันนี้", round_health)
-        self.assertIn("แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม", round_health)
-        self.assertIn("คิวถาวรตามลำดับ FIFO", round_health)
+        self.assertIn("วิเคราะห์เฉพาะแท่งที่เพิ่งปิดและผ่านเงื่อนไข", round_health)
+        self.assertIn("รอบที่ข้ามไม่ใช้ AI ย้อนหลัง", round_health)
         self.assertNotIn('label: "Quota วันนี้"', round_health)
 
     def test_truncated_reason_and_mission_signature_refresh_safely(self) -> None:
@@ -868,7 +875,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("order.brokerOpenedAt", row)
         self.assertIn("order.reasonTh", row)
         self.assertIn("order.voteSummaryTh", row)
-        self.assertIn("order.ticket", row)
+        self.assertIn("signalTicketText(order)", row)
         self.assertIn("order.verified === true", row)
         self.assertIn("order.outcomeIdentityVerified === true", row)
         self.assertIn('String(order.executionState || "").toUpperCase() === "CLOSED"', row)
@@ -942,7 +949,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("consensus.decision", final)
         self.assertIn("source.orderLinkage", order)
         self.assertIn("linkage.available === true", order)
-        self.assertIn("linkage.ticket", order)
+        self.assertIn("signalTicketText(linkage)", order)
         self.assertIn("linkage.commandId", order)
         self.assertIn("พบ Order • หลักฐานยังไม่ครบ", order)
         self.assertNotIn('|| "HOLD"', vote)
@@ -1008,16 +1015,16 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn('coverageStatus === "skipped"', order)
         self.assertIn("source.skipReasonCode", order)
         self.assertIn('label: "ข้ามรอบ • ไม่มีคำสั่ง"', order)
-        self.assertIn('detail: reason || "Backend ข้ามรอบนี้ก่อนการลงมติ"', order)
+        self.assertIn('detail: [reason || "Backend ข้ามรอบนี้ก่อนการลงมติ"', order)
         self.assertIn('["pending", "queued", "running", "settling", "waiting"].includes(coverageStatus)', order)
         self.assertIn('label: running ? "กำลังวิเคราะห์ • ยังไม่มีคำสั่ง" : "รอวิเคราะห์ • ยังไม่มีคำสั่ง"', order)
         self.assertIn('label: "ยังไม่ประเมินคำสั่ง"', order)
-        self.assertIn('"แท่งนี้อยู่ในคิว FIFO และยังไม่เริ่มลงมติ"', order)
+        self.assertIn('"แท่งนี้อยู่ในคิววิเคราะห์และยังไม่เริ่มลงมติ"', order)
         self.assertIn('if (["HOLD", "NO_TRADE"].includes(finalDecision))', order)
         self.assertEqual(order.count('detail: "มติเป็น HOLD / NO TRADE"'), 1)
         self.assertIn('detail: "ยังไม่มีมติสุดท้ายจาก Backend"', order)
 
-    def test_waiting_gate_and_fifo_queue_contract_are_mapped_without_guessing(self) -> None:
+    def test_waiting_gate_and_new_bar_only_contract_are_mapped_without_guessing(self) -> None:
         automation = function_block(self.main, "function signalCouncilAutomationModel(report = {})")
 
         self.assertIn("runtimeState.reasonCode", automation)
@@ -1032,10 +1039,11 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("waitingGateActive", automation)
         self.assertIn("backlogPolicy", automation)
         daily = function_block(self.main, "function renderSignalDailyPanel(report = {})")
-        self.assertIn("automation.pendingCount > 0", daily)
-        self.assertIn("รอคิว ${automation.pendingCount} แท่ง", daily)
-        self.assertIn("แท่งเก่าสุด ${formatBrokerBarTime(automation.pending.closedBarTime)}", daily)
-        self.assertIn("รอตั้งแต่ ${formatThaiDateTime(automation.pending.detectedAt)}", daily)
+        self.assertIn("automation.pendingTotalCount > 0", daily)
+        self.assertIn("Backend รายงานงานรอ ${automation.pendingTotalCount} แท่ง", daily)
+        self.assertIn("คิวเก่าจะถูกข้าม", daily)
+        self.assertIn("เวลาแท่ง ${formatBrokerBarTime(automation.pending.closedBarTime)}", daily)
+        self.assertIn("ตรวจพบ ${formatThaiDateTime(automation.pending.detectedAt)}", daily)
 
     def test_skipped_durable_snapshot_state_is_fail_closed_and_never_claims_watching(self) -> None:
         automation = function_block(self.main, "function signalCouncilAutomationModel(report = {})")

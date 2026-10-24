@@ -107,6 +107,8 @@ const AGENT_COLLABORATION_POLL_MS = 15000;
 const MISSION_POLL_MS = 30000;
 const GLOBAL_METATRADER_POLL_MS = 15000;
 const AI_TRADE_HEARTBEAT_FRESH_SECONDS = 20;
+const AI_TRADE_HEARTBEAT_POLL_MS = 5000;
+const AI_TRADE_HEARTBEAT_FETCH_TIMEOUT_MS = 5000;
 const MISSION_FETCH_TIMEOUT_MS = 25000;
 const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;
 const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;
@@ -147,6 +149,7 @@ const DEFAULT_FETCH_TIMEOUT_MS = 6000;
 const BOOT_CONTRACT_FETCH_TIMEOUT_MS = 20000;
 const UI_SESSION_FETCH_TIMEOUT_MS = 5000;
 const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;
+const AI_TRADE_COUNCIL_REPORT_FETCH_TIMEOUT_MS = 60000;
 const NAVIGATION_MASK_LOAD_TIMEOUT_MS = 20000;
 
 const STATUS_LABELS = {
@@ -1841,6 +1844,14 @@ const state = {
     previousTimeframe: "",
     changedAt: null,
   },
+  aiTradeCouncilHeartbeat: {
+    data: null,
+    status: "idle",
+    controller: null,
+    timer: null,
+    nextPollAt: 0,
+    failures: 0,
+  },
   aiTradeCouncilHistoryPages: {
     orders: {
       items: [],
@@ -2738,6 +2749,7 @@ function runInitialPollingRead() {
 }
 
 function stopAutomaticPolling() {
+  stopAiTradeHeartbeatPolling();
   if (state.codexRate.timer) window.clearInterval(state.codexRate.timer);
   if (state.operatorMode.timer) window.clearInterval(state.operatorMode.timer);
   if (state.agentCollaboration.timer) window.clearInterval(state.agentCollaboration.timer);
@@ -2758,6 +2770,7 @@ function stopAutomaticPolling() {
 }
 
 function startGlobalMetatraderPolling() {
+  startAiTradeHeartbeatPolling();
   const hub = state.globalMetatraderHub;
   if (hub.pollTimer) return;
   // Terminal selection is shared Backend state. Every visible tab refreshes it
@@ -2829,10 +2842,12 @@ function initializePollingLeadership() {
   });
   window.addEventListener("focus", () => {
     if (document.visibilityState === "visible") {
+      startAiTradeHeartbeatPolling();
       void pollOpenPropReport({ force: true });
       void loadGlobalMetatraderHub({ preserveMessage: true }).catch(() => null);
     }
   });
+  window.addEventListener("blur", stopAiTradeHeartbeatPolling);
   window.addEventListener("storage", (event) => {
     if (event.key !== POLLING_LEADER_STORAGE_KEY) return;
     const current = readPollingLeaderLease();
@@ -9366,6 +9381,251 @@ async function applyGlobalMetatraderTarget(platform) {
     renderGlobalMetatraderHubControl();
   }
 }
+function aiTradeHeartbeatSelection() {
+  const hub = state.globalMetatraderHub?.readModel;
+  const platform = String(hub?.activePlatform || "").toLowerCase();
+  if (!["mt4", "mt5"].includes(platform)) return null;
+  const target = hub?.platforms?.[platform]?.targets?.find((item) => (
+    item?.propId === AI_TRADE_COUNCIL_PROP_ID && item?.status === "configured"
+  ));
+  const candidateId = String(target?.selectedCandidate?.candidateId || "");
+  const revision = target?.selectionRevision;
+  if (!candidateId || !Number.isInteger(revision) || revision < 1) return null;
+  return { platform, candidateId, revision, key: `${platform}:${candidateId}:${revision}` };
+}
+
+function canPollAiTradeHeartbeat() {
+  return document.visibilityState === "visible"
+    && (typeof document.hasFocus !== "function" || document.hasFocus())
+    && state.modal.open && state.modal.type === "prop"
+    && state.modal.id === AI_TRADE_COUNCIL_PROP_ID;
+}
+
+function stopAiTradeHeartbeatPolling() {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (heartbeat.timer) window.clearInterval(heartbeat.timer);
+  heartbeat.timer = null;
+  heartbeat.controller?.abort();
+  heartbeat.data = null;
+  heartbeat.status = "idle";
+  heartbeat.nextPollAt = 0;
+}
+
+function startAiTradeHeartbeatPolling() {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (!canPollAiTradeHeartbeat()) return;
+  if (!heartbeat.timer) heartbeat.timer = window.setInterval(() => {
+    void pollAiTradeHeartbeat();
+  }, AI_TRADE_HEARTBEAT_POLL_MS);
+  void pollAiTradeHeartbeat();
+}
+
+async function pollAiTradeHeartbeat() {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (!canPollAiTradeHeartbeat() || heartbeat.controller || Date.now() < heartbeat.nextPollAt) return null;
+  const selection = aiTradeHeartbeatSelection();
+  if (!selection) {
+    heartbeat.data = null;
+    heartbeat.status = "unavailable";
+    return null;
+  }
+  const controller = new AbortController();
+  heartbeat.controller = controller;
+  try {
+    const result = await fetchJson("/api/mt4-trade-gateway/status", {
+      signal: controller.signal, timeoutMs: AI_TRADE_HEARTBEAT_FETCH_TIMEOUT_MS,
+    });
+    if (controller.signal.aborted || !canPollAiTradeHeartbeat()) return null;
+    const gateway = result?.tradeGateway;
+    const initStatus = gateway?.initStatus || {};
+    const current = aiTradeHeartbeatSelection();
+    const matches = result?.ok === true && current?.key === selection.key
+      && gateway?.selectedCandidateId === selection.candidateId
+      && gateway?.selectionRevision === selection.revision
+      && String(gateway?.selectedPlatform || "").toLowerCase() === selection.platform;
+    // This observation belongs only to the connection display. Never merge it
+    // into the report, market snapshot, consensus or execution readiness.
+    heartbeat.data = matches ? {
+      selectionKey: selection.key,
+      receivedAt: Date.now(),
+      connected: gateway.connected === true,
+      observedAt: gateway.observedAt,
+      ageSeconds: gateway.ageSeconds,
+      reasonCode: gateway.reasonCode,
+      executionGuardReason: gateway.executionGuardReady === true ? "" : gateway.executionGuardReason,
+      currentStatus: {
+        mode: gateway.mode, status: gateway.status,
+        executionGuardReady: gateway.executionGuardReady,
+        executionGuardReason: gateway.executionGuardReason,
+        liveArmed: gateway.liveArmed,
+        liveOrderExecutionAvailable: gateway.liveOrderExecutionAvailable,
+        demoOrderExecutionAvailable: gateway.demoOrderExecutionAvailable,
+        shadowValidationAvailable: gateway.shadowValidationAvailable,
+        killSwitchActive: gateway.killSwitchActive,
+      },
+      initStatus: {
+        available: initStatus.available === true,
+        severity: initStatus.severity, stage: initStatus.stage,
+        reasonCode: initStatus.reasonCode, warningCode: initStatus.warningCode,
+        observedAt: initStatus.observedAt, ageSeconds: initStatus.ageSeconds,
+        stale: initStatus.stale === true,
+        supersededByLiveStatus: initStatus.supersededByLiveStatus === true,
+        eaAttached: initStatus.eaAttached === true,
+        runtimeReady: typeof initStatus.runtimeReady === "boolean" ? initStatus.runtimeReady : null,
+        inputValidation: initStatus.inputValidation && typeof initStatus.inputValidation === "object" ? {
+          field: initStatus.inputValidation.field,
+          value: initStatus.inputValidation.value,
+          minimum: initStatus.inputValidation.minimum,
+          maximum: initStatus.inputValidation.maximum,
+          minimumInclusive: initStatus.inputValidation.minimumInclusive,
+          maximumInclusive: initStatus.inputValidation.maximumInclusive,
+          constraint: initStatus.inputValidation.constraint,
+        } : null,
+      },
+    } : null;
+    heartbeat.status = matches ? "ready" : "unavailable";
+    heartbeat.failures = 0;
+    heartbeat.nextPollAt = Date.now() + AI_TRADE_HEARTBEAT_POLL_MS;
+    return heartbeat.data;
+  } catch {
+    heartbeat.data = null;
+    if (controller.signal.aborted) {
+      heartbeat.status = "idle";
+      heartbeat.nextPollAt = 0;
+      return null;
+    }
+    heartbeat.status = "error";
+    heartbeat.failures = Math.min(3, heartbeat.failures + 1);
+    heartbeat.nextPollAt = Date.now() + Math.min(30000, AI_TRADE_HEARTBEAT_POLL_MS * 2 ** heartbeat.failures);
+    return null;
+  } finally {
+    heartbeat.controller = null;
+    if (canPollAiTradeHeartbeat()) renderOpenAiTradeCouncilRuntimeStatus();
+  }
+}
+
+function aiTradeHeartbeatDisplayModel() {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (!heartbeat || heartbeat.status === "idle") return null;
+  const selection = aiTradeHeartbeatSelection();
+  if (!selection) return null;
+  const data = heartbeat.data;
+  const matches = data?.selectionKey === selection.key;
+  const initStatus = matches ? data?.initStatus || {} : {};
+  const initObservedAt = Date.parse(String(initStatus.observedAt || ""));
+  const initAge = Math.max(Number(initStatus.ageSeconds) || 0, (Date.now() - initObservedAt) / 1000, 0);
+  const initError = initStatus.available === true && initStatus.severity === "error"
+    && initStatus.stale !== true && initStatus.supersededByLiveStatus !== true
+    && Number.isFinite(initAge) && heartbeat.status === "ready"
+    && Date.now() - Number(data?.receivedAt || 0) <= AI_TRADE_HEARTBEAT_FRESH_SECONDS * 1000;
+  const initDiagnostic = initError ? signalGatewayInitStatusMessage(initStatus) : null;
+  const observedAtMs = Date.parse(String(data?.observedAt || ""));
+  const age = Math.max(Number(data?.ageSeconds) || 0, (Date.now() - observedAtMs) / 1000, 0);
+  const connected = heartbeat.status === "ready" && matches && !initError && data.connected === true
+    && Number.isFinite(age) && age <= AI_TRADE_HEARTBEAT_FRESH_SECONDS;
+  return {
+    platform: selection.platform.toUpperCase(), candidateId: selection.candidateId,
+    selected: true, state: initError ? "error" : connected ? "connected" : "waiting",
+    reasonCode: initError ? String(initStatus.reasonCode || "gateway_init_error")
+      : !matches ? "selected_candidate_heartbeat_pending"
+      : connected ? "ready" : data?.connected === true ? "gateway_status_stale"
+        : String(data?.reasonCode || "gateway_status_not_observed"),
+    observedAt: matches ? String(data?.observedAt || "") : "",
+    ageSeconds: Number.isFinite(age) ? age : null,
+    freshForSeconds: AI_TRADE_HEARTBEAT_FRESH_SECONDS,
+    messageTh: initDiagnostic?.text || (connected ? "EA ส่ง heartbeat สดแล้ว • สถานะการเทรดตรวจแยกจากรายงานสภา"
+      : "ยังยืนยัน heartbeat สดจาก Terminal ที่เลือกไม่ได้"),
+    remediationTh: initError ? signalExecutionGuardRecoveryLabel(initStatus.reasonCode)
+      : connected ? "" : "ตรวจว่า EA ยังทำงานและ Local Runner เชื่อมต่ออยู่",
+    executionGuardReady: false,
+    executionGuardReason: matches ? String(data?.executionGuardReason || "") : "",
+  };
+}
+
+function signalTradingReportPendingLabel(runtime = {}) {
+  const reason = runtime.selectedConnectionHealth?.reasonCode;
+  if (!["gateway_status_stale", "council_report_expired", "council_report_refresh_failed"].includes(reason)) return "";
+  return aiTradeHeartbeatDisplayModel()?.state === "connected"
+    ? "รอรายงานสถานะการเทรด • EA ยังส่ง heartbeat สด"
+    : "สถานะรายงานหมดอายุ • รอตรวจการเชื่อมต่อใหม่";
+}
+
+function signalCurrentInitFailureDisplay(runtime = {}) {
+  const display = aiTradeHeartbeatDisplayModel();
+  if (display?.state !== "error"
+    || display.candidateId !== runtime.selectedCandidateId
+    || display.platform !== String(runtime.selectedPlatform || "").toUpperCase()) return null;
+  // Current, selection-bound diagnostics explain unavailable runtime data.
+  // They never replace the report's readiness or execution authority.
+  return { ...display, label: `EA ถูกบล็อก • ${display.reasonCode}` };
+}
+
+function signalCurrentGatewayStatusDisplay(runtime = {}) {
+  const heartbeat = state.aiTradeCouncilHeartbeat;
+  if (!canPollAiTradeHeartbeat() || !heartbeat || heartbeat.status === "idle") return null;
+  const selection = aiTradeHeartbeatSelection();
+  const data = heartbeat.data;
+  const current = data?.currentStatus;
+  const pending = "รอรายงานสถานะการเทรด • รอสถานะ EA ล่าสุด";
+  const unavailable = {
+    status: pending, mode: pending, summary: pending, tone: "warning",
+    orderSummary: pending, liveSummary: pending,
+    vetoGuardReadyDisplay: true, vetoOrderReadyDisplay: true, vetoLiveReadyDisplay: true,
+  };
+  // Separate display projection only: never replace report/snapshot authority.
+  // A failed or older observation must not resurrect the report's previous READY.
+  if (!selection || heartbeat.status !== "ready" || data?.selectionKey !== selection.key
+    || runtime.selectedCandidateId !== selection.candidateId
+    || String(runtime.selectedPlatform || "").toLowerCase() !== selection.platform) return unavailable;
+  const receivedAge = Date.now() - data.receivedAt;
+  const observedAge = (Date.now() - Date.parse(String(data.observedAt || ""))) / 1000;
+  const fresh = Number.isFinite(receivedAge) && receivedAge >= 0
+    && receivedAge <= AI_TRADE_HEARTBEAT_FRESH_SECONDS * 1000
+    && Number.isFinite(observedAge) && observedAge >= 0
+    && typeof data.ageSeconds === "number" && Number.isFinite(data.ageSeconds) && data.ageSeconds >= 0
+    && Math.max(observedAge, data.ageSeconds) <= AI_TRADE_HEARTBEAT_FRESH_SECONDS;
+  const complete = current && ["shadow", "demo", "live"].includes(current.mode)
+    && typeof current.status === "string" && current.status.trim()
+    && typeof current.executionGuardReason === "string"
+    && ["executionGuardReady", "liveArmed", "liveOrderExecutionAvailable",
+      "demoOrderExecutionAvailable", "shadowValidationAvailable", "killSwitchActive"]
+      .every((key) => typeof current[key] === "boolean");
+  if (!fresh || !complete || signalCurrentInitFailureDisplay(runtime)) return unavailable;
+  const mode = current.mode.toUpperCase();
+  const guardReady = data.connected === true && current.executionGuardReady === true
+    && current.killSwitchActive === false;
+  const summary = data.connected !== true ? "สถานะ EA ล่าสุด: ยังไม่เชื่อม EA"
+    : current.killSwitchActive ? "สถานะ EA ล่าสุด: Kill Switch กำลังหยุดระบบ"
+      : guardReady ? (current.mode === "shadow"
+        ? "สถานะ EA ล่าสุด: Execution Guard พร้อมตรวจคำสั่ง • SHADOW ไม่ส่ง Order"
+        : `สถานะ EA ล่าสุด: Execution Guard พร้อม • ${mode} • สิทธิ์ส่ง Order ตรวจจากรอบวิเคราะห์ใหม่`)
+        : `สถานะ EA ล่าสุด: ${signalExecutionGuardReasonLabel(current.executionGuardReason || "GUARD_NOT_READY")}`;
+  // Negative observations may suppress old green labels. A positive heartbeat
+  // never grants readiness: consumers must still require the report's guard.
+  const modeMatches = current.mode === String(runtime.gatewayMode || "").toLowerCase();
+  const orderAvailable = current.mode === "live" ? current.liveOrderExecutionAvailable
+    : current.mode === "demo" ? current.demoOrderExecutionAvailable : false;
+  const orderSummary = !guardReady || current.mode === "shadow" ? summary
+    : !modeMatches ? "รอรายงานสถานะการเทรด • โหมด EA ล่าสุดไม่ตรงกับรายงาน"
+      : current.mode === "live" && !current.liveArmed ? "ยังไม่เทรดจริง • EA ล่าสุดยังไม่เปิด LiveArmed"
+      : !orderAvailable ? `สถานะ EA ล่าสุด: ยังไม่อนุญาตส่ง Order • ${mode}` : summary;
+  const liveSummary = !guardReady ? summary
+    : current.mode !== "live" ? `ยังไม่เทรดจริง • EA ล่าสุดอยู่ ${mode}`
+      : !current.liveArmed ? "ยังไม่เทรดจริง • EA ล่าสุดยังไม่เปิด LiveArmed"
+        : !current.liveOrderExecutionAvailable ? "ยังไม่เทรดจริง • EA ล่าสุดยังไม่อนุญาต Order บัญชีจริง"
+          : orderSummary;
+  return {
+    status: data.connected === true ? `EA ล่าสุด: ${current.status}` : "EA ล่าสุด: ยังไม่เชื่อม",
+    mode: data.connected === true ? `${mode}${current.mode === "shadow" ? " • ไม่ส่ง Order" : ""}` : "ยังไม่เชื่อม EA",
+    summary, tone: guardReady ? "info" : "warning", orderSummary, liveSummary,
+    vetoGuardReadyDisplay: !guardReady,
+    vetoOrderReadyDisplay: !guardReady || !modeMatches || !orderAvailable
+      || (current.mode === "live" && !current.liveArmed),
+    vetoLiveReadyDisplay: !guardReady || !modeMatches || current.mode !== "live"
+      || !current.liveArmed || !current.liveOrderExecutionAvailable,
+  };
+}
+
 function aiTradePlatformConnectionModels(report = {}, checklist = {}) {
   const council = signalCouncilModel(report);
   const projection = council?.platformConnections && typeof council.platformConnections === "object"
@@ -9401,6 +9661,8 @@ function aiTradePlatformConnectionModels(report = {}, checklist = {}) {
   const projectionRefreshFailed = reportLoadState.status === "error";
 
   return ["MT4", "MT5"].map((platform) => {
+    const heartbeatDisplay = aiTradeHeartbeatDisplayModel();
+    if (heartbeatDisplay?.platform === platform) return heartbeatDisplay;
     const key = platform.toLowerCase();
     const supplied = projectedItems.find((item) => (
       String(item?.platform || "").toLowerCase() === key
@@ -9756,6 +10018,7 @@ function renderAiTradeTerminalSummary(subject, checklist, canDiscoverMetatrader,
   const applicable = subject?.id === AI_TRADE_COUNCIL_PROP_ID;
   els.modalAiTradeTerminalSummary.hidden = !applicable;
   if (!applicable) return;
+  startAiTradeHeartbeatPolling();
 
   const connectionModels = aiTradePlatformConnectionModels(report || {}, checklist || {});
   connectionModels.forEach(renderAiTradePlatformStatusCard);
@@ -9765,7 +10028,7 @@ function renderAiTradeTerminalSummary(subject, checklist, canDiscoverMetatrader,
   const otherConnected = connectionModels.find((item) => item.state === "connected" && !item.selected);
   els.modalAiTradeTerminalSummary.dataset.state = selected?.state || "waiting";
   if (selected?.state === "connected") {
-    setConnectionBadge(els.modalAiTradeTerminalBadge, "connected", `${selected.platform} พร้อม`);
+    setConnectionBadge(els.modalAiTradeTerminalBadge, "connected", `${selected.platform} เชื่อมแล้ว`);
   } else if (selected?.state === "error") {
     setConnectionBadge(els.modalAiTradeTerminalBadge, "error", `${selected.platform} ผิดพลาด`);
   } else {
@@ -10729,6 +10992,36 @@ function signalConnectionIsReady(item = null) {
     && !["disabled", "coming_soon", "contract_only"].includes(adapterStatus);
 }
 
+function signalGatewayInputValidationText(validation) {
+  if (!validation || typeof validation !== "object" || Array.isArray(validation)) return "";
+  const allowedFields = new Set([
+    "PollIntervalSeconds", "SnapshotIntervalSeconds", "SnapshotBars", "MaxCommandBytes",
+    "MaxCommandTtlSeconds", "MaxHeartbeatTtlSeconds", "MaxClockSkewSeconds", "MaxSpreadPoints",
+    "SlippagePoints", "MagicNumber", "MaxSnapshotAgeSeconds", "MaxSignalDriftPoints", "MaxQuoteAgeSeconds",
+    "MaxManagedOpenPositions", "MaxManagedTotalLots", "FixedLot", "MaxTradesPerBrokerDay",
+    "MaxLossPerTradePercent", "MaxDailyLossPercent", "MaxManagedWeeklyLossPercent", "MaxConsecutiveManagedLosses",
+    "ConsecutiveLossCooldownMinutes", "MaxAccountEquityDrawdownPercent", "MinRewardRiskRatio",
+    "MinProjectedMarginLevelPercent", "RequireHeartbeat",
+  ]);
+  const { field, value, minimum, maximum, minimumInclusive, maximumInclusive, constraint } = validation;
+  if (!allowedFields.has(field) || (value !== null && !Number.isFinite(value))) return "";
+  const expectedConstraint = field === "FixedLot" ? "at_most_MaxManagedTotalLots"
+    : field === "RequireHeartbeat" ? "required_for_execution" : "range";
+  if (constraint !== expectedConstraint) return "";
+  const actual = value === null ? "ค่าตัวเลขไม่ถูกต้อง" : String(value);
+  if (constraint === "required_for_execution") return `${field} = ${actual} • ต้องเปิดใช้งาน (= 1) สำหรับส่งคำสั่ง`;
+  if ((minimum !== null && !Number.isFinite(minimum)) || (maximum !== null && !Number.isFinite(maximum))
+    || (minimum === null && maximum === null)
+    || (minimum !== null && typeof minimumInclusive !== "boolean")
+    || (maximum !== null && typeof maximumInclusive !== "boolean")
+    || (minimum !== null && maximum !== null && minimum > maximum)) return "";
+  const bounds = [
+    minimum === null ? "" : `${minimumInclusive ? "≥" : ">"} ${minimum}`,
+    maximum === null ? "" : `${maximumInclusive ? "≤" : "<"} ${maximum}${constraint === "at_most_MaxManagedTotalLots" ? " (MaxManagedTotalLots)" : ""}`,
+  ].filter(Boolean).join(" และ ");
+  return `${field} = ${actual} • ค่าต้อง ${bounds}`;
+}
+
 function signalGatewayInitStatusMessage(initStatus = {}) {
   if (!initStatus || initStatus.available !== true) return null;
   const severity = String(initStatus.severity || "").toLowerCase();
@@ -10757,6 +11050,14 @@ function signalGatewayInitStatusMessage(initStatus = {}) {
     OPTIONAL_SIGNING_KEY_PIN_INVALID_IGNORED: "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ถูกต้อง ระบบจึงไม่ใช้ค่านี้",
     OPTIONAL_SIGNING_KEY_PIN_MISMATCH_IGNORED: "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ตรงกับ Backend ระบบจึงใช้ค่าจาก Backend",
     CRYPTO_SELF_TEST_FAILED: "การตรวจระบบลายเซ็น HMAC-SHA256 ไม่ผ่าน",
+    LIVE_COMMISSION_POLICY_UNCONFIRMED: "โหมด Live ยังไม่ยืนยันค่าคอมมิชชันไป-กลับหรือบัญชีปลอดค่าคอมมิชชัน",
+    LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST: "โหมด Live ต้องใส่ชื่อ Symbol เต็มของกราฟใน AllowedSymbols",
+    LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT: "โหมด Live ต้องใช้บัญชีจริง หากเป็นบัญชีทดลองให้เลือก Demo",
+    MT5_HEDGING_ACCOUNT_REQUIRED: "MT5 ต้องใช้บัญชีแบบ Hedging; บัญชี Netting หรือ Exchange ยังไม่รองรับ",
+    LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE: "มี MT5 Live Gateway อื่นในเครื่องนี้ถือสิทธิ์บัญชีนี้อยู่แล้ว",
+    ACCOUNT_EXECUTION_LOCK_UNAVAILABLE: "EA ไม่สามารถล็อกสิทธิ์ส่งคำสั่งระดับบัญชีได้",
+    PORTFOLIO_POLICY_MISMATCH: "นโยบายพอร์ตของ EA ไม่ตรงกับ Channel นี้",
+    PORTFOLIO_POLICY_LEASE_UNAVAILABLE: "EA ยังยืนยันสิทธิ์ใช้นโยบายพอร์ตร่วมไม่ได้",
     GATEWAY_INPUT_CONFIGURATION_INVALID: "ค่าตั้งต้นของ EA ไม่ผ่านการตรวจสอบ",
     SYMBOL_OR_TIMEFRAME_NOT_ALLOWED: "คู่เงินหรือ Timeframe ของกราฟไม่อยู่ในรายการที่อนุญาต",
     SNAPSHOT_CHANNEL_ALREADY_OWNED: "มี EA อีกตัวใช้ Channel ID นี้อยู่แล้ว",
@@ -10769,15 +11070,21 @@ function signalGatewayInitStatusMessage(initStatus = {}) {
   const signingCode = code.startsWith(liveDisarmedPrefix)
     ? code.slice(liveDisarmedPrefix.length)
     : "";
-  const detail = signingCode
+  const inputDetail = code === "GATEWAY_INPUT_CONFIGURATION_INVALID"
+    ? signalGatewayInputValidationText(initStatus.inputValidation) : "";
+  const detail = [signingCode
     ? `เลือกโหมด Live แล้วแต่ LiveArmed ยังปิดอยู่; ${labels[signingCode] || "ระบบลายเซ็นจาก Local Runner ยังไม่พร้อม"} และ EA ยังคงติดกราฟโดยไม่ส่งคำสั่งเทรด`
-    : (labels[code] || "การเริ่มทำงานของ EA มีรายการที่ต้องตรวจสอบ");
+    : (labels[code] || "การเริ่มทำงานของ EA มีรายการที่ต้องตรวจสอบ"), inputDetail].filter(Boolean).join(" • ");
   const oldData = stale ? " ข้อมูลนี้เก่าและใช้เพื่อช่วยวินิจฉัยเท่านั้น" : "";
+  const codeNote = /^[A-Z][A-Z0-9_]{0,119}$/.test(code) ? ` (${code})` : "";
+  const residentBlocked = initStatus.eaAttached === true && initStatus.runtimeReady === false;
   return {
     tone: severity === "error" ? "error" : "warning",
-    text: severity === "error"
-      ? `EA เริ่มทำงานไม่สำเร็จ: ${detail}.${oldData}`.trim()
-      : `EA เริ่มทำงานแล้ว แต่มีคำเตือน: ${detail}.${oldData}`.trim(),
+    text: residentBlocked
+      ? `EA ยังอยู่บนกราฟ แต่หยุดการทำงานและไม่ส่งคำสั่งเทรด: ${detail}${codeNote}.${oldData}`.trim()
+      : severity === "error"
+        ? `EA เริ่มทำงานไม่สำเร็จ: ${detail}${codeNote}.${oldData}`.trim()
+        : `EA เริ่มทำงานแล้ว แต่มีคำเตือน: ${detail}${codeNote}.${oldData}`.trim(),
   };
 }
 
@@ -11246,6 +11553,17 @@ function getSignalRuntimeTruth(report = {}) {
       ageSeconds: Number.isFinite(Number(gatewayInit.ageSeconds)) ? Number(gatewayInit.ageSeconds) : null,
       stale: gatewayInit.stale === true,
       supersededByLiveStatus: gatewayInit.supersededByLiveStatus === true,
+      eaAttached: gatewayInit.eaAttached === true,
+      runtimeReady: typeof gatewayInit.runtimeReady === "boolean" ? gatewayInit.runtimeReady : null,
+      inputValidation: gatewayInit.inputValidation && typeof gatewayInit.inputValidation === "object" ? {
+        field: gatewayInit.inputValidation.field,
+        value: gatewayInit.inputValidation.value,
+        minimum: gatewayInit.inputValidation.minimum,
+        maximum: gatewayInit.inputValidation.maximum,
+        minimumInclusive: gatewayInit.inputValidation.minimumInclusive,
+        maximumInclusive: gatewayInit.inputValidation.maximumInclusive,
+        constraint: gatewayInit.inputValidation.constraint,
+      } : null,
     },
     gatewayAccountType: gatewayAccountTypeRaw,
     gatewayIsDemoAccount,
@@ -11269,6 +11587,11 @@ function getSignalRuntimeTruth(report = {}) {
     ).trim().toUpperCase(),
     gatewayEstimatedCommissionPerLot: gatewayNumber("estimatedCommissionPerLot"),
     gatewayCommissionFreeAccountConfirmed: gateway.commissionFreeAccountConfirmed === true,
+    gatewayRiskCostBasis: selectedPlatform === "MT5"
+      && gateway.riskCostBasis === "price_and_slippage_excluding_commission"
+      && gateway.estimatedCommissionPerLot === 0
+      ? "price_and_slippage_excluding_commission"
+      : "",
     gatewayBrokerVolumeMin: gatewayNumber("brokerVolumeMin"),
     gatewayBrokerVolumeMax: gatewayNumber("brokerVolumeMax"),
     gatewayBrokerVolumeStep: gatewayNumber("brokerVolumeStep"),
@@ -11547,14 +11870,30 @@ function signalCouncilAutomationModel(report = {}) {
     automation_disabled: "ปิดการวิเคราะห์อัตโนมัติอยู่",
     baseline_required: "กำลังตั้งแท่งปัจจุบันเป็นจุดเริ่ม โดยจะไม่เรียกงานย้อนหลัง",
     baseline_set: "ตั้งจุดเริ่มแล้ว และกำลังรอแท่งปิดถัดไป",
+    restart_baseline: "เริ่มระบบใหม่แล้ว • รอแท่งปิดถัดไปโดยไม่วิเคราะห์ย้อนหลัง",
+    stream_change_baseline: "เปลี่ยนกราฟแล้ว • รอแท่งปิดถัดไปโดยไม่วิเคราะห์ย้อนหลัง",
     waiting_new_bar: "ยังเป็นแท่งเดิม จึงยังไม่เรียก Codex",
-    waiting_for_new_closed_bar: "แท่งปัจจุบันยังไม่ปิด • แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม",
+    waiting_for_new_closed_bar: "แท่งปัจจุบันยังไม่ปิด • ตรวจความพร้อมอีกครั้งเมื่อแท่งถัดไปปิด",
+    new_bar_only_wait_next_bar: "รอแท่งปิดใหม่ • โควตากลับมาระหว่างแท่งจะไม่เริ่มย้อนหลัง",
+    new_bar_only_backlog_cancelled: "ยกเลิกคิวเก่าแล้ว • บันทึกเป็นข้ามและรอแท่งปิดใหม่",
+    new_bar_only_trigger_not_admitted: "แท่งนี้ไม่ผ่านเงื่อนไขตอนปิด • ข้ามโดยไม่เรียก AI และรอแท่งถัดไป",
+    new_bar_only_trigger_window_expired: "พ้นช่วงเริ่มวิเคราะห์ของแท่งนี้แล้ว • ข้ามโดยไม่เรียก AI",
+    new_bar_only_missed_trigger: "พลาดช่วงแท่งปิดนี้ • บันทึกเป็นข้าม ไม่วิเคราะห์ย้อนหลัง",
+    new_bar_only_restart_baseline: "ข้ามคิวเดิมหลังเริ่มระบบใหม่ • รอแท่งปิดถัดไป",
+    new_bar_only_stream_change_baseline: "ข้ามคิวเดิมหลังเปลี่ยนกราฟ • รอแท่งปิดถัดไป",
     unsupported_timeframe: "กรอบเวลานี้ใช้ปุ่มวิเคราะห์เองเพื่อป้องกันการใช้ Rate Limit ถี่เกินไป",
     full_access_required: "เปิด Full Access ก่อน ระบบจึงจะสร้าง Mission อัตโนมัติได้",
     terminal_not_selected: "กรุณาเลือก MT4 หรือ MT5 เป้าหมายก่อน",
     snapshot_missing: `ยังไม่พบ Snapshot จาก ${platformLabel}`,
     snapshot_not_ready: "Snapshot ยังไม่พร้อมสำหรับการวิเคราะห์",
     snapshot_stale: `Snapshot เก่าเกินกำหนด กำลังรอข้อมูลใหม่จาก ${platformLabel}`,
+    analysis_snapshot_expired_before_start: "Snapshot หมดอายุก่อนเริ่ม • ข้ามโดยไม่เรียก AI และรอแท่งปิดใหม่",
+    analysis_snapshot_ready_before_start: "อายุ Snapshot ผ่านการตรวจก่อนเริ่ม AI • ตรวจสิทธิ์ส่งคำสั่งอีกครั้งหลังวิเคราะห์",
+    analysis_snapshot_time_invalid_before_start: "ยืนยันเวลาจับ Snapshot ไม่ได้ • ข้ามโดยไม่เรียก AI",
+    execution_age_limit_unavailable_before_start: "รอเกณฑ์อายุ Snapshot จาก EA ก่อนเริ่ม AI",
+    stream_cursor_restored: "คืนตำแหน่งกราฟที่ติดตามไว้แล้ว • ตรวจแท่งปิดใหม่ต่อจากประวัติเดิม",
+    restart_pending_recovered: "ตรวจพบคิวเดิมหลังเริ่มระบบใหม่ • ตรวจสถานะล่าสุดจาก Backend",
+    gap_history_unavailable: "อ่านประวัติแท่งในช่วงที่ขาดหายไม่ได้ • ยังยืนยันจำนวนแท่งช่วงนั้นไม่ได้",
     durable_snapshot_unavailable: "หยุดรอบอัตโนมัติชั่วคราว • Snapshot ถาวรของหัวคิวอ่านไม่ได้ จึงยังไม่เริ่มวิเคราะห์",
     snapshot_artifact_capture_failed: "หยุดรอบอัตโนมัติชั่วคราว • บันทึก Snapshot ถาวรไม่สำเร็จ",
     pending_queue_capacity_exceeded: "คิววิเคราะห์เต็ม • แท่งล่าสุดถูกข้ามและยังไม่เริ่มวิเคราะห์",
@@ -11563,9 +11902,9 @@ function signalCouncilAutomationModel(report = {}) {
     codex_runner_unavailable: "Codex Runner ยังไม่พร้อม",
     rate_limit_unavailable: "ยังอ่าน Rate Limit ของ Codex ไม่ได้ จึงพักไว้ก่อน",
     rate_limit_reached: "Rate Limit เต็มแล้ว จึงพักการวิเคราะห์อัตโนมัติ",
-    quota_limit_reached: "โควตา Codex ถึงขีดจำกัดแล้ว • แท่งใหม่ยังถูกบันทึกเข้าคิว แต่จะไม่เริ่มวิเคราะห์จนกว่าโควตาพร้อม",
+    quota_limit_reached: "โควตา Codex ถึงขีดจำกัดแล้ว • ข้ามแท่งนี้โดยไม่เรียก AI และรอแท่งปิดใหม่",
     quota_reserve: "Rate Limit คงเหลือต่ำกว่าค่าสำรองที่กำหนด",
-    quota_below_reserve: "พักการวิเคราะห์ เพราะ Codex คงเหลือต่ำกว่าค่าสำรองที่กำหนด • แท่งปิดใหม่จะอยู่ในคิวถาวรตามลำดับ",
+    quota_below_reserve: "พักการวิเคราะห์ เพราะ Codex คงเหลือต่ำกว่าค่าสำรองที่กำหนด • ข้ามแท่งนี้และรอแท่งปิดใหม่",
     daily_cap_reached: "ครบจำนวนรอบวิเคราะห์อัตโนมัติของวันนี้แล้ว",
     mission_running: "กำลังรอ Council รอบก่อนหน้าทำเสร็จ",
     council_round_already_active: "กำลังรอ Council รอบก่อนหน้าทำเสร็จ",
@@ -11602,16 +11941,16 @@ function signalCouncilAutomationModel(report = {}) {
   const pendingCount = Math.max(0, Math.trunc(Number(
     runtimeState.pendingCount ?? pending.queueDepth ?? supplied.pendingCount ?? 0,
   ) || 0));
-  const newBarPending = enabled && (
-    pendingCount > 0
-    || (
-      lastObservedClosedBarTime !== null
-      && (
-        lastAnalyzedClosedBarTime === null
-        || lastObservedClosedBarTime > lastAnalyzedClosedBarTime
-      )
-    )
-  );
+  const pendingTotalCount = Math.max(pendingCount, Math.trunc(Number(
+    runtimeState.pendingTotalCount ?? supplied.pendingTotalCount ?? pendingCount,
+  ) || 0));
+  const deferredPendingCount = Math.max(0, Math.trunc(Number(
+    runtimeState.deferredPendingCount ?? supplied.deferredPendingCount ?? 0,
+  ) || 0));
+  // A skipped candle can be newer than the last analyzed candle. Only actual
+  // pending work from Backend means a new round is waiting; a timestamp gap
+  // must never resurrect a skipped round in the UI.
+  const newBarPending = enabled && pendingTotalCount > 0;
   const blockedReasons = new Set([
     "unsupported_timeframe",
     "full_access_required",
@@ -11619,6 +11958,7 @@ function signalCouncilAutomationModel(report = {}) {
     "snapshot_missing",
     "snapshot_not_ready",
     "snapshot_stale",
+    "execution_age_limit_unavailable_before_start",
     "durable_snapshot_unavailable",
     "snapshot_artifact_capture_failed",
     "pending_queue_capacity_exceeded",
@@ -11652,8 +11992,8 @@ function signalCouncilAutomationModel(report = {}) {
   const blocked = enabled && (blockedReasons.has(reason) || blockedStatuses.has(status));
   const statusLabels = {
     disabled: "ปิดอยู่",
-    idle: enabled ? "เปิดอยู่ • แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม" : "ปิดอยู่",
-    baseline: "ตั้งจุดเริ่มแล้ว • แท่งถัดไปปิดแล้ววิเคราะห์",
+    idle: enabled ? "เปิดอยู่ • ตรวจความพร้อมเมื่อแท่งถัดไปปิด" : "ปิดอยู่",
+    baseline: "ตั้งจุดเริ่มแล้ว • รอแท่งปิดถัดไปและตรวจความพร้อม",
     watching: "เปิดอยู่ • เฝ้าแท่งปิดใหม่",
     pending: "แท่งใหม่ปิดแล้ว • รอข้อมูลนิ่ง",
     pending_settle: "แท่งใหม่ปิดแล้ว • รอข้อมูลนิ่ง",
@@ -11662,7 +12002,7 @@ function signalCouncilAutomationModel(report = {}) {
     active_round: "รอรอบก่อนหน้าทำเสร็จ",
     unsupported_timeframe: "กรอบเวลานี้ใช้ปุ่มวิเคราะห์เอง",
     quota_guard: "พักเพื่อสำรอง Rate Limit",
-    waiting_gate: "พักที่ Safety Gate • แท่งปิดใหม่กำลังรอในคิว",
+    waiting_gate: "ระบบยังไม่พร้อม • ข้ามแท่งนี้และตรวจใหม่เมื่อแท่งถัดไปปิด",
     quota_unavailable: "พักเพราะยังอ่าน Rate Limit ไม่ได้",
     daily_limit: dailyRoundLimitEnabled
       ? "ครบจำนวนรอบอัตโนมัติวันนี้"
@@ -11726,6 +12066,8 @@ function signalCouncilAutomationModel(report = {}) {
       executionPolicy: safeDashboardDisplayText(pending.executionPolicy, ""),
     } : null,
     pendingCount,
+    pendingTotalCount,
+    deferredPendingCount,
     waitingGateActive: waitingGate.active === true || status === "waiting_gate",
     backlogPolicy: supplied.backlogPolicy && typeof supplied.backlogPolicy === "object"
       ? supplied.backlogPolicy
@@ -12050,17 +12392,15 @@ function renderSignalDailyPanel(report = {}) {
     || automation.reasonMessage
     || (
       automation.enabled
-        ? `Snapshot ตรวจทุก ${automation.pollSeconds} วินาที • เมื่อพบแท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม โดยทุกแท่งจะเข้าคิวถาวรตามลำดับ FIFO`
-        : "เปิดเมื่อต้องการให้ Agent เฝ้าแท่งปิดใหม่และเริ่มวิเคราะห์เมื่อระบบพร้อม"
+        ? `Snapshot ตรวจทุก ${automation.pollSeconds} วินาที • วิเคราะห์เฉพาะแท่งที่เพิ่งปิดและผ่านเงื่อนไข • ไม่วิเคราะห์ย้อนหลัง`
+        : "เปิดเมื่อต้องการให้ Agent ตรวจความพร้อมตอนแท่งใหม่ปิดและวิเคราะห์เฉพาะรอบนั้น"
     );
-  const automationQueueMessage = automation.pendingCount > 0
-    ? ` • รอคิว ${automation.pendingCount} แท่ง${automation.pending?.closedBarTime
-      ? ` • แท่งเก่าสุด ${formatBrokerBarTime(automation.pending.closedBarTime)}`
+  const automationQueueMessage = automation.pendingTotalCount > 0
+    ? ` • Backend รายงานงานรอ ${automation.pendingTotalCount} แท่ง${automation.pending?.closedBarTime
+      ? ` • เวลาแท่ง ${formatBrokerBarTime(automation.pending.closedBarTime)}`
       : ""}${automation.pending?.detectedAt
-      ? ` • รอตั้งแต่ ${formatThaiDateTime(automation.pending.detectedAt)}`
-      : ""}${automation.pending?.queuePosition !== null && automation.pending?.queuePosition !== undefined
-      ? ` • หัวคิว ${Math.trunc(automation.pending.queuePosition)}/${Math.trunc(automation.pending.queueDepth || automation.pendingCount)}`
-      : ""}`
+      ? ` • ตรวจพบ ${formatThaiDateTime(automation.pending.detectedAt)}`
+      : ""} • เริ่มได้เฉพาะแท่งปิดใหม่ในช่วงที่กำหนด • คิวเก่าจะถูกข้าม`
     : "";
   const automationMessage = `${automationBaseMessage}${automationQueueMessage}`;
   const initDiagnostic = signalGatewayInitStatusMessage(runtime.gatewayInitStatus);
@@ -12171,7 +12511,7 @@ function renderSignalDailyPanel(report = {}) {
           <small>
             ${automation.dailyRoundLimitEnabled && automation.effectiveMaxDailyRounds !== null
               ? `เพดานรายวัน ${automation.effectiveMaxDailyRounds} รอบ`
-              : "ไม่มีเพดานรายวัน"} • ประมวลผลคิวแท่งปิดตามลำดับ FIFO • รอบย้อนหลังใช้ตรวจสอบเท่านั้นและห้ามส่ง Order เก่า • รองรับ ${automation.supported.join(", ")}
+              : "ไม่มีเพดานรายวัน"} • วิเคราะห์เฉพาะแท่งปิดใหม่ • โควตากลับมาระหว่างแท่งให้รอแท่งถัดไป • รอบที่พลาดหรือหมดอายุบันทึกว่าข้ามโดยไม่เรียก AI • รองรับ ${automation.supported.join(", ")}
           </small>
         </section>
         <button type="button" class="signal-primary-action" data-signal-run-analysis ${daily.analysisReady && !analysisBusy ? "" : "disabled"}>
@@ -12560,14 +12900,19 @@ function signalGatewaySizingSummary(runtime = {}) {
   const maxLossPerTradePercent = runtime.gatewayRiskTelemetry?.maxLossPerTradePercent;
   const commission = runtime.gatewayEstimatedCommissionPerLot;
   const commissionFreeConfirmed = runtime.gatewayCommissionFreeAccountConfirmed === true;
+  const excludesCommission = runtime.selectedPlatform === "MT5"
+    && runtime.gatewayRiskCostBasis === "price_and_slippage_excluding_commission"
+    && commission === 0;
   const accountCurrency = safeDashboardDisplayText(runtime.gatewayAccountCurrency, "").trim().toUpperCase();
   const commissionUnit = accountCurrency || "หน่วยเงินบัญชี";
-  const commissionPolicy = Number.isFinite(commission) && commission > 0
-    ? ` • สำรองค่าธรรมเนียม ${commission} ${commissionUnit}/lot`
-    : commissionFreeConfirmed
-      ? " • ยืนยันบัญชีไม่มีค่าคอมมิชชัน"
-      : " • ยังไม่ยืนยันนโยบายค่าคอมมิชชัน (Live ถูกบล็อก)";
-  const commissionPolicyReady = (Number.isFinite(commission) && commission > 0) || commissionFreeConfirmed;
+  const commissionPolicy = excludesCommission
+    ? " • ความเสี่ยงถึง SL ไม่รวมค่าคอมมิชชัน"
+    : Number.isFinite(commission) && commission > 0
+      ? ` • สำรองค่าธรรมเนียม ${commission} ${commissionUnit}/lot`
+      : commissionFreeConfirmed
+        ? " • ยืนยันบัญชีไม่มีค่าคอมมิชชัน"
+        : " • ยังไม่ยืนยันนโยบายค่าคอมมิชชัน (Live ถูกบล็อก)";
+  const commissionPolicyReady = excludesCommission || (Number.isFinite(commission) && commission > 0) || commissionFreeConfirmed;
   const brokerLimits = Number.isFinite(minimum) && Number.isFinite(maximum) && Number.isFinite(step)
     ? ` • Broker Lot ${minimum}-${maximum} • Step ${step}`
     : Number.isFinite(step)
@@ -12576,7 +12921,9 @@ function signalGatewaySizingSummary(runtime = {}) {
   const hardCap = Number.isFinite(maxLossPerTradePercent)
     ? ` • เพดานไม่เกิน ${maxLossPerTradePercent}% ของ Balance`
     : " • รอค่าเพดานต่อรายการจาก EA";
-  const estimateNote = " • ประมาณการถึง SL รวม Slippage/ค่าธรรมเนียมที่ตั้งไว้; Gap, Fill, Swap หรือค่าธรรมเนียมจริงอาจทำให้ผลต่าง";
+  const estimateNote = excludesCommission
+    ? " • ประมาณการถึง SL รวม Slippage ที่ตั้งไว้; ขาดทุนจริงอาจเกินงบจากค่าคอมมิชชัน, Fill, Gap หรือ Swap"
+    : " • ประมาณการถึง SL รวม Slippage/ค่าธรรมเนียมที่ตั้งไว้; Gap, Fill, Swap หรือค่าธรรมเนียมจริงอาจทำให้ผลต่าง";
   if (mode === "RISK_PERCENT") {
     const percent = runtime.gatewayRiskPercent;
     const capital = runtime.gatewayRiskCapitalBase === "BALANCE" ? "Balance" : "Equity";
@@ -12637,6 +12984,19 @@ function signalGatewayAckSizingSummary(ack = null, accountCurrency = "") {
   if (estimatedRisk !== null && riskCapital !== null && estimatedRisk >= 0 && riskCapital >= 0) {
     parts.push(`ความเสี่ยงประมาณ ${estimatedRisk} ${currency} จากฐาน ${riskCapital} ${currency}`);
   }
+  if (String(ack.status || "").trim().toUpperCase() === "EXECUTED") {
+    const filledSlippage = finiteNumber(ack.filledSlippagePoints);
+    if (ack.filledSlippageKnown === false) {
+      parts.push("คำเตือน: ไม่ทราบ Slippage ตอนส่งคำสั่งเดิมจากหลักฐานกู้คืน; ไม่ใช่ 0 จุด");
+    } else if (
+      (ack.filledSlippageKnown === true || ack.filledSlippageKnown === undefined)
+      && filledSlippage !== null && filledSlippage >= 0
+    ) {
+      parts.push(`Slippage ที่ EA รายงาน ${filledSlippage} จุด`);
+    } else {
+      parts.push("ไม่พบหลักฐาน Slippage ที่ตรวจสอบได้");
+    }
+  }
   parts.push("ข้อมูลอ่านอย่างเดียวจาก EA; AI/Backend ไม่ได้กำหนด Lot");
   return parts.join(" • ");
 }
@@ -12647,6 +13007,9 @@ function renderSignalMarketStrip(container, report, runtime) {
   const stale = report?.connectionChecklist?.stale === true;
   const modeAccount = signalGatewayModeAccountStatus(runtime);
   const effectiveGuardReason = signalEffectiveExecutionGuardReason(runtime);
+  const initFailure = signalCurrentInitFailureDisplay(runtime);
+  const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
+  const pendingReportLabel = signalTradingReportPendingLabel(runtime);
   const selectedPlatform = String(runtime.selectedPlatform || "").trim().toUpperCase();
   const platformLabel = ["MT4", "MT5"].includes(selectedPlatform)
     ? selectedPlatform
@@ -12656,7 +13019,7 @@ function renderSignalMarketStrip(container, report, runtime) {
     [`${platformLabel} ที่เลือก`, market.terminal, runtime.terminalSelected ? "ready" : "warning"],
     ["สัญลักษณ์", market.symbol, market.available ? "ready" : "muted"],
     ["กรอบเวลา", market.timeframe, market.available ? "ready" : "muted"],
-    ["แท่งเทียนล่าสุด", market.observedAt ? formatThaiDateTime(market.observedAt) : "รอ Adapter", market.observedAt ? "ready" : "warning"],
+    ["Snapshot ล่าสุด", market.observedAt ? formatThaiDateTime(market.observedAt) : "รอ Adapter", market.observedAt ? "ready" : "warning"],
     [
       "ความสดของข้อมูล",
       market.freshnessMinutes === null
@@ -12665,24 +13028,34 @@ function renderSignalMarketStrip(container, report, runtime) {
       market.freshnessMinutes !== null && market.freshnessMinutes <= 5 ? "ready" : "warning",
     ],
     ["Spread ปัจจุบัน", market.spread === null ? "ยังไม่มีข้อมูล" : String(market.spread), market.spread === null ? "muted" : "ready"],
-    ["สถานะ Gateway", displayStatus(runtime.gatewayStatus), runtime.gatewayConnected ? "info" : "warning"],
+    ["สถานะ Gateway", initFailure?.label || currentGateway?.status || pendingReportLabel || displayStatus(runtime.gatewayStatus), initFailure ? "error" : currentGateway?.tone || (runtime.gatewayConnected ? "info" : "warning")],
     [
       "สิทธิ์ส่ง Order",
-      runtime.gatewayExecutionGuardReady
+      initFailure?.messageTh || pendingReportLabel || (currentGateway?.vetoOrderReadyDisplay
+        ? currentGateway.orderSummary : runtime.gatewayExecutionGuardReady
         ? "Execution Guard พร้อม"
-        : signalExecutionGuardReasonLabel(effectiveGuardReason),
-      runtime.gatewayExecutionGuardReady ? "ready" : "warning",
+        : signalExecutionGuardReasonLabel(effectiveGuardReason)),
+      initFailure ? "error" : !pendingReportLabel && !currentGateway?.vetoOrderReadyDisplay
+        && runtime.gatewayExecutionGuardReady ? "ready" : "warning",
     ],
     [
       "โหมด Gateway",
-      runtime.gatewayConnected
+      initFailure?.label || currentGateway?.mode || (runtime.gatewayConnected
         ? (modeAccount.observed ? modeAccount.value : runtime.gatewayMode.toUpperCase())
-        : "ยังไม่เชื่อม EA",
-      runtime.gatewayConnected && !modeAccount.mismatch ? "info" : "warning",
+        : pendingReportLabel || "ยังไม่เชื่อม EA"),
+      initFailure ? "error" : currentGateway?.tone || (runtime.gatewayConnected && !modeAccount.mismatch ? "info" : "warning"),
     ],
     [sizing.label, sizing.value, sizing.tone],
   ];
   container.innerHTML = "";
+  if (initFailure) {
+    const diagnostic = document.createElement("div");
+    diagnostic.className = "signal-market-init-diagnostic";
+    diagnostic.setAttribute("role", "alert");
+    diagnostic.setAttribute("aria-atomic", "true");
+    diagnostic.textContent = `${initFailure.messageTh}\nวิธีแก้: ${initFailure.remediationTh}`;
+    container.appendChild(diagnostic);
+  }
   items.forEach(([label, value, tone]) => {
     const item = document.createElement("div");
     const name = document.createElement("span");
@@ -12753,6 +13126,14 @@ function signalMissionReason(mission = null, fallback = "ยังไม่ม�
     return capabilityReasons[blockedCapability];
   }
   if (mission?.result) {
+    // A successful council child stores its vote as JSON. If no validated
+    // current vote is available, this fallback must not expose it as prose.
+    const rawResult = typeof mission.result === "string" ? mission.result.trim() : "";
+    if (typeof mission.result === "object" || (rawResult !== "[TRUNCATED]" && (/^[\[{]/.test(rawResult) || /^```(?:json)?\s*[\[{]/i.test(rawResult)))) {
+      return status === "completed"
+        ? "Agent วิเคราะห์เสร็จแล้ว แต่ยังไม่มีผลที่ยืนยันสำหรับรอบปัจจุบัน • ดูผลรอบที่บันทึกไว้ในประวัติ"
+        : "ยังไม่มีคำอธิบายผลที่ยืนยันสำหรับรอบปัจจุบัน • ตรวจรายละเอียดสถานะของ Agent";
+    }
     const resultText = safeDashboardDisplayText(mission.result, "");
     if (resultText && resultText !== "[TRUNCATED]") return resultText;
     if (resultText === "[TRUNCATED]") {
@@ -12948,9 +13329,24 @@ function signalCouncilRunModel(report = {}) {
   const automationParent = automation.lastMissionId
     ? parents.find((item) => String(item?.id || "") === automation.lastMissionId) || null
     : null;
-  const consensusParent = !automation.lastMissionId && consensusParentId
+  const consensusParent = consensusParentId
     ? parents.find((item) => String(item?.id || "") === consensusParentId) || null
     : null;
+  // A completed automatic round remains in autoAnalysis.lastMissionId after
+  // a newer manual round finishes. Show the newer completed result with its
+  // own children and immutable snapshot; live/current and blocked rounds keep
+  // their existing precedence below.
+  const consensusSnapshotId = safeDashboardDisplayText(pipeline?.consensus?.snapshotId, "");
+  const newerCompletedConsensusParent = automationParent
+    && consensusParent
+    && signalMissionUiState(automationParent) === "completed"
+    && signalMissionUiState(consensusParent) === "completed"
+    && signalMissionCreatedTime(automationParent) > 0
+    && signalMissionCreatedTime(consensusParent) > signalMissionCreatedTime(automationParent)
+    && consensusSnapshotId
+    && consensusSnapshotId === safeDashboardDisplayText(consensusParent?.delegation?.snapshotId, "")
+      ? consensusParent
+      : null;
   const waitingForCurrentRound = automation.newBarPending === true && !activeParent;
   if (waitingForCurrentRound) {
     return {
@@ -12974,6 +13370,7 @@ function signalCouncilRunModel(report = {}) {
   );
   const parent = activeParent
     || currentRunParent
+    || newerCompletedConsensusParent
     || automationParent
     || consensusParent
     || (!hasExplicitCurrentIdentity ? historicalParent : null);
@@ -13207,9 +13604,27 @@ function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report)) 
         : readyForCurrentSnapshot
           ? currentSnapshotObservedAt
           : (mission?.completedAt || mission?.updatedAt || mission?.createdAt || null),
+      analysisCompletedAt: available ? (mission?.completedAt || null) : null,
+      evidenceObservedAt: available ? (evidenceObservedAt || view.observedAt || null) : null,
       blocker,
     };
   });
+}
+
+function signalAgentTimestampLabel(view = {}) {
+  if (view.available === true) {
+    const parts = [view.analysisCompletedAt
+      ? `วิเคราะห์เสร็จ ${formatThaiDateTime(view.analysisCompletedAt)}`
+      : "ยังไม่มีเวลาจบการวิเคราะห์"];
+    if (view.evidenceObservedAt) {
+      const label = view.id === "news" ? "เวลาหลักฐานข่าวแรก" : "เวลาข้อมูลที่ใช้";
+      parts.push(`${label} ${formatThaiDateTime(view.evidenceObservedAt)}`);
+    }
+    return parts.join(" • ");
+  }
+  return view.observedAt
+    ? `อัปเดตสถานะ ${formatThaiDateTime(view.observedAt)}`
+    : "ยังไม่มี Snapshot ที่ยืนยันโดย Backend";
 }
 
 function createSignalAgentBlockerPanel(view) {
@@ -13351,9 +13766,7 @@ function createSignalAgentCard(view, { compact = false } = {}) {
     item.textContent = safeDashboardDisplayText(reason);
     reasons.appendChild(item);
   });
-  footer.textContent = view.observedAt
-    ? `อัปเดตล่าสุด ${formatThaiDateTime(view.observedAt)}`
-    : "ยังไม่มี Snapshot ที่ยืนยันโดย Backend";
+  footer.textContent = signalAgentTimestampLabel(view);
   card.dataset.workState = view.state || "idle";
   card.append(heading, decision, protectivePrices);
   const blockerPanel = createSignalAgentBlockerPanel(view);
@@ -13417,9 +13830,7 @@ function createSignalCouncilOverviewCard(view) {
     view.reasons?.[0],
     "ยังไม่มีเหตุผลจาก Local Runner",
   );
-  footer.textContent = view.observedAt
-    ? `อัปเดตล่าสุด ${formatThaiDateTime(view.observedAt)}`
-    : "ยังไม่มี Snapshot ที่ยืนยันโดย Backend";
+  footer.textContent = signalAgentTimestampLabel(view);
   const chatButton = createSignalAgentChatButton(view);
   chatButton.textContent = "คุย";
   card.append(portrait, identity, metrics);
@@ -13883,10 +14294,20 @@ function signalPrepublishExecutionBlockReason(value) {
   return code.endsWith("_BEFORE_PUBLISH") ? code : "";
 }
 
+function signalTicketText(value = {}) {
+  const text = value?.ticketText;
+  const valid = (candidate) => typeof candidate === "string" && /^[1-9]\d{0,19}$/.test(candidate)
+    && (candidate.length < 20 || candidate <= "18446744073709551615");
+  if (valid(text)) return text;
+  const ticket = value?.ticket;
+  if (valid(ticket)) return ticket;
+  return Number.isSafeInteger(ticket) && ticket > 0 ? String(ticket) : "";
+}
+
 function signalExactClosedOrderOutcome(report = {}, command = null, ack = null) {
   const commandId = safeDashboardDisplayText(command?.commandId, "");
-  const ticket = Number(ack?.ticket);
-  if (!commandId || !Number.isInteger(ticket) || ticket <= 0) return null;
+  const ticket = signalTicketText(ack);
+  if (!commandId || !ticket) return null;
   const council = signalCouncilModel(report);
   const rawGatewayHistory = council.tradeGateway?.orderHistory
     && typeof council.tradeGateway.orderHistory === "object"
@@ -13913,7 +14334,7 @@ function signalExactClosedOrderOutcome(report = {}, command = null, ack = null) 
       item
       && typeof item === "object"
       && safeDashboardDisplayText(item.commandId, "") === commandId
-      && Number(item.ticket) === ticket
+      && signalTicketText(item) === ticket
       && String(item.ackStatus || "").toUpperCase() === "EXECUTED"
       && item.outcomeIdentityVerified === true
       && String(item.executionState || "").toUpperCase() === "CLOSED"
@@ -14031,7 +14452,7 @@ function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {}) {
         label: "Fill / สถานะ Order ล่าสุด",
         state: fillState,
         value: exactClosedOutcome
-          ? `ปิดแล้ว • Ticket ${exactClosedOutcome.ticket} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`
+          ? `ปิดแล้ว • Ticket ${signalTicketText(exactClosedOutcome)} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`
           : fillVerified
           ? "Backend ยืนยัน Fill แล้ว"
           : ackStatus === "EXECUTED"
@@ -14088,7 +14509,7 @@ function signalTradeGatewayHeadlineLabel(
     || gatewayRun.commandPublished === true;
   const exactClosedOutcome = operations.exactClosedOutcome;
   if (exactClosedOutcome) {
-    return `Order ปิดแล้ว • Ticket ${exactClosedOutcome.ticket} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`;
+    return `Order ปิดแล้ว • Ticket ${signalTicketText(exactClosedOutcome)} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`;
   }
   if (operations.prepublishBlocked === true) {
     return `ยังไม่ส่ง Order • ${signalExecutionGuardReasonLabel(reasonCode)}`;
@@ -14114,6 +14535,8 @@ function signalTradeGatewayHeadlineLabel(
   }
   if (commandPublished) return "ส่งคำสั่งแล้ว • รอ ACK";
   if (runStatus === "waiting_previous_ack") return "รอ EA ตอบรับคำสั่งก่อนหน้า";
+  const pendingReportLabel = signalTradingReportPendingLabel(runtime);
+  if (pendingReportLabel) return pendingReportLabel;
   if (consensus.tradePlan?.available && runtime.gatewayModeAccountMismatch) {
     return signalExecutionGuardReasonLabel(runtime.gatewayModeAccountMismatchReason);
   }
@@ -14198,7 +14621,7 @@ function signalRoundHealthModel(report = {}, automation = signalCouncilAutomatio
           : `ไม่จำกัด • วันนี้ ${automation.dailyRunCount} รอบ`,
         detail: automation.dailyRoundLimitEnabled
           ? "Backend เปิดเพดานรอบรายวันไว้"
-          : "แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม และอยู่ในคิวถาวรตามลำดับ FIFO",
+          : "วิเคราะห์เฉพาะแท่งที่เพิ่งปิดและผ่านเงื่อนไข • รอบที่ข้ามไม่ใช้ AI ย้อนหลัง",
       },
       {
         label: "Codex คงเหลือ",
@@ -14352,13 +14775,18 @@ function renderSignalProtectivePlanProvenance(container, consensus) {
 function signalExecutionGuardReasonLabel(value) {
   const code = String(value || "").trim().toUpperCase();
   const labels = {
+    GATEWAY_INPUT_CONFIGURATION_INVALID: "ค่าตั้งต้นของ EA ไม่ผ่านการตรวจสอบ • ดู Input และเกณฑ์ในรายละเอียด EA",
     READY: "ผ่านการตรวจความพร้อม",
+    SINGLE_OUTSTANDING_COMMAND: "มีคำสั่งก่อนหน้าค้างรอ ACK • หยุดคำสั่งใหม่จนยืนยันผลเดิม",
+    INVALID_ACK_TICKET: "Backend ปฏิเสธ ACK เพราะ Ticket ไม่ถูกต้อง • ผลคำสั่งยังไม่ยืนยัน ห้ามส่งซ้ำ",
+    EXPIRED_WAITING_ACK: "คำสั่งหมดอายุแต่ยังรอ ACK ที่ตรวจสอบได้ • ยังไม่ปล่อยคิวและห้ามส่งซ้ำ",
     STARTING: "EA กำลังเริ่มระบบ",
     KILL_SWITCH_ACTIVE: "Kill Switch กำลังหยุดระบบ",
     TERMINAL_NOT_CONNECTED: "Terminal ที่เลือกยังไม่เชื่อมต่อกับ Broker",
     QUOTE_NOT_AVAILABLE: "ยังไม่มีราคาล่าสุด",
-    QUOTE_NOT_OBSERVED: "EA ยังไม่ส่งราคา Bid/Ask ที่ตรวจสอบได้",
+    QUOTE_NOT_OBSERVED: "EA กำลังรอ Tick ใหม่จากกราฟหลังเริ่มทำงานหรือเชื่อมต่อ Broker ใหม่ จึงยังไม่ส่ง Order",
     QUOTE_STALE: "ราคาล่าสุดเก่าเกินกำหนด",
+    QUOTE_STALE_OR_FUTURE: "Tick ล่าสุดเก่าเกินกำหนดหรือเวลา Broker ไม่สอดคล้องกัน จึงยังไม่ส่ง Order",
     FIXED_LOT_CONFIGURATION_INVALID: "ค่า Fixed Lot ไม่ถูกต้อง",
     MONEY_MANAGEMENT_MODE_INVALID: "โหมด Money Management ต้องเป็น Fixed Lot หรือ Risk Percent",
     RISK_CAPITAL_BASE_INVALID: "ฐานคำนวณความเสี่ยงต้องเป็น Balance หรือ Equity",
@@ -14430,6 +14858,14 @@ function signalExecutionGuardReasonLabel(value) {
     SIGNED_ENVELOPE_INVALID: "ซองคำสั่งที่ลงลายเซ็นมีรูปแบบไม่ถูกต้อง",
     EA_TRADING_NOT_ALLOWED: "Terminal ที่เลือกยังไม่อนุญาตให้ EA ส่งคำสั่ง",
     EXECUTION_UNKNOWN: "EA ยังยืนยันผลการส่งคำสั่งไม่ได้ ต้องตรวจและกู้สถานะก่อนส่งซ้ำ",
+    EXECUTION_SLIPPAGE_EVIDENCE_UNAVAILABLE: "ส่งคำสั่งไปแล้วแต่ยังตรวจหลักฐาน Slippage ไม่ได้ • ต้องตรวจผลที่ Broker และห้ามส่งซ้ำ",
+    ORDER_VERIFIED_OPEN: "EA ยืนยันว่าเปิด Order แล้วจากหลักฐาน Broker",
+    ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED: "เปิด Order แล้ว • คำเตือน: Slippage และความเสี่ยงถึง SL หลัง Fill สูงกว่าค่าที่เผื่อไว้",
+    ORDER_VERIFIED_OPEN_RISK_ESTIMATE_EXCEEDED: "เปิด Order แล้ว • คำเตือน: ความเสี่ยงถึง SL หลัง Fill สูงกว่าค่าประมาณก่อนส่ง",
+    ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_EXCEEDED: "เปิด Order แล้ว • คำเตือน: Slippage หลัง Fill สูงกว่าค่าที่เผื่อไว้",
+    ORDER_VERIFIED_OPEN_RISK_UNAVAILABLE: "เปิด Order แล้ว • คำเตือน: ยังตรวจค่าความเสี่ยงถึง SL หลัง Fill ไม่ได้",
+    RECOVERED_ORDER_FOUND: "พบหลักฐาน Order ของคำสั่งเดิมจาก Broker และกู้สถานะแล้ว • ไม่ส่งคำสั่งซ้ำ",
+    EXECUTION_RECONCILED_WITH_WARNING: "ยืนยันผลคำสั่งเดิมจากหลักฐาน Broker แล้ว • มีคำเตือนที่ต้องตรวจรายละเอียด • ไม่ส่งคำสั่งซ้ำ",
     ACK_TIMEOUT: "หมดเวลารอ ACK จาก EA",
     PREVIOUS_COMMAND_UNRESOLVED: "คำสั่งก่อนหน้ายังไม่ทราบผล ระบบไม่ส่งซ้ำ",
     DECISION_DISPATCH_WINDOW_EXPIRED: "รอบวิเคราะห์นี้เก่าเกินเวลาส่ง Order แล้ว ระบบจะรอข้อมูลแท่งใหม่และไม่ส่งคำสั่งย้อนหลัง",
@@ -14442,6 +14878,8 @@ function signalExecutionGuardReasonLabel(value) {
     EXECUTION_REWARD_RISK_BELOW_MINIMUM: "Reward/Risk ณ ราคาก่อน Publish ต่ำกว่าเกณฑ์ • Backend ไม่ส่ง Command",
     EXECUTION_REWARD_RISK_BELOW_MINIMUM_BEFORE_PUBLISH: "Reward/Risk ณ ราคาก่อน Publish ต่ำกว่าเกณฑ์ • Backend ไม่ส่ง Command",
     EXECUTION_QUOTE_STALE_BEFORE_PUBLISH: "ราคาก่อน Publish เก่าเกินกำหนด • Backend ไม่ส่ง Command",
+    ANALYSIS_SNAPSHOT_STALE_BEFORE_PUBLISH: "Snapshot ที่ใช้วิเคราะห์เก่าเกินเกณฑ์ของ EA ก่อนส่งคำสั่ง • Backend ไม่ส่ง Command",
+    ANALYSIS_SNAPSHOT_FUTURE_BEFORE_PUBLISH: "เวลาของ Snapshot ที่ใช้วิเคราะห์อยู่ในอนาคต • Backend ไม่ส่ง Command",
     EXECUTION_QUOTE_MARKET_CLOSED_BEFORE_PUBLISH: "ตลาดปิดอยู่ก่อน Publish • Backend ไม่ส่ง Command",
     EXECUTION_PROTECTIVE_PLAN_INVALID_BEFORE_PUBLISH: "SL/TP ไม่ผ่านการตรวจทิศทางก่อน Publish • Backend ไม่ส่ง Command",
     TERMINAL_SELECTION_CHANGED_BEFORE_PUBLISH: "เป้าหมาย MT4 / MT5 เปลี่ยนก่อน Publish • Backend ไม่ส่ง Command",
@@ -14463,12 +14901,14 @@ function signalExecutionGuardReasonLabel(value) {
 function signalExecutionGuardRecoveryLabel(value) {
   const code = String(value || "").trim().toUpperCase();
   const recovery = {
+    GATEWAY_INPUT_CONFIGURATION_INVALID: "ตรวจ Input ที่ระบุในรายละเอียด EA แก้ค่าให้อยู่ในเกณฑ์ แล้วเริ่ม EA ใหม่",
     READY: "ไม่ต้องแก้ไข EA พร้อมตรวจคำสั่งรอบใหม่",
     STARTING: "รอให้ EA เขียน Snapshot และสถานะรอบแรก แล้วกดตรวจข้อมูล Terminal ใหม่",
     TERMINAL_NOT_CONNECTED: "เข้าสู่ระบบ Broker ให้สำเร็จ และตรวจว่าราคาใน Market Watch เคลื่อนไหว",
     QUOTE_NOT_AVAILABLE: "เปิด Market Watch ให้มีราคา Bid/Ask แล้วรอ Snapshot รอบใหม่",
     QUOTE_NOT_OBSERVED: "หากตลาดปิดให้รอ Tick แรกหลังตลาดเปิด หากตลาดเปิดอยู่ให้ตรวจ Market Watch ว่าราคาเคลื่อนไหว และตรวจว่า EA อยู่บนกราฟ Symbol กับ Timeframe ที่อนุญาต แล้วรอ Snapshot รอบใหม่",
     QUOTE_STALE: "ตรวจอินเทอร์เน็ตและการเชื่อมต่อ Broker แล้วรอราคาและ Snapshot รอบใหม่",
+    QUOTE_STALE_OR_FUTURE: "รอ Tick ใหม่ที่ EA ได้รับจริงและตรวจเวลา Broker; การรีเฟรชหน้า Dashboard ไม่ทำให้ราคาเก่าสดขึ้น",
     KILL_SWITCH_ACTIVE: "ตรวจสาเหตุที่เปิด Kill Switch ก่อน แล้วจึงปลดจาก EA เมื่อปลอดภัย",
     FIXED_LOT_CONFIGURATION_INVALID: "แก้ FixedLot ใน EA ให้มากกว่า 0 และไม่เกินเพดาน Lot ที่กำหนด",
     MONEY_MANAGEMENT_MODE_INVALID: "เลือก MoneyManagementMode เป็น FIXED_LOT หรือ RISK_PERCENT ที่ EA",
@@ -14514,6 +14954,14 @@ function signalExecutionGuardRecoveryLabel(value) {
     SIGNING_KEY_MISMATCH: "คัดลอก Key ID ล่าสุดจาก Local Runner ไปใส่ EA ให้ตรงกัน",
     ACK_TIMEOUT: "ตรวจแท็บ Experts และ Journal ของ Terminal ที่เลือกก่อนสั่งรอบใหม่",
     PREVIOUS_COMMAND_UNRESOLVED: "ตรวจ ACK หรือสถานะ Order ของคำสั่งก่อนหน้าให้จบก่อนเริ่มรอบใหม่",
+    EXECUTION_SLIPPAGE_EVIDENCE_UNAVAILABLE: "ตรวจ Position, Deal และราคา Fill ของคำสั่งเดิมที่ Broker; ห้ามถือว่าไม่ได้เปิด Order หรือ Slippage เป็นศูนย์ และไม่ส่งคำสั่งเดิมซ้ำ",
+    ORDER_VERIFIED_OPEN: "ตรวจ Position และ SL/TP ที่ Broker; ไม่ต้องส่งคำสั่งเดิมซ้ำ",
+    ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED: "ตรวจ Position, ราคา Fill และ SL/TP จริง; คำเตือนนี้ไม่ย้อนการเปิด Order และไม่ใช่เหตุให้ส่งซ้ำ",
+    ORDER_VERIFIED_OPEN_RISK_ESTIMATE_EXCEEDED: "ตรวจ Position และความเสี่ยงจากราคา Fill ถึง SL จริง; ไม่ส่งคำสั่งเดิมซ้ำ",
+    ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_EXCEEDED: "ตรวจราคา Fill และความเสี่ยงของ Position ที่เปิดแล้ว; ไม่ส่งคำสั่งเดิมซ้ำ",
+    ORDER_VERIFIED_OPEN_RISK_UNAVAILABLE: "ตรวจ Position, SL/TP และข้อมูลความเสี่ยงที่ Broker ก่อนทำรายการต่อ; ไม่ส่งคำสั่งเดิมซ้ำ",
+    RECOVERED_ORDER_FOUND: "ตรวจ Position หรือประวัติ Broker ของคำสั่งเดิม; หากไม่ทราบ Slippage ห้ามถือว่าเป็นศูนย์ และไม่ส่งคำสั่งเดิมซ้ำ",
+    EXECUTION_RECONCILED_WITH_WARNING: "ตรวจ ACK, Position หรือประวัติ Broker และคำเตือนที่แนบมา; ข้อมูลที่ยังไม่ทราบต้องคงเป็นไม่ทราบ และไม่ส่งคำสั่งเดิมซ้ำ",
   };
   return recovery[code]
     || "กดตรวจข้อมูล Terminal ใหม่ แล้วเปิดรายละเอียด EA หรือ Journal เพื่อดูสาเหตุล่าสุดก่อนเริ่มรอบใหม่";
@@ -14536,6 +14984,12 @@ function signalEffectiveExecutionGuardReason(runtime = {}) {
 }
 
 function signalExecutionGuardSummary(runtime = {}) {
+  const initFailure = signalCurrentInitFailureDisplay(runtime);
+  if (initFailure) return `${initFailure.messageTh} • วิธีแก้: ${initFailure.remediationTh}`;
+  const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
+  if (currentGateway) return currentGateway.summary;
+  const pendingLabel = signalTradingReportPendingLabel(runtime);
+  if (pendingLabel) return pendingLabel;
   const selectedPlatform = String(runtime.selectedPlatform || "").trim().toUpperCase();
   const platformLabel = ["MT4", "MT5"].includes(selectedPlatform)
     ? selectedPlatform
@@ -14616,6 +15070,12 @@ function signalSigningKeyCopyState(runtime = {}) {
 }
 
 function signalLiveAccountStatus(runtime = {}, modeAccount = signalGatewayModeAccountStatus(runtime)) {
+  const initFailure = signalCurrentInitFailureDisplay(runtime);
+  if (initFailure) return initFailure.messageTh;
+  const pendingLabel = signalTradingReportPendingLabel(runtime);
+  if (pendingLabel) return pendingLabel;
+  const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
+  if (currentGateway?.vetoLiveReadyDisplay) return currentGateway.liveSummary;
   const guardReady = runtime.gatewayExecutionGuardReady === true;
   const signedCommandReady = runtime.backendSignedCommandVerificationAvailable === true
     && runtime.signedCommandVerificationAvailable === true
@@ -14671,13 +15131,16 @@ function signalLiveAccountStatus(runtime = {}, modeAccount = signalGatewayModeAc
 
 function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
   if (!container) return;
+  const initFailure = signalCurrentInitFailureDisplay(runtime);
+  const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
   const telemetry = runtime.gatewayRiskTelemetry || {};
   const currentVsMax = (current, maximum, suffix = "") => (
     current === null || maximum === null
       ? "รอข้อมูลจาก EA"
       : `${current} / ${maximum}${suffix}`
   );
-  const guardReady = runtime.gatewayExecutionGuardReady === true;
+  const guardReady = !initFailure && !currentGateway?.vetoGuardReadyDisplay
+    && runtime.gatewayExecutionGuardReady === true;
   const signedCommandReady = runtime.backendSignedCommandVerificationAvailable === true
     && runtime.signedCommandVerificationAvailable === true
     && runtime.signingKeyMatch === true;
@@ -14699,10 +15162,11 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
     ["ระบบหลาย Agent", runtime.ensembleAvailable, runtime.ensembleAvailable ? "พร้อมวิเคราะห์" : "รอ Adapter"],
     [
       "MetafxHQ AI Council EA",
-      runtime.gatewayConnected && runtime.gatewayMode !== "shadow",
-      runtime.gatewayConnected
+      !initFailure && !currentGateway?.vetoOrderReadyDisplay
+        && runtime.gatewayConnected && runtime.gatewayMode !== "shadow",
+      initFailure?.label || currentGateway?.mode || (runtime.gatewayConnected
         ? (runtime.gatewayMode === "shadow" ? "SHADOW • ไม่ส่ง Order" : runtime.gatewayMode.toUpperCase())
-        : "ยังไม่เชื่อม",
+        : signalTradingReportPendingLabel(runtime) || "ยังไม่เชื่อม"),
     ],
     [
       "Money Management ของ EA",
@@ -14737,7 +15201,8 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
     ["ลายเซ็นคำสั่งจาก Local Runner", signedCommandReady, signedCommandReady ? `ตรวจได้ • ${runtime.signatureAlgorithm || "HMAC-SHA256"}` : "ยังตรวจแบบครบเส้นทางไม่ได้"],
     ["Key ID สำหรับตั้ง Live", signingKey.ready, signingKey.label, signingKey.copyValue],
     ["Key สำหรับบัญชีจริง", runtime.signingKeyPinned === true && runtime.signingKeyMatch === true, runtime.signingKeyPinned === true ? (runtime.signingKeyMatch === true ? "ปักหมุดแล้วและตรงกับ Backend" : "ปักหมุดแล้วแต่ Key ไม่ตรง") : "ยังไม่ปักหมุดใน EA • Live ถูกล็อก"],
-    ["บัญชีจริง", runtime.liveOrderExecutionAvailable, liveAccountStatus],
+    ["บัญชีจริง", !initFailure && !currentGateway?.vetoLiveReadyDisplay
+      && runtime.liveOrderExecutionAvailable, liveAccountStatus],
   ];
   container.innerHTML = "";
   items.forEach(([label, ready, value, copyValue]) => {
@@ -15907,7 +16372,7 @@ function renderSignalLatestNewsVote(container, news = {}) {
     section.append(sectionTitle, list);
     card.appendChild(section);
   });
-  appendSignalDeepEvidenceList(card, news.evidence);
+  appendSignalDeepEvidenceList(card, news.evidence || news.sources);
   container.appendChild(card);
   return true;
 }
@@ -15915,7 +16380,7 @@ function renderSignalLatestNewsVote(container, news = {}) {
 function renderSignalNewsContextPanel() {
   const shell = renderSignalDeepShell(els.signalConsensusNewsContent, {
     eyebrow: "News & Market Context",
-    title: "ข่าวและสถานการณ์ระยะสั้น กลาง และยาว",
+    title: "ข่าวและบริบทตลาด",
     description: "แสดงทิศทาง Confidence และลิงก์หลักฐานที่ Backend ส่งมาเท่านั้น หากไม่มีข่าวจะไม่แต่งข้อมูลขึ้นเอง",
   });
   if (!shell?.body) return;
@@ -15932,17 +16397,20 @@ function renderSignalNewsContextPanel() {
     : {};
   const latest = document.createElement("div");
   latest.className = "signal-deep-news-latest-wrap";
-  if (renderSignalLatestNewsVote(latest, news)) {
+  const renderedLatest = renderSignalLatestNewsVote(latest, news);
+  if (renderedLatest) {
     body.appendChild(latest);
   }
-  const grid = document.createElement("div");
-  grid.className = "signal-deep-news-grid";
-  renderSignalNewsHorizonCard(grid, news, "short", "ระยะสั้น");
-  renderSignalNewsHorizonCard(grid, news, "medium", "ระยะกลาง");
-  renderSignalNewsHorizonCard(grid, news, "long", "ระยะยาว");
-  body.appendChild(grid);
+  const horizons = [["short", "ระยะสั้น"], ["medium", "ระยะกลาง"], ["long", "ระยะยาว"]]
+    .filter(([horizon]) => signalDeepNewsHorizon(news, horizon).items.length > 0);
+  if (horizons.length) {
+    const grid = document.createElement("div");
+    grid.className = "signal-deep-news-grid";
+    horizons.forEach(([horizon, label]) => renderSignalNewsHorizonCard(grid, news, horizon, label));
+    body.appendChild(grid);
+  }
   const globalEvidence = signalDeepEvidenceItems(news.evidence || news.sources);
-  if (globalEvidence.length) {
+  if (globalEvidence.length && !renderedLatest) {
     const sourceSection = document.createElement("section");
     const title = document.createElement("h4");
     sourceSection.className = "signal-deep-global-sources";
@@ -16545,14 +17013,17 @@ function renderSignalLivePanel(report = {}) {
   const gatewayAction = container.querySelector("[data-signal-gateway-action]");
   const gatewayDetail = container.querySelector("[data-signal-gateway-detail]");
   if (gatewayAction) {
-    gatewayAction.textContent = runtime.gatewayMode === "shadow"
+    const initFailure = signalCurrentInitFailureDisplay(runtime);
+    const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
+    gatewayAction.textContent = initFailure?.label || currentGateway?.orderSummary || signalTradingReportPendingLabel(runtime) || (runtime.gatewayMode === "shadow"
       ? "SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order"
       : runtime.gatewayExecutionGuardReady
         ? `พร้อมรับคำสั่งรอบใหม่ • ${runtime.gatewayMode.toUpperCase()}`
       : runtime.gatewayConnected
         ? `เชื่อม EA แล้ว • ยังไม่พร้อมส่ง Order`
-        : "ยังไม่เชื่อม EA";
-    gatewayAction.dataset.ready = runtime.gatewayExecutionGuardReady && runtime.gatewayMode !== "shadow" ? "true" : "false";
+        : "ยังไม่เชื่อม EA");
+    gatewayAction.dataset.ready = !initFailure && !currentGateway?.vetoOrderReadyDisplay
+      && runtime.gatewayExecutionGuardReady && runtime.gatewayMode !== "shadow" ? "true" : "false";
   }
   if (gatewayDetail) {
     const sizing = signalGatewaySizingSummary(runtime);
@@ -16562,7 +17033,9 @@ function renderSignalLivePanel(report = {}) {
       runtime.gatewayAccountCurrency,
     );
     const modeAccount = signalGatewayModeAccountStatus(runtime);
-    gatewayDetail.textContent = `${sizing.value} • ${signalExecutionGuardSummary(runtime)} • ${ackStatus}${ackSizing ? ` • ${ackSizing}` : ""}${modeAccount.mismatch ? ` • ${modeAccount.value}` : ""}`;
+    const ackReason = runtime.gatewayLastAck?.reasonCode
+      ? signalExecutionGuardReasonLabel(runtime.gatewayLastAck.reasonCode) : "";
+    gatewayDetail.textContent = `${sizing.value} • ${signalExecutionGuardSummary(runtime)} • ${ackStatus}${ackReason ? ` • ${ackReason}` : ""}${ackSizing ? ` • ${ackSizing}` : ""}${modeAccount.mismatch ? ` • ${modeAccount.value}` : ""}`;
   }
 }
 
@@ -16763,6 +17236,7 @@ function renderSignalDecisionPanel(report = {}) {
         <div class="signal-assurance-list" data-signal-operation-rows></div>
       </article>
     </section>
+    <div data-signal-pending-commands></div>
     <section class="signal-timeline">
       <div class="signal-section-heading">
         <div><span>เหตุการณ์ของรอบนี้</span><strong>Decision Trail จาก Backend</strong></div>
@@ -16771,6 +17245,7 @@ function renderSignalDecisionPanel(report = {}) {
     </section>
   `;
   container.querySelector("[data-signal-market-strip]")?.after(createSignalStreamContextBanner(report));
+  renderSignalPendingCommands(container.querySelector("[data-signal-pending-commands]"), report, council.tradeGateway?.orderHistory || {});
   renderSignalMarketStrip(container.querySelector("[data-signal-market-strip]"), report, runtime);
   renderSignalPipelineSteps(container.querySelector("[data-signal-pipeline]"), states);
   const qualityCard = container.querySelector("[data-signal-quality-card]");
@@ -16981,7 +17456,7 @@ function createSignalHistoryRow(entry) {
   type.textContent = signalHistoryTypeLabel(entry);
   title.textContent = safeDashboardDisplayText(item.title, item.id || "รายการจาก Backend");
   status.textContent = displayStatus(item.status || bucket);
-  result.textContent = safeDashboardDisplayText(item.result || item.summary || item.detail, "ยังไม่มีข้อความสรุป");
+  result.textContent = signalHistoryReadableText(item.result || item.summary || item.detail, "ยังไม่มีข้อความสรุป");
   detail.textContent = "ดูรายละเอียด";
   row.append(time, type, title, status, result, detail);
   row.addEventListener("click", () => openSignalHistoryEntry(entry, row));
@@ -17003,7 +17478,8 @@ function signalHistoryAttemptKey(item = {}, kind = "analysis", index = 0) {
     const commandId = safeDashboardDisplayText(item.commandId, "");
     if (commandId) return `legacy-command:${commandId}`;
     if (item.ticket !== null && item.ticket !== undefined && item.ticket !== "") {
-      return `legacy-ticket:${String(item.ticket)}`;
+      const ticket = signalTicketText(item);
+      if (ticket) return `legacy-ticket:${ticket}`;
     }
   }
   const recordId = safeDashboardDisplayText(
@@ -17052,7 +17528,15 @@ function signalHistoryMergedReadModel(report = {}, kind = "analysis") {
   const useLoadedPage = pageScopeMatches && pageState.initialized === true;
   return {
     ...base,
+    // A successfully validated history page has its own availability. A stale
+    // compact report must not hide durable Orders returned for this exact scope.
+    available: useLoadedPage ? true : base.available,
+    error: useLoadedPage ? null : base.error,
+    reasonCode: useLoadedPage ? null : base.reasonCode,
     items,
+    pendingCommands: useLoadedPage
+      ? (pageState.pendingCommands || [])
+      : baseMatchesRequestedScope ? (base.pendingCommands || []) : [],
     summary: useLoadedPage && pageState.summary && typeof pageState.summary === "object"
       ? pageState.summary
       : baseMatchesRequestedScope
@@ -17086,6 +17570,7 @@ function resetSignalHistoryPageCache(kind = null) {
     if (!pageState) return;
     Object.assign(pageState, {
       items: [],
+      pendingCommands: [],
       initialized: false,
       hasMore: false,
       nextCursor: "",
@@ -17163,6 +17648,7 @@ async function loadSignalHistoryPage(kind, report = {}, { firstPage = false } = 
       return true;
     });
     pageState.initialized = true;
+    pageState.pendingCommands = Array.isArray(history.pendingCommands) ? history.pendingCommands : [];
     pageState.hasMore = history.hasMore === true;
     pageState.nextCursor = nextCursor;
     pageState.summary = history.summary && typeof history.summary === "object"
@@ -17225,6 +17711,44 @@ function signalOrderHistoryEntries(report = {}, readModel = null) {
     : [];
 }
 
+function signalPendingCommandModels(report = {}, history = {}) {
+  if (history.available === false || history.scopePending === true) return [];
+  const gateway = signalCouncilModel(report)?.tradeGateway || {};
+  const events = Array.isArray(gateway.ackEvents) ? gateway.ackEvents : [];
+  return (Array.isArray(history.pendingCommands) ? history.pendingCommands : [])
+    .filter((command) => command?.outstanding === true && command.commandId)
+    .map((command) => {
+      const rejection = events.find((event) => event?.commandId === command.commandId && event.code);
+      const reasonCode = rejection?.code || command.reasonCode || command.status || "single_outstanding_command";
+      return {
+        ...command,
+        reasonCode,
+        detail: `${signalExecutionGuardReasonLabel(reasonCode)} (${reasonCode})`,
+      };
+    });
+}
+
+function renderSignalPendingCommands(container, report = {}, history = {}) {
+  if (!container) return;
+  container.replaceChildren();
+  const commands = signalPendingCommandModels(report, history);
+  container.hidden = commands.length === 0;
+  commands.forEach((command) => {
+    const row = document.createElement("section");
+    row.className = "signal-history-read-state";
+    row.dataset.tone = "error";
+    row.setAttribute("role", "status");
+    const content = document.createElement("div");
+    const title = document.createElement("strong");
+    const detail = document.createElement("span");
+    title.textContent = `คำสั่งค้าง • ยังไม่ยืนยันเป็น Order • ${safeDashboardDisplayText(command.side, "")} ${safeDashboardDisplayText(command.symbol, "")} ${safeDashboardDisplayText(command.timeframe, "")}`;
+    detail.textContent = `${command.detail} • Command ${safeDashboardDisplayText(command.commandId, "—")} • บันทึก ${signalThaiDateTime(command.updatedAt || command.createdAt)}`;
+    content.append(title, detail);
+    row.append(content);
+    container.append(row);
+  });
+}
+
 function signalOrderNumber(value, maximumFractionDigits = 5) {
   if (value === null || value === undefined || value === "") return "—";
   const number = Number(value);
@@ -17240,6 +17764,16 @@ function signalOrderSignedPnl(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "—";
   return `${number > 0 ? "+" : ""}${signalOrderNumber(number, 2)}`;
+}
+
+function signalOrderClosedFinancialText(order = {}) {
+  if (order.status !== "closed" || order.executionState !== "CLOSED"
+      || order.outcomeIdentityVerified !== true || order.verificationStatus !== "VERIFIED_CLOSED"
+      || order.ackStatus !== "EXECUTED") return "";
+  const fields = ["closePrice", "grossProfit", "commission", "swap", "fee"];
+  if (!fields.every((field) => typeof order[field] === "number" && Number.isFinite(order[field]))
+      || order.closePrice <= 0) return "รายละเอียดราคาปิดและต้นทุนยังไม่มีหลักฐาน";
+  return `ราคาปิด ${signalOrderNumber(order.closePrice)} • กำไรก่อนต้นทุน ${signalOrderSignedPnl(order.grossProfit)} • Commission ${signalOrderSignedPnl(order.commission)} • Swap ${signalOrderSignedPnl(order.swap)} • Fee ${signalOrderSignedPnl(order.fee)}`;
 }
 
 function signalThaiDateTime(value) {
@@ -17278,6 +17812,75 @@ function signalOrderOpenedTime(order = {}) {
   const value = order.openedAt || order.createdAt || order.updatedAt || "";
   const parsed = value ? new Date(value).getTime() : Number.NaN;
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function signalHistoryReadableText(value, fallback = "") {
+  // Display-only projection: never recover a vote, confidence or order state
+  // from abbreviated result text. The canonical history remains authoritative.
+  const lines = [];
+  const seen = new Set();
+  let partial = false;
+  let structured = false;
+  const add = (text) => {
+    const clean = safeDashboardDisplayText(text, "", { limit: 1200, markTruncated: true });
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      lines.push(clean);
+    }
+  };
+  const visit = (input, depth = 0) => {
+    if (depth > 5 || input === null || input === undefined) return;
+    if (Array.isArray(input)) {
+      structured = true;
+      input.slice(0, 30).forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (typeof input === "object") {
+      structured = true;
+      // Use prose fields only; IDs, source URLs and machine states are not a summary.
+      ["reasonTh", "reason", "summary", "messageTh", "message", "observations"].forEach((key) => {
+        if (Object.hasOwn(input, key)) visit(input[key], depth + 1);
+      });
+      if (Array.isArray(input.evidence)) {
+        input.evidence.slice(0, 30).forEach((entry) => visit(
+          typeof entry === "string" ? entry : entry?.label, depth + 1,
+        ));
+      }
+      return;
+    }
+    if (typeof input !== "string") return;
+    const text = input.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    if (!text) return;
+    // Bracketed diagnostics such as [ERROR] and [TRUNCATED] are prose, not JSON.
+    if (!/^(?:\{|"|\[\s*(?:[\[{"\]\d-]|true\b|false\b|null\b|$))/.test(text)) {
+      add(text);
+      return;
+    }
+    structured = true;
+    try {
+      visit(JSON.parse(text), depth + 1);
+      return;
+    } catch {
+      // Old compact responses can end mid-JSON. Only complete quoted prose
+      // values are usable; never finish a cut-off sentence or infer missing data.
+      partial = true;
+      const prefix = text.slice(0, 24000);
+      const tokens = [...prefix.matchAll(/"(?:\\.|[^"\\])*"/g)];
+      const proseKeys = new Set(["reasonTh", "reason", "summary", "messageTh", "message", "label"]);
+      tokens.forEach((token, index) => {
+        const next = tokens[index + 1];
+        if (!next || !/^\s*:\s*$/.test(prefix.slice(token.index + token[0].length, next.index))) return;
+        try {
+          if (proseKeys.has(JSON.parse(token[0]))) visit(JSON.parse(next[0]), depth + 1);
+        } catch { /* An incomplete or invalid string is not display evidence. */ }
+      });
+    }
+  };
+  visit(value);
+  const summary = safeDashboardDisplayText(lines.join(" • "), "", { limit: 600, markTruncated: true });
+  if (summary) return partial ? `${summary} • แสดงเฉพาะข้อความที่อ่านได้จากข้อมูลสรุปบางส่วน` : summary;
+  if (structured) return "มีข้อมูลวิเคราะห์เดิม แต่ไม่พบข้อความเหตุผลที่อ่านได้ในข้อมูลสรุปนี้";
+  return fallback;
 }
 
 function signalHistoryObject(value) {
@@ -17330,8 +17933,49 @@ function signalHistorySkipReasonLabel(value) {
     bar_time_regression_baseline: "ข้ามเพราะเวลาแท่งย้อนกลับ",
     snapshot_not_captured_during_gap: "ไม่มี Snapshot ของแท่งนี้ในช่วงที่ระบบเว้นห่าง",
     snapshot_artifact_capture_failed: "บันทึก Snapshot สำหรับแท่งนี้ไม่สำเร็จ",
-    durable_snapshot_unavailable: "ไม่พบ Snapshot ถาวรสำหรับวิเคราะห์ย้อนหลัง",
+    durable_snapshot_unavailable: "ไม่พบ Snapshot ของแท่งนี้ • ข้ามโดยไม่เรียก AI",
+    analysis_snapshot_expired_before_start: "Snapshot หมดอายุก่อนเริ่ม • ข้ามโดยไม่เรียก AI",
+    analysis_snapshot_time_invalid_before_start: "ยืนยันเวลาจับ Snapshot ไม่ได้ • ข้ามโดยไม่เรียก AI",
+    new_bar_only_backlog_cancelled: "ยกเลิกคิวย้อนหลังตามนโยบายใหม่ • ไม่เรียก AI",
+    new_bar_only_trigger_not_admitted: "ไม่ผ่านเงื่อนไขตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    new_bar_only_trigger_window_expired: "พ้นช่วงเริ่มวิเคราะห์ของแท่งนี้แล้ว • ข้ามโดยไม่เรียก AI",
+    new_bar_only_missed_trigger: "พลาดช่วงแท่งปิด • ไม่วิเคราะห์ย้อนหลัง",
+    new_bar_only_wait_next_bar: "รอแท่งปิดถัดไป • ไม่เรียก AI ย้อนหลัง",
+    new_bar_only_restart_baseline: "ข้ามคิวเดิมหลังเริ่มระบบใหม่ • ไม่เรียก AI",
+    new_bar_only_stream_change_baseline: "ข้ามคิวเดิมหลังเปลี่ยนกราฟ • ไม่เรียก AI",
+    council_legacy_automatic_backlog_skipped: "ยกเลิกงานอัตโนมัติจากคิวเก่า • ไม่เรียก AI",
+    council_new_bar_all_votes_skipped: "Agent ทั้ง 3 ตัวถูกข้ามก่อนเริ่ม • ไม่เรียก AI",
+    council_new_bar_previous_startup_skipped: "ข้ามงานเดิมหลังเริ่มระบบใหม่ • ไม่เรียก AI",
+    council_new_bar_historical_snapshot_skipped: "Snapshot ไม่ใช่รอบปัจจุบันที่รับไว้ • ไม่เรียก AI",
+    council_new_bar_admission_invalid: "ยืนยันสิทธิ์เริ่มงานของแท่งนี้ไม่ได้ • ไม่เรียก AI",
+    council_new_bar_start_window_expired: "หมดช่วงเริ่มงานก่อน Agent ทำงาน • ไม่เรียก AI",
+    council_new_bar_current_snapshot_unavailable: "ยืนยัน Snapshot ปัจจุบันไม่ได้ก่อนเริ่ม Agent • ไม่เรียก AI",
+    council_new_bar_no_longer_current: "มีแท่งใหม่หรือเปลี่ยนกราฟก่อนเริ่ม Agent • ข้ามรอบเดิม",
+    council_new_bar_analysis_snapshot_expired_before_start: "Snapshot หมดอายุก่อน Agent เริ่มงาน • ไม่เรียก AI",
+    council_new_bar_analysis_snapshot_time_invalid_before_start: "ยืนยันเวลา Snapshot ไม่ได้ก่อน Agent เริ่มงาน • ไม่เรียก AI",
+    council_new_bar_execution_age_limit_unavailable_before_start: "อ่านเกณฑ์อายุ Snapshot จาก EA ไม่ได้ก่อน Agent เริ่มงาน • ไม่เรียก AI",
+    quota_limit_reached: "โควตา Codex เต็มตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_below_reserve: "โควตาคงเหลือต่ำกว่าเกณฑ์ตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_unavailable: "อ่านโควตาไม่ได้ตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_stale: "ข้อมูลโควตาเก่าเกินไปตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_incomplete: "ข้อมูลโควตาไม่ครบตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    quota_provider_hard_stop: "ผู้ให้บริการพักการใช้งานตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    codex_runner_not_ready: "Codex Runner ไม่พร้อมตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    codex_runner_unavailable: "Codex Runner ใช้งานไม่ได้ตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    mission_running: "รอบก่อนหน้ายังทำงานตอนแท่งปิด • ข้ามรอบนี้",
+    council_round_already_active: "รอบก่อนหน้ายังทำงานตอนแท่งปิด • ข้ามรอบนี้",
+    daily_cap_reached: "ครบเพดานรอบรายวันตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    daily_round_limit_reached: "ครบเพดานรอบรายวันตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    daily_limit_reached: "ครบเพดานรอบรายวันตอนแท่งปิด • ข้ามโดยไม่เรียก AI",
+    execution_age_limit_unavailable_before_start: "รอเกณฑ์อายุ Snapshot จาก EA ก่อนเริ่ม AI",
+    restart_pending_recovered: "กู้คิวที่รอไว้หลังเริ่มระบบใหม่แล้ว",
+    stream_cursor_restored: "คืนตำแหน่งกราฟที่ติดตามไว้แล้ว",
+    gap_history_unavailable: "อ่านประวัติแท่งช่วงที่ขาดหายไม่ได้ จึงยังยืนยันจำนวนแท่งไม่ได้",
   };
+  if (code.startsWith("council_new_bar_gate_skipped_")) {
+    const gate = code.slice("council_new_bar_gate_skipped_".length);
+    return `${labels[gate] || "ระบบไม่พร้อมก่อน Agent เริ่มงาน • ข้ามโดยไม่เรียก AI"} (${code})`;
+  }
   return labels[code] ? `${labels[code]} (${code})` : code;
 }
 
@@ -17398,7 +18042,7 @@ function signalHistoryVote(value = {}, fallbackRole = "") {
     source.score,
     source.probability,
   );
-  const reason = safeDashboardDisplayText(
+  const reason = signalHistoryReadableText(
     source.reasonTh
       || source.reason
       || source.messageTh
@@ -17406,7 +18050,8 @@ function signalHistoryVote(value = {}, fallbackRole = "") {
       || source.reasonCode
       || source.errorCode
       || source.blocker?.causeTh
-      || source.blocker,
+      || source.blocker
+      || (source.observations || source.evidence ? source : null),
     "",
   );
   return {
@@ -17628,6 +18273,14 @@ function signalHistoryPipelineGroups(pipelineItems = []) {
   return { parents, childrenByParent };
 }
 
+function signalSnapshotAgeDetail(preflight = {}) {
+  const age = preflight?.analysisSnapshotAgeSeconds;
+  const limit = preflight?.maximumSnapshotAgeSeconds;
+  if (!Number.isFinite(age) || age < 0 || !Number.isFinite(limit) || limit <= 0) return "";
+  const format = (value) => Math.round(value * 10) / 10;
+  return `อายุ Snapshot ${format(age)} วินาที / เกณฑ์ EA ${format(limit)} วินาที`;
+}
+
 function signalHistoryOrderState(source, identity, orderItems = []) {
   const metrics = signalHistoryMetricObject(source);
   const gateway = signalHistoryObject(source.tradeGateway || metrics.tradeGateway || metrics.execution);
@@ -17644,14 +18297,13 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
     && safeDashboardDisplayText(order.snapshotId, "") === identity.snapshotId
   ));
   const linkageCommandId = safeDashboardDisplayText(linkage.commandId, "");
-  const linkageTicket = Number(linkage.ticket);
+  const linkageTicket = signalTicketText(linkage);
   const exactLinkedOrders = linkage.available === true
     && linkageCommandId
-    && Number.isInteger(linkageTicket)
-    && linkageTicket > 0
+    && linkageTicket
     ? orderItems.filter((order) => (
         safeDashboardDisplayText(order.commandId, "") === linkageCommandId
-        && Number(order.ticket) === linkageTicket
+        && signalTicketText(order) === linkageTicket
       ))
     : [];
   const matchedOrder = linkage.available === true
@@ -17670,7 +18322,7 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
         tone: "attention",
         label: "ผลคำสั่งยังไม่ชัดเจน • ต้องตรวจสถานะ",
         detail: [
-          matchedOrder.ticket ? `Ticket ที่ต้องตรวจ ${matchedOrder.ticket}` : "ไม่พบ Ticket ที่ยืนยันได้",
+          signalTicketText(matchedOrder) ? `Ticket ที่ต้องตรวจ ${signalTicketText(matchedOrder)}` : "ไม่พบ Ticket ที่ยืนยันได้",
           signalExecutionGuardReasonLabel(matchedOrder.ackReasonCode || "EXECUTION_UNKNOWN"),
         ].join(" • "),
       };
@@ -17682,15 +18334,18 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
       && String(matchedOrder.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED";
     const closedAtBroker = closed ? signalBrokerDateTime(matchedOrder.closedAtBroker) : "";
     const details = [
-      matchedOrder.ticket ? `Ticket ${matchedOrder.ticket}` : "EA ยืนยันการเปิดแล้ว",
-      closed && Number.isFinite(Number(matchedOrder.closedPnl))
+      signalTicketText(matchedOrder) ? `Ticket ${signalTicketText(matchedOrder)}` : "EA ยืนยันการเปิดแล้ว",
+      closed && Number.isFinite(matchedOrder.closedPnl)
         ? `P/L ${signalOrderSignedPnl(matchedOrder.closedPnl)}`
         : "",
       closedAtBroker ? `ปิดเวลา Broker ${closedAtBroker}` : "",
     ].filter(Boolean);
     return {
       tone: matchedOrder.verified === true ? "confirmed" : "attention",
-      label: `${closed ? "ปิด" : "เปิด"} ${side || "Order"}`,
+      label: closed ? `ปิด ${side || "Order"}`
+        : matchedOrder.status === "open" && matchedOrder.executionState === "OPEN" && matchedOrder.outcomeIdentityVerified === true
+          ? `เปิด ${side || "Order"}`
+          : `เปิดสำเร็จ • ไม่ทราบสถานะล่าสุด`,
       detail: details.join(" • "),
     };
   }
@@ -17759,7 +18414,13 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
     return {
       tone: "blocked",
       label: "บล็อกก่อนส่ง • ไม่ได้เปิด Order",
-      detail: signalExecutionGuardReasonLabel(prepublishBlockReason),
+      detail: [signalExecutionGuardReasonLabel(prepublishBlockReason),
+        Number.isFinite(gateway.executionPricePreflight?.priceDriftPoints)
+          && Number.isFinite(gateway.executionPricePreflight?.maximumSignalDriftPoints)
+          ? `ราคาห่าง ${gateway.executionPricePreflight.priceDriftPoints} จุด / เกณฑ์ ${gateway.executionPricePreflight.maximumSignalDriftPoints} จุด` : "",
+        signalSnapshotAgeDetail(gateway.executionPricePreflight),
+        `(${prepublishBlockReason.toLowerCase()})`,
+      ].filter(Boolean).join(" • "),
     };
   }
   if (linkage.available === true) {
@@ -17771,7 +18432,7 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
       confirmed_unknown: "เปิดสำเร็จ • ไม่ทราบสถานะล่าสุด",
     };
     const details = [
-      linkage.ticket ? `Ticket ${safeDashboardDisplayText(linkage.ticket, "—")}` : "ไม่พบ Ticket",
+      signalTicketText(linkage) ? `Ticket ${signalTicketText(linkage)}` : "ไม่พบ Ticket",
       status ? `สถานะ ${statusLabels[status] || safeDashboardDisplayText(status, "ไม่ทราบ")}` : "ไม่พบสถานะล่าสุด",
       linkage.commandId ? `Command ${safeDashboardDisplayText(linkage.commandId, "—")}` : "",
     ].filter(Boolean);
@@ -17787,12 +18448,36 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
   if (gateway.commandPublished === true || gatewayStatus.includes("waiting_ack")) {
     return { tone: "pending", label: "ส่งคำสั่งแล้ว", detail: "กำลังรอ ACK จาก EA" };
   }
+  const analysisStartPreflight = signalHistoryObject(source.analysisStartPreflight || metrics.analysisStartPreflight
+    || source.analysisContext?.automation?.analysisStartPreflight);
   if (coverageStatus === "skipped" || source.skipReasonCode || metrics.skipReasonCode) {
     const reason = signalHistorySkipReasonLabel(source.skipReasonCode || metrics.skipReasonCode);
     return {
       tone: "none",
       label: "ข้ามรอบ • ไม่มีคำสั่ง",
-      detail: reason || "Backend ข้ามรอบนี้ก่อนการลงมติ",
+      detail: [reason || "Backend ข้ามรอบนี้ก่อนการลงมติ",
+        signalSnapshotAgeDetail(analysisStartPreflight),
+      ].filter(Boolean).join(" • "),
+    };
+  }
+  // Keep completed legacy audit rounds readable. A cancelled pending capture
+  // above is skipped even when it retains an older audit-only preflight.
+  if (analysisStartPreflight.status === "audit_only") {
+    return {
+      tone: "none",
+      label: "วิเคราะห์เก็บประวัติ • ไม่ส่งคำสั่ง",
+      detail: [analysisStartPreflight.reasonCode === "analysis_snapshot_time_invalid_before_start"
+        ? "ยืนยันเวลาจับ Snapshot ไม่ได้ จึงไม่ส่ง Order ย้อนหลัง"
+        : "Snapshot หมดอายุสำหรับส่งคำสั่ง จึงไม่ส่ง Order ย้อนหลัง",
+        signalSnapshotAgeDetail(analysisStartPreflight),
+      ].filter(Boolean).join(" • "),
+    };
+  }
+  if (coverageStatus === "pending" && source.queue?.deferred === true) {
+    return {
+      tone: "none",
+      label: "คิวเดิม • รอ Backend ยืนยันสถานะ",
+      detail: "ยังไม่มีคำสั่ง • นโยบายปัจจุบันไม่วิเคราะห์ย้อนหลัง",
     };
   }
   if (
@@ -17808,7 +18493,7 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
       label: running ? "กำลังวิเคราะห์ • ยังไม่มีคำสั่ง" : "รอวิเคราะห์ • ยังไม่มีคำสั่ง",
       detail: running
         ? "Specialist กำลังทำงานและ Backend ยังไม่มีมติสุดท้าย"
-        : "แท่งนี้อยู่ในคิว FIFO และยังไม่เริ่มลงมติ",
+        : "แท่งนี้อยู่ในคิววิเคราะห์และยังไม่เริ่มลงมติ",
     };
   }
   if (source.roundTerminalPartial === true || source.roundFailed === true) {
@@ -17833,8 +18518,9 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
     return {
       tone: "blocked",
       label: "ไม่ได้เปิด Order",
-      detail: reasonLabels[normalizedReason]
-        || (reasonCode ? signalExecutionGuardReasonLabel(reasonCode) : "ไม่พบหลักฐานการส่งคำสั่ง"),
+      detail: reasonCode
+        ? `${reasonLabels[normalizedReason] || signalExecutionGuardReasonLabel(reasonCode)} (${reasonCode})`
+        : "ไม่พบหลักฐานการส่งคำสั่ง",
     };
   }
   if (["HOLD", "NO_TRADE"].includes(finalDecision)) {
@@ -18153,18 +18839,22 @@ function createSignalAnalysisVoteCell(vote, labelTh) {
         : displayState === "skipped"
           ? "ข้าม"
           : "ไม่มีผล";
-  if (vote?.complete && Number.isFinite(vote.confidence)) {
-    detail.textContent = `ความมั่นใจ ${Math.round(vote.confidence * 10) / 10}%`;
+  const reason = signalHistoryReadableText(vote?.reason, "");
+  if (vote?.complete) {
+    detail.textContent = [
+      Number.isFinite(vote.confidence) ? `ความมั่นใจ ${Math.round(vote.confidence * 10) / 10}%` : "",
+      reason || "Agent ให้ผลแล้ว แต่ข้อมูลสรุปนี้ไม่มีข้อความเหตุผล",
+    ].filter(Boolean).join(" • ");
   } else if (vote?.skipped) {
-    detail.textContent = safeDashboardDisplayText(vote.reason, "Agent ข้ามรอบนี้เพราะข้อมูลไม่พอ");
+    detail.textContent = reason || "Agent ข้ามรอบนี้เพราะข้อมูลไม่พอ";
   } else if (displayState === "waiting") {
-    detail.textContent = "แท่งนี้ยังอยู่ในคิว FIFO";
+    detail.textContent = "แท่งนี้ยังอยู่ในคิววิเคราะห์";
   } else if (displayState === "running") {
     detail.textContent = "กำลังรอ Agent ตัวนี้ส่งผล";
   } else if (displayState === "skipped") {
     detail.textContent = "Backend ข้ามรอบนี้โดยไม่มีผลจาก Agent";
   } else if (vote) {
-    detail.textContent = safeDashboardDisplayText(vote.reason, "รอบสิ้นสุดโดยไม่มีผลที่ใช้ได้จาก Agent ตัวนี้");
+    detail.textContent = reason || "รอบสิ้นสุดโดยไม่มีผลที่ใช้ได้จาก Agent ตัวนี้";
   } else {
     detail.textContent = "รอบสิ้นสุดแล้วโดยไม่พบผลจาก Agent ตัวนี้";
   }
@@ -18203,7 +18893,9 @@ function createSignalAnalysisHistoryRow(round) {
     const queueText = queuePosition !== null
       ? ` • คิว ${Math.trunc(queuePosition)}${queueDepth !== null ? `/${Math.trunc(queueDepth)}` : ""}`
       : "";
-    timeDetail.textContent = `รอคิว FIFO${queueText} • ${round.completeCount}/3 ครบ`;
+    timeDetail.textContent = round.queue?.deferred === true
+      ? `เก็บไว้รอพื้นที่คิว • ยังไม่เริ่มวิเคราะห์ • ${round.completeCount}/3 ครบ`
+      : `รอคิววิเคราะห์${queueText} • ${round.completeCount}/3 ครบ`;
   } else if (round.roundRunning) {
     timeDetail.textContent = `กำลังวิเคราะห์ • ได้ผลแล้ว ${round.completeCount}/3`;
   } else if (round.roundFailed) {
@@ -18295,7 +18987,7 @@ function createSignalOrderHistoryRow(order) {
   row.setAttribute("role", "listitem");
   row.dataset.side = sideValue;
   row.dataset.verified = order.verified === true ? "true" : "false";
-  row.dataset.status = ["open", "closed", "confirmed_unknown"].includes(order.status)
+  row.dataset.status = ["open", "closed", "confirmed_unknown", "execution_unknown_unverified"].includes(order.status)
     ? order.status
     : "confirmed_unknown";
 
@@ -18328,7 +19020,10 @@ function createSignalOrderHistoryRow(order) {
   const mode = document.createElement("small");
   const mission = document.createElement("small");
   const outcome = document.createElement("small");
-  status.textContent = safeDashboardDisplayText(
+  const lifecycleConfirmed = order.outcomeIdentityVerified === true
+    && ((order.status === "open" && order.executionState === "OPEN" && order.verificationStatus === "VERIFIED_OPEN")
+      || (order.status === "closed" && order.executionState === "CLOSED" && order.verificationStatus === "VERIFIED_CLOSED"));
+  status.textContent = (lifecycleConfirmed ? `${order.executionState} • ` : "") + safeDashboardDisplayText(
     order.statusTh,
     order.status === "closed"
       ? "ปิดแล้ว"
@@ -18336,7 +19031,7 @@ function createSignalOrderHistoryRow(order) {
         ? "เปิดอยู่"
         : "เปิดสำเร็จ • ไม่ทราบสถานะล่าสุด",
   );
-  ticket.textContent = `Ticket ${safeDashboardDisplayText(order.ticket, "—")}`;
+  ticket.textContent = `Ticket ${signalTicketText(order) || "ไม่พบเลขที่ยืนยันได้"}`;
   mode.textContent = order.mode
     ? `โหมด ${safeDashboardDisplayText(String(order.mode).toUpperCase(), "ไม่ทราบ")}`
     : "ไม่พบโหมดบัญชีจาก ACK";
@@ -18348,7 +19043,7 @@ function createSignalOrderHistoryRow(order) {
     && order.outcomeIdentityVerified === true
     && String(order.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED";
   if (authoritativeClosedOutcome) {
-    const closedPnl = Number(order.closedPnl);
+    const closedPnl = order.closedPnl;
     const closedAtBroker = signalBrokerDateTime(order.closedAtBroker);
     outcome.textContent = [
       Number.isFinite(closedPnl) ? `P/L ${signalOrderSignedPnl(closedPnl)}` : "",
@@ -18357,6 +19052,12 @@ function createSignalOrderHistoryRow(order) {
   }
   evidence.append(status, ticket, mode, mission);
   if (outcome.textContent) evidence.append(outcome);
+  const financialText = signalOrderClosedFinancialText(order);
+  if (financialText) {
+    const financial = document.createElement("small");
+    financial.textContent = financialText;
+    evidence.append(financial);
+  }
 
   row.append(openedAt, side, market, lot, openPrice, stopLoss, takeProfit, reason, evidence);
   return row;
@@ -18375,7 +19076,7 @@ function renderSignalHistoryPanelLegacy(report = {}, { focusSearch = false } = {
   let filtered = allOrders.filter((order) => {
     if (!query) return true;
     return [
-      order.ticket,
+      signalTicketText(order),
       order.commandId,
       order.missionId,
       order.symbol,
@@ -18520,7 +19221,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
   let filtered = allOrders.filter((order) => {
     if (!query) return true;
     return [
-      order.ticket,
+      signalTicketText(order),
       order.commandId,
       order.missionId,
       order.symbol,
@@ -18620,6 +19321,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
       <div><strong data-signal-history-read-title></strong><span data-signal-history-read-detail></span></div>
       ${shouldOfferRetry ? '<button type="button" data-signal-history-retry>ตรวจใหม่</button>' : ""}
     </section>
+    <div data-signal-pending-commands></div>
     <div class="signal-history-subtabs" role="tablist" aria-label="เลือกประเภทประวัติ AI Trade">
       <button id="signalOrderHistoryTab" type="button" role="tab" data-signal-history-tab="orders" aria-controls="signalOrderHistoryPanel" aria-selected="${activeHistoryTab === "orders"}" tabindex="${activeHistoryTab === "orders" ? "0" : "-1"}">ประวัติการเปิดออเดอร์</button>
       <button id="signalAnalysisHistoryTab" type="button" role="tab" data-signal-history-tab="analysis" aria-controls="signalAnalysisHistoryPanel" aria-selected="${activeHistoryTab === "analysis"}" tabindex="${activeHistoryTab === "analysis" ? "0" : "-1"}">ประวัติการวิเคราะห์</button>
@@ -18629,7 +19331,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
         <div>
           <span>หลักฐานจาก EA และ Local Runner</span>
           <h3>ประวัติการเปิด Order</h3>
-          <p>แสดงเฉพาะ Order ที่ Backend ได้รับหลักฐานจาก EA พร้อม Ticket จริง แถวสีเหลืองหมายถึงเปิด Order แล้วแต่หลักฐานเชื่อม Mission หรือการยืนยันล่าสุดยังไม่ครบ</p>
+          <p>แสดงหลักฐานจาก EA พร้อม Ticket • OPEN/CLOSED ใช้ผลตรวจสถานะจริง แถวที่ยังไม่ยืนยันจะแสดงความไม่แน่นอน และคำสั่งค้างแสดงแยกด้านบน</p>
         </div>
         <small data-signal-history-count></small>
       </div>
@@ -18640,7 +19342,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
         </label>
       </div>
       <div class="signal-history-summary" aria-label="สรุปประวัติ Order">
-        <div><span>เปิดสำเร็จทั้งหมด</span><strong data-signal-history-total></strong></div>
+        <div><span>Order ที่มีหลักฐาน</span><strong data-signal-history-total></strong></div>
         <div><span>กำลังเปิดอยู่</span><strong data-signal-history-open></strong></div>
         <div><span>BUY</span><strong data-signal-history-buy></strong></div>
         <div><span>SELL</span><strong data-signal-history-sell></strong></div>
@@ -18671,7 +19373,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
       <div class="signal-analysis-history-summary" aria-label="สรุปประวัติการวิเคราะห์">
         <div><span>รอบที่บันทึก</span><strong data-signal-analysis-total></strong></div>
         <div><span>ครบ 3/3</span><strong data-signal-analysis-complete></strong></div>
-        <div data-tone="waiting"><span>รอคิว FIFO</span><strong data-signal-analysis-waiting></strong></div>
+        <div data-tone="waiting"><span>รอคิววิเคราะห์</span><strong data-signal-analysis-waiting></strong></div>
         <div data-tone="running"><span>กำลังวิเคราะห์</span><strong data-signal-analysis-running></strong></div>
         <div data-tone="skipped"><span>ข้ามโดย Backend</span><strong data-signal-analysis-skipped></strong></div>
         <div data-tone="attention"><span>จบบางส่วน / ล้มเหลว</span><strong data-signal-analysis-attention></strong></div>
@@ -18735,6 +19437,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
 
   const search = container.querySelector("[data-signal-history-search]");
   const orderList = container.querySelector("[data-signal-history-list]");
+  renderSignalPendingCommands(container.querySelector("[data-signal-pending-commands]"), report, orderHistory);
   const orderMore = container.querySelector("[data-signal-order-more]");
   const analysisMore = container.querySelector("[data-signal-analysis-more]");
   search.value = state.modal.signalHistoryQuery;
@@ -38950,6 +39653,7 @@ function trapGameModalFocus(event) {
 }
 
 function openGameModal(type, id, tab = "chat") {
+  stopAiTradeHeartbeatPolling();
   if (els.taskDetailDialog?.open) closeTaskDetail({ restoreFocus: false });
   if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
   if (els.newsEventDialog?.open) closeFxNewsEventDetail({ restoreFocus: false });
@@ -38984,6 +39688,7 @@ function openGameModal(type, id, tab = "chat") {
 }
 
 function closeGameModal() {
+  stopAiTradeHeartbeatPolling();
   const closingType = state.modal.type;
   const closingId = state.modal.id;
   if (closingType === "prop" && closingId === EA_FACTORY_PROP_ID) {
@@ -43205,15 +43910,16 @@ function propReportToMissionItems(report, owner = "mission_archivist") {
   return [...missionItems, ...reportItems, ...eventItems, ...memoryItems];
 }
 
-async function loadPropReport(propId, { signal = null, forceFresh = false } = {}) {
+async function loadPropReport(propId, { signal = null, forceFresh = false, shouldApply = null } = {}) {
   const key = String(propId || "").trim();
   if (!key) return null;
   const existing = propReportInFlight.get(key);
   if (existing) {
     const existingResult = await existing;
+    if (shouldApply && !shouldApply()) return null;
     if (!forceFresh || signal?.aborted) return existingResult;
     if (propReportInFlight.get(key) === existing) propReportInFlight.delete(key);
-    return loadPropReport(key, { signal });
+    return loadPropReport(key, { signal, shouldApply });
   }
   state.propReportLoadState[key] = {
     status: "loading",
@@ -43222,10 +43928,19 @@ async function loadPropReport(propId, { signal = null, forceFresh = false } = {}
   };
   const request = (async () => {
     try {
+      // Council assembles the three-agent history and terminal observations in
+      // one read. Allow that bounded read to finish without changing freshness
+      // checks or the shorter deadline used by other equipment dashboards.
+      const timeoutMs = key === "left_analytics_console"
+        ? AI_TRADE_COUNCIL_REPORT_FETCH_TIMEOUT_MS
+        : PROP_REPORT_FETCH_TIMEOUT_MS;
       const report = await fetchJson(
         `/api/props/${encodeURIComponent(key)}/report`,
-        { timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS, signal },
+        { timeoutMs, signal },
       );
+      // A save/retry can supersede its optional refresh before this GET ends.
+      // Do not let the older snapshot invalidate the newer save request.
+      if (shouldApply && !shouldApply()) return null;
       state.propReports[key] = report;
       state.propReportLoadedAt[key] = Date.now();
       state.propReportLoadState[key] = {
@@ -43237,6 +43952,7 @@ async function loadPropReport(propId, { signal = null, forceFresh = false } = {}
       if (state.panelObject === key) selectObject(key, { loadBackendReport: false });
       return report;
     } catch (error) {
+      if (shouldApply && !shouldApply()) return null;
       state.propReportLoadState[key] = {
         status: signal?.aborted ? (state.propReports[key] ? "ready" : "idle") : "error",
         errorMessage: signal?.aborted ? "" : "โหลดข้อมูลจาก Local Runner ไม่สำเร็จ",

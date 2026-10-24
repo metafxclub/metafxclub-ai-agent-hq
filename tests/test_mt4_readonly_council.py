@@ -1536,26 +1536,24 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             self.assertEqual(finished["councilVote"]["decision"], "HOLD")
             self.assertEqual(finished["workStatus"], "completed")
 
-    def test_standalone_status_endpoint_reuses_canonical_prop_report(self) -> None:
-        original_prop_report = self.bridge.prop_report
+    def test_standalone_status_endpoint_reuses_canonical_council_model(self) -> None:
         expected = {
             "schemaVersion": "ai-trade-council-v2",
             "runtimeTruth": "backend_observed_only",
         }
-        observed_prop_ids: list[str] = []
-        try:
-            self.bridge.prop_report = lambda prop_id: (
-                observed_prop_ids.append(prop_id)
-                or {"aiTradeCouncil": expected}
-            )
+        with (
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
+            mock.patch.object(self.bridge, "bridge_status", return_value={}),
+            mock.patch.object(self.bridge, "find_dashboard_connection_profile", return_value={}),
+            mock.patch.object(self.bridge, "_capture_ai_trade_council_read_context", return_value=({}, {}, {}, {})),
+            mock.patch.object(self.bridge, "_ai_trade_council_read_model", return_value=expected) as project,
+            mock.patch.object(self.bridge, "prop_report", side_effect=AssertionError("Unrelated prop archives must not be polled")),
+        ):
             actual = self.bridge.ai_trade_council_status_read_model()
-        finally:
-            self.bridge.prop_report = original_prop_report
-
         self.assertIs(actual, expected)
-        self.assertEqual(
-            observed_prop_ids,
-            [self.bridge.AI_TRADE_COUNCIL_PROP_ID],
+        project.assert_called_once_with(
+            [], [], {}, gateway_snapshot={}, global_metatrader_snapshot={}, metatrader_snapshot={},
         )
         source = BRIDGE_PATH.read_text(encoding="utf-8")
         self.assertIn(
@@ -1585,6 +1583,7 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                 "bridge_status": self.bridge.bridge_status,
                 "_collaboration_quota_gate": self.bridge._collaboration_quota_gate,
                 "run_ai_trade_council_analysis": self.bridge.run_ai_trade_council_analysis,
+                "_read_mt4_trade_gateway_ea_status": self.bridge._read_mt4_trade_gateway_ea_status,
             }
             try:
                 self.bridge.load_operator_mode_record = lambda: {"mode": "auto_guarded"}
@@ -1617,6 +1616,9 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                     }
 
                 self.bridge.run_ai_trade_council_analysis = fake_council
+                self.bridge._read_mt4_trade_gateway_ea_status = lambda candidate: (
+                    {"maxSnapshotAgeSeconds": 300}, "ready"
+                )
 
                 baseline = self.bridge.ai_trade_council_automation_tick()
                 self.assertEqual(
@@ -1694,7 +1696,7 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             self.assertEqual(state["dailyRunCount"], 1)
             self.assertEqual(state["lastMissionId"], "mission-auto-1")
 
-    def test_closed_bar_automation_restart_and_unsupported_timeframe_do_not_catch_up(self) -> None:
+    def test_closed_bar_automation_restart_baselines_known_stream_unsupported_stays_idle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             candidate_id = self._configure_selected_mt4(root)
@@ -1754,7 +1756,14 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             )
             self.assertEqual(restart["reason"], "restart_baseline")
             state = self.bridge.load_ai_trade_council_automation_store()["state"]
+            # A process restart observes the current bar; it does not replay
+            # bars that closed while the previous process was absent.
             self.assertIsNone(state["pendingClosedBarTime"])
+            self.assertEqual(state["lastObservedClosedBarTime"], payload["chart"]["bars"][-1]["time"])
+            self.assertEqual(
+                self.bridge.ai_trade_council_automation_tick()["kind"],
+                "ai_trade_council_automation_idle",
+            )
 
     def test_automation_config_allows_only_guard_fields(self) -> None:
         original_runtime = self.bridge.RUNTIME_DIR
@@ -1939,6 +1948,7 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
         parent = {
             "analysisContext": {
                 "kind": "ai_trade_council_parent",
+                "automation": {"tradeCommandAllowed": True},
                 "snapshotId": snapshot_id,
                 "referencePrice": 2400.0,
                 "horizonBars": 1,
@@ -2012,6 +2022,7 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
         parent = {
             "id": "mission-market-state-gate",
             "analysisContext": {
+                "automation": {"tradeCommandAllowed": True},
                 "referencePrice": 100.0,
                 "snapshotObservedAt": now.isoformat(),
                 "roundDeadlineAt": (now + timedelta(minutes=4)).isoformat(),

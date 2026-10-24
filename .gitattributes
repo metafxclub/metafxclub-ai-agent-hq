@@ -36,3 +36,12 @@ integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4 -text -diff
 *.woff binary
 *.woff2 binary
 *.whl binary
+
+# Preserve exact native compile source and proof bytes across checkouts.
+integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5 -text -diff
+*.ex4 binary
+*.ex5 binary
+artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/COMPILE_LOG.log -text
+artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/COMPILE_LOG.log -text
+artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/BUILD_LOG.txt text eol=lf
+artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/SHA256SUMS.txt text eol=lf

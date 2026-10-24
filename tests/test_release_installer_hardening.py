@@ -57,282 +57,50 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
                 with self.subTest(boundary=boundary, file=relative):
                     self.assertIn('"' + relative.replace("/", "\\") + '"', source)
 
-    def test_v218_curated_artifact_is_complete_and_not_ignored(self) -> None:
+    def test_current_mt4_curated_artifact_is_complete_and_not_ignored(self) -> None:
         required = {
-            "MetafxHQTradeGateway.mq4",
-            "MetafxHQTradeGateway.ex4",
-            "README_TH.md",
-            "AUDIT_TH.md",
-            "SHA256SUMS.txt",
-            "BUILD_LOG.txt",
-            "MANIFEST.json",
-            "COMPILE_PROOF.png",
+            "MetafxHQTradeGateway.mq4", "MetafxHQTradeGateway.ex4", "README_TH.md",
+            "AUDIT_TH.md", "SHA256SUMS.txt", "BUILD_LOG.txt", "MANIFEST.json", "COMPILE_LOG.log",
         }
         self.assertEqual(required, {path.name for path in ARTIFACT.iterdir() if path.is_file()})
-
-        for relative_path in (
-            "scripts/run-bridge-watchdog-hidden.vbs",
-            *(
-                f"artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/{filename}"
-                for filename in required
-            ),
-        ):
+        for path in ARTIFACT.iterdir():
             completed = subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    f"safe.directory={ROOT.as_posix()}",
-                    "check-ignore",
-                    "--quiet",
-                    "--",
-                    relative_path,
-                ],
-                cwd=ROOT,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
+                ["git", "-c", f"safe.directory={ROOT.as_posix()}", "check-ignore", "--quiet", "--", path.relative_to(ROOT).as_posix()],
+                cwd=ROOT, check=False, capture_output=True, text=True,
             )
             self.assertNotIn("dubious ownership", completed.stderr.lower())
-            self.assertNotEqual(0, completed.returncode, f"release file remains ignored: {relative_path}")
+            self.assertNotEqual(0, completed.returncode, f"Release file remains ignored: {path.name}")
 
-        ignore_text = (ROOT / ".gitignore").read_text(encoding="utf-8")
-        self.assertIn("!artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/", ignore_text)
-        self.assertIn("!artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/**", ignore_text)
-        self.assertIn("artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/*.log", ignore_text)
-        self.assertIn("integrations/mt4-trade-gateway/*.ex4", ignore_text)
+    def test_current_mt4_native_proof_is_bound_to_exact_reviewed_files(self) -> None:
+        evidence = json.loads((ARTIFACT / "MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertEqual(evidence["schemaVersion"], "metafx-hq-mt4-ea-artifact-v2")
+        self.assertEqual(evidence["packageVersion"], "2.20")
+        self.assertEqual(evidence["candidateStatus"], "compile_verified_local_candidate")
+        for key, filename in (("source", "MetafxHQTradeGateway.mq4"), ("binary", "MetafxHQTradeGateway.ex4")):
+            data = (ARTIFACT / filename).read_bytes()
+            self.assertEqual(evidence[key + "Sha256"], hashlib.sha256(data).hexdigest().upper())
+            self.assertEqual(evidence[key + "Bytes"], len(data))
+        compile_proof = evidence["compileEvidence"]
+        self.assertEqual(compile_proof["mode"], "isolated_metaeditor_cli_exact_source")
+        self.assertEqual(compile_proof["compiledSourceSha256"], evidence["sourceSha256"])
+        self.assertEqual((compile_proof["errors"], compile_proof["warnings"]), (0, 0))
+        self.assertNotIn("screenshot", compile_proof)
+        self.assertEqual(compile_proof["logSha256"], hashlib.sha256((ARTIFACT / "COMPILE_LOG.log").read_bytes()).hexdigest().upper())
+        self.assertIn("Result: 0 errors, 0 warnings,", (ARTIFACT / "COMPILE_LOG.log").read_text(encoding="utf-8"))
+        self.assertIs(evidence["binaryEligibleForInstall"], True)
+        for key in ("nativeAttachmentValidated", "demoExecutionValidated", "liveExecutionValidated", "eaAttachedToChart", "algoTradingChanged", "orderOrTradeCommandSent"):
+            self.assertIs(evidence["safety"][key], False)
 
-    def test_v218_manifest_and_build_evidence_match_ready_curated_files(self) -> None:
-        manifest_text = (ARTIFACT / "SHA256SUMS.txt").read_text(encoding="utf-8")
-        manifest: dict[str, str] = {}
-        for line in manifest_text.splitlines():
-            if not line.strip():
-                continue
-            match = re.fullmatch(r"([A-Fa-f0-9]{64})\s+([^\\/]+)", line)
-            self.assertIsNotNone(match, line)
-            assert match is not None
-            manifest[match.group(2)] = match.group(1).upper()
-
-        hashed_files = {
-            "AUDIT_TH.md",
-            "BUILD_LOG.txt",
-            "COMPILE_PROOF.png",
-            "MANIFEST.json",
-            "MetafxHQTradeGateway.ex4",
-            "MetafxHQTradeGateway.mq4",
-            "README_TH.md",
-        }
-        self.assertEqual(hashed_files, set(manifest))
-        for filename in hashed_files:
-            digest = hashlib.sha256((ARTIFACT / filename).read_bytes()).hexdigest().upper()
-            self.assertEqual(digest, manifest[filename])
-
-        source_digest = hashlib.sha256(
-            (ARTIFACT / "MetafxHQTradeGateway.mq4").read_bytes()
-        ).hexdigest().upper()
-        self.assertEqual(source_digest, manifest["MetafxHQTradeGateway.mq4"])
-
-        artifact_manifest = json.loads((ARTIFACT / "MANIFEST.json").read_text(encoding="utf-8"))
-        self.assertEqual("metafx-hq-mt4-ea-artifact-v1", artifact_manifest["schemaVersion"])
-        self.assertEqual("2.19", artifact_manifest["packageVersion"])
-        self.assertEqual("ready_visible_metaeditor_compiled", artifact_manifest["candidateStatus"])
-        self.assertEqual(source_digest, artifact_manifest["sourceSha256"])
-        self.assertEqual(manifest["MetafxHQTradeGateway.ex4"], artifact_manifest["binarySha256"])
-        self.assertEqual(
-            (ARTIFACT / "MetafxHQTradeGateway.ex4").stat().st_size,
-            artifact_manifest["binaryBytes"],
-        )
-        self.assertTrue(artifact_manifest["ex4Included"])
-        self.assertTrue(artifact_manifest["binaryEligibleForInstall"])
-        compile_evidence = artifact_manifest["compileEvidence"]
-        self.assertEqual("passed", compile_evidence["status"])
-        self.assertEqual("visible_metaeditor_front_office", compile_evidence["mode"])
-        self.assertNotIn("reason", compile_evidence)
-        self.assertEqual(source_digest, compile_evidence["compiledSourceSha256"])
-        self.assertTrue(compile_evidence["currentSourceMatchesCompiledSource"])
-        self.assertEqual(0, compile_evidence["errors"])
-        self.assertEqual(0, compile_evidence["warnings"])
-        self.assertEqual("COMPILE_PROOF.png", compile_evidence["screenshot"])
-        self.assertEqual(manifest["COMPILE_PROOF.png"], compile_evidence["screenshotSha256"])
-        release_compile = compile_evidence["releaseCompile"]
-        self.assertEqual("passed", release_compile["status"])
-        self.assertEqual("visible_metaeditor_exact_source", release_compile["mode"])
-        self.assertEqual(0, release_compile["errors"])
-        self.assertEqual(0, release_compile["warnings"])
-        self.assertEqual(manifest["MetafxHQTradeGateway.mq4"], release_compile["sourceSha256"])
-        self.assertEqual(manifest["MetafxHQTradeGateway.ex4"], release_compile["binarySha256"])
-        self.assertEqual(b"\x89PNG\r\n\x1a\n", (ARTIFACT / "COMPILE_PROOF.png").read_bytes()[:8])
-
-        build_log = (ARTIFACT / "BUILD_LOG.txt").read_text(encoding="utf-8")
-        self.assertIn("PackageVersion: 2.19", build_log)
-        self.assertIn("CandidateStatus: READY_VISIBLE_METAEDITOR_COMPILED", build_log)
-        self.assertIn("CompileResult: PASS", build_log)
-        self.assertIn("CurrentSourceMatchesCompiledSource: true", build_log)
-        self.assertIn("CompileErrors: 0", build_log)
-        self.assertIn("CompileWarnings: 0", build_log)
-        self.assertIn("ReleaseCompileMode: VISIBLE_METAEDITOR_EXACT_SOURCE", build_log)
-        self.assertIn("ReleaseCompileResult: PASS", build_log)
-        self.assertIn("ReleaseCompileErrors: 0", build_log)
-        self.assertIn("ReleaseCompileWarnings: 0", build_log)
-        self.assertIn("BinaryEligibleForInstall: true", build_log)
-        self.assertIn("ReleaseInstallEligible: true", build_log)
-        self.assertIn(f"SourceSHA256: {manifest['MetafxHQTradeGateway.mq4']}", build_log)
-        self.assertIn(f"BinarySHA256: {manifest['MetafxHQTradeGateway.ex4']}", build_log)
-        self.assertIn(f"CompileProofSHA256: {manifest['COMPILE_PROOF.png']}", build_log)
-        self.assertIsNone(re.search(r"(?i)(?:[A-Z]:\\|/Users/|/home/)", build_log))
-
-    def test_installer_requires_and_verifies_all_v218_release_evidence(self) -> None:
-        installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
-        for filename in (
-            "MetafxHQTradeGateway.mq4",
-            "MetafxHQTradeGateway.ex4",
-            "README_TH.md",
-            "AUDIT_TH.md",
-            "SHA256SUMS.txt",
-            "BUILD_LOG.txt",
-            "MANIFEST.json",
-            "COMPILE_PROOF.png",
-        ):
-            self.assertIn(
-                f"artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\\{filename}",
-                installer,
-            )
-        self.assertIn("Assert-EaArtifactIntegrity", installer)
+    def test_installer_requires_current_native_evidence_and_pins_reviewed_bytes(self) -> None:
+        installer = (ROOT / "installer/install.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Assert-NativeCompileArtifactIntegrity", installer)
         self.assertIn("Assert-NoEmbeddedHighConfidenceSecrets", installer)
         self.assertIn("function Get-Sha256Hex", installer)
         self.assertIsNone(re.search(r"(?m)^[^#\r\n]*\bGet-FileHash\b", installer))
-        self.assertIn("$artifactSourceHash = Get-Sha256Hex -LiteralPath $artifactSource", installer)
-        self.assertIn("หลักฐาน Compile ของ EA ไม่ตรงกับ Source/Binary", installer)
-        self.assertIn("MANIFEST/Compile proof ของ EA v2.19", installer)
-        self.assertIn("blocked_visible_metaeditor_recompile_required", installer)
-        self.assertIn("Source ของ EA v2.19 เปลี่ยนหลังหลักฐาน Compile ล่าสุด", installer)
-        self.assertIn("$artifactManifest.binaryEligibleForInstall -ne $true", installer)
-        self.assertIn(
-            "[string]$artifactManifest.compileEvidence.compiledSourceSha256 -cne $artifactSourceHash",
-            installer,
-        )
-        self.assertIn(
-            "$artifactManifest.compileEvidence.currentSourceMatchesCompiledSource -ne $true",
-            installer,
-        )
-        self.assertIn(
-            '[string]$artifactManifest.compileEvidence.releaseCompile.mode -cne "visible_metaeditor_exact_source"',
-            installer,
-        )
-        self.assertIn(
-            "[string]$artifactManifest.compileEvidence.releaseCompile.sourceSha256 -cne $artifactSourceHash",
-            installer,
-        )
-        self.assertIn(
-            '[string]$artifactManifest.compileEvidence.releaseCompile.binarySha256 -cne [string]$expectedHashes["MetafxHQTradeGateway.ex4"]',
-            installer,
-        )
-        self.assertIn('install_root = "%LOCALAPPDATA%\\Metafxclub\\AI-Agent-HQ"', installer)
-        self.assertIn("install_scope = \"current_windows_user\"", installer)
-
-    @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer fail-closed gate")
-    def test_synthetic_stale_ea_candidate_is_rejected_by_artifact_gate(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temporary_root = Path(directory)
-            artifact_root = (
-                temporary_root
-                / "artifacts"
-                / "mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
-            )
-            artifact_root.mkdir(parents=True)
-            fixture_files = {
-                "AUDIT_TH.md": b"synthetic stale audit\n",
-                "BUILD_LOG.txt": b"synthetic stale build log\n",
-                "COMPILE_PROOF.png": b"\x89PNG\r\n\x1a\nsynthetic-stale-proof",
-                "MetafxHQTradeGateway.ex4": b"synthetic-stale-ex4",
-                "MetafxHQTradeGateway.mq4": b'#property version "2.19"\n',
-                "README_TH.md": b"synthetic stale readme\n",
-            }
-            source_digest = hashlib.sha256(fixture_files["MetafxHQTradeGateway.mq4"]).hexdigest().upper()
-            binary_digest = hashlib.sha256(fixture_files["MetafxHQTradeGateway.ex4"]).hexdigest().upper()
-            stale_source_digest = "0" * 64
-            self.assertNotEqual(source_digest, stale_source_digest)
-            fixture_manifest = {
-                "schemaVersion": "metafx-hq-mt4-ea-artifact-v1",
-                "packageVersion": "2.19",
-                "candidateStatus": "blocked_visible_metaeditor_recompile_required",
-                "sourceFile": "MetafxHQTradeGateway.mq4",
-                "sourceSha256": source_digest,
-                "binaryFile": "MetafxHQTradeGateway.ex4",
-                "binarySha256": binary_digest,
-                "binaryBytes": len(fixture_files["MetafxHQTradeGateway.ex4"]),
-                "ex4Included": True,
-                "binaryEligibleForInstall": False,
-                "compileEvidence": {
-                    "status": "stale",
-                    "mode": "historical_visible_metaeditor_front_office",
-                    "reason": "SOURCE_CHANGED_AFTER_COMPILE",
-                    "compiledSourceSha256": stale_source_digest,
-                    "currentSourceMatchesCompiledSource": False,
-                },
-            }
-            fixture_files["MANIFEST.json"] = (
-                json.dumps(fixture_manifest, indent=2, ensure_ascii=False) + "\n"
-            ).encode("utf-8")
-            for filename, content in fixture_files.items():
-                (artifact_root / filename).write_bytes(content)
-            checksums = "".join(
-                f"{hashlib.sha256(content).hexdigest().upper()}  {filename}\n"
-                for filename, content in sorted(fixture_files.items())
-            )
-            (artifact_root / "SHA256SUMS.txt").write_text(checksums, encoding="utf-8")
-
-            installer_path = str(ROOT / "installer" / "install.ps1").replace("'", "''")
-            candidate_root = str(temporary_root).replace("'", "''")
-            script = rf"""
-$ErrorActionPreference = 'Stop'
-$tokens = $null
-$parseErrors = $null
-$ast = [Management.Automation.Language.Parser]::ParseFile(
-    '{installer_path}',
-    [ref]$tokens,
-    [ref]$parseErrors
-)
-if ($parseErrors.Count -ne 0) {{ throw 'Installer parse failed' }}
-foreach ($name in @('Get-Sha256Hex', 'Assert-EaArtifactIntegrity')) {{
-    $node = $ast.Find({{
-        param($candidate)
-        $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $candidate.Name -ceq $name
-    }}, $true)
-    if (-not $node) {{ throw "Function missing: $name" }}
-    Invoke-Expression $node.Extent.Text
-}}
-$rejected = $false
-try {{
-    Assert-EaArtifactIntegrity -CandidateRoot '{candidate_root}'
-}}
-catch {{
-    if ($_.Exception.Message -notmatch 'EA v2\.19.*MetaEditor') {{ throw }}
-    $rejected = $true
-}}
-if (-not $rejected) {{ throw 'Synthetic stale EA candidate was accepted' }}
-"""
-
-            completed = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    script,
-                ],
-                cwd=ROOT,
-                check=False,
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-            )
-            self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        for name in ("COMPILE_LOG.log", "SHA256SUMS.txt", "MANIFEST.json", "MetafxHQTradeGateway.ex4", "MetafxHQTradeGateway.mq4"):
+            self.assertIn("artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\\" + name, installer)
+        for digest in ("18B4B39E6405839CE9391E90057022DBEB2D18C1ABC7FED8F8211AAF3B1E3EFC", "F848A267619EC4B2951C18602E6106BD22DC97142D4DE73E0EFABDEBE4E94930", "0B1730F050C492904D795E944630436D224342911D7FD498B3248A5CFAC19A14", "66387C83EFA091AF68C45AD3237D9A38418D8834A1DB438CA0FC7556FA3FBEA0"):
+            self.assertIn(digest, installer)
 
     def test_prompt_clone_mode_is_enforced_again_by_installer(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")

@@ -571,7 +571,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("ORDER_SEND_FAILED_NO_AUTOMATIC_RETRY", failure_reason)
 
     def test_channel_lock_init_io_and_ack_repair_are_fail_closed(self) -> None:
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         on_deinit = named_block(self.code, r"\bvoid\s+OnDeinit\s*\([^)]*\)")
         process = named_block(self.code, r"\bvoid\s+ProcessCommandFile\s*\([^)]*\)")
         self.assertIn("AcquireChannelLock", on_init)
@@ -906,7 +906,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("LEGACY_LOSS_LATCH_MARKER_PROBE_FAILED", probe)
         self.assertNotRegex(migration + scanner, r"File(?:Delete|Move)\s*\(")
 
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         channel_lock = on_init.find("AcquireChannelLock")
         account_lock = on_init.find("AcquireAccountExecutionLock")
         policy_lease = on_init.find("AcquirePortfolioPolicyLease")
@@ -1237,7 +1237,7 @@ class MT4UnifiedEATests(unittest.TestCase):
             self.code,
             r"\bstring\s+LifecycleModeName\s*\([^)]*\)",
         )
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         execution_guard = named_block(
             self.code,
             r"\bbool\s+EvaluateExecutionGuard\s*\([^)]*\)",
@@ -1406,7 +1406,7 @@ class MT4UnifiedEATests(unittest.TestCase):
             self.code,
             r"\bbool\s+SelectedOrderMatchesLegacyExecutedAck\s*\([^)]*\)",
         )
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         self.assertTrue(backfill)
         self.assertIn("LEGACY_BACKFILL_MAX_ACKS", backfill)
         self.assertIn("FileFindFirst", backfill)
@@ -1626,7 +1626,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         )
         self.assertIn("Lowercase(Trimmed(value))", normalize)
 
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         self.assertIn(
             "g_trusted_signing_key_id = NormalizeSigningKeyId(TrustedSigningKeyId)",
             on_init,
@@ -1654,7 +1654,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("StringLen(g_init_warning_code) == 0", on_init)
 
     def test_live_disarmed_stays_attached_and_execution_guards_remain_closed(self) -> None:
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         execution_guard = named_block(
             self.code,
             r"\bbool\s+EvaluateExecutionGuard\s*\([^)]*\)",
@@ -1711,12 +1711,15 @@ class MT4UnifiedEATests(unittest.TestCase):
             failure.find("RecordInitDiagnostic"),
             failure.find("return return_code"),
         )
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         self.assertGreaterEqual(on_init.count("InitFailure"), 10)
+        # READY is emitted only after the resident wrapper opens its latch.
+        attempt = named_block(self.code, r"\bbool\s+AttemptGatewayInitialization\s*\([^)]*\)")
         self.assertIn(
             'RecordInitDiagnostic("info", "ready", "INIT_SUCCEEDED", INIT_SUCCEEDED)',
-            on_init,
+            attempt,
         )
+        self.assertLess(attempt.find("g_runtime_initialized = true"), attempt.find('RecordInitDiagnostic("info", "ready"'))
 
     def test_capabilities_report_demo_and_live_readiness_from_actual_account(self) -> None:
         account_mode = named_block(self.code, r"\bstring\s+AccountModeName\s*\([^)]*\)")
@@ -1771,7 +1774,7 @@ class MT4UnifiedEATests(unittest.TestCase):
             "mtc-demo-01",
         ):
             self.assertIn(literal, self_test)
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         self.assertIn("CryptoSelfTest", on_init)
         self.assertIn("INIT_FAILED", on_init)
 
@@ -1798,8 +1801,8 @@ class MT4UnifiedEATests(unittest.TestCase):
         ack = named_block(self.code, r"\bstring\s+BuildAckJson\s*\([^)]*\)")
         self.assertIn("signatureVerificationStatus", ack)
         self.assertIn("metafx-hq-mt4-ack-v3", self.code)
-        self.assertIn('version   "2.19"', self.code)
-        self.assertIn('EA_VERSION = "2.19"', self.code)
+        self.assertIn('version   "2.20"', self.code)
+        self.assertIn('EA_VERSION = "2.20"', self.code)
         self.assertIn("JsonNumber(command.reference_price, 8)", ack)
 
     def test_risk_estimate_uses_documented_mt4_tick_size_points_and_local_fees(self) -> None:
@@ -1853,7 +1856,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         )
         self.assertIn("effective_risk_percent > MaxLossPerTradePercent", self.code)
 
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         for input_name in (
             "FixedLot",
             "RiskPercent",
@@ -2161,7 +2164,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("Uppercase(Symbol()) != command.symbol", runtime)
         execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
         self.assertRegex(execute, r"OrderSend\s*\(\s*Symbol\s*\(\s*\)")
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         self.assertIn("IsAllowedBrokerSymbol(AllowedSymbols, Symbol())", on_init)
         self.assertIn("LiveSymbolExactAllowlistConfirmed()", on_init)
         self.assertIn("LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST", on_init)
@@ -2348,7 +2351,32 @@ class MT4UnifiedEATests(unittest.TestCase):
                 "maxAccountEquityDrawdownPercent",
             ],
         )
-        self.assertEqual(policy_fields, mt5_policy_fields)
+        # MT5 v1.05 has an explicit commission-excluded cost basis. MT4 keeps
+        # its commission-confirmation policy; their digests must stay distinct.
+        self.assertEqual(
+            mt5_policy_fields,
+            [
+                "managedMagicNumbers",
+                "positionSizingMode",
+                "riskPercent",
+                "riskCapitalBase",
+                "riskCostBasis",
+                "estimatedCommissionPerLot",
+                "maxManagedOpenPositions",
+                "maxManagedTotalLots",
+                "maxTradesPerBrokerDay",
+                "maxDailyLossPercent",
+                "maxManagedWeeklyLossPercent",
+                "maxConsecutiveManagedLosses",
+                "consecutiveLossCooldownMinutes",
+                "maxAccountEquityDrawdownPercent",
+            ],
+        )
+        self.assertEqual(
+            [field for field in policy_fields if field != "commissionFreeAccountConfirmed"],
+            [field for field in mt5_policy_fields if field != "riskCostBasis"],
+        )
+        self.assertIn("Sha256TextHex", mt5_policy)
         self.assertIn("Sha256TextHex", policy)
         self.assertIn("AccountIdentityDigest", directory)
         self.assertNotIn("SnapshotChannel", directory)
@@ -2378,7 +2406,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("FileClose(g_portfolio_policy_lease_handle)", release)
         self.assertIn("FileDelete(lease_path, FILE_COMMON)", release)
 
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         account_lock = on_init.find("AcquireAccountExecutionLock")
         policy_lease = on_init.find("AcquirePortfolioPolicyLease")
         account_unlock = on_init.find("ReleaseAccountExecutionLock", policy_lease)
@@ -2655,7 +2683,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("IsManagedMagic(ack.magic_number)", legacy)
 
     def test_chart_transition_invalidates_old_runtime_before_unlocking_channel(self) -> None:
-        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_init = named_block(self.code, r"\bint\s+InitializeGateway\s*\([^)]*\)")
         on_deinit = named_block(self.code, r"\bvoid\s+OnDeinit\s*\([^)]*\)")
         invalidate = named_block(
             self.code,

@@ -16789,6 +16789,22 @@ button:disabled {
   background: rgba(3, 13, 21, 0.94);
 }
 
+.signal-market-strip .signal-market-init-diagnostic {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 12px 16px;
+  border-left: 3px solid var(--red);
+  border-radius: 8px;
+  background: rgba(111, 17, 38, 0.2);
+  color: #ffb3c1;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-line;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+
 .signal-market-stat {
   display: grid;
   align-content: center;
@@ -16832,7 +16848,8 @@ button:disabled {
   color: var(--amber);
 }
 
-.signal-market-stat[data-tone="danger"] strong {
+.signal-market-stat[data-tone="danger"] strong,
+.signal-market-stat[data-tone="error"] strong {
   color: var(--red);
 }
 
