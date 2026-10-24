@@ -9811,7 +9811,11 @@ function signalCurrentGatewayStatusDisplay(runtime = {}) {
   const data = heartbeat.data;
   const current = data?.currentStatus;
   const pending = "รอรายงานสถานะการเทรด • รอสถานะ EA ล่าสุด";
-  const unavailable = { status: pending, mode: pending, summary: pending, tone: "warning" };
+  const unavailable = {
+    status: pending, mode: pending, summary: pending, tone: "warning",
+    orderSummary: pending, liveSummary: pending,
+    vetoGuardReadyDisplay: true, vetoOrderReadyDisplay: true, vetoLiveReadyDisplay: true,
+  };
   // Separate display projection only: never replace report/snapshot authority.
   // A failed or older observation must not resurrect the report's previous READY.
   if (!selection || heartbeat.status !== "ready" || data?.selectionKey !== selection.key
@@ -9840,10 +9844,29 @@ function signalCurrentGatewayStatusDisplay(runtime = {}) {
         ? "สถานะ EA ล่าสุด: Execution Guard พร้อมตรวจคำสั่ง • SHADOW ไม่ส่ง Order"
         : `สถานะ EA ล่าสุด: Execution Guard พร้อม • ${mode} • สิทธิ์ส่ง Order ตรวจจากรอบวิเคราะห์ใหม่`)
         : `สถานะ EA ล่าสุด: ${signalExecutionGuardReasonLabel(current.executionGuardReason || "GUARD_NOT_READY")}`;
+  // Negative observations may suppress old green labels. A positive heartbeat
+  // never grants readiness: consumers must still require the report's guard.
+  const modeMatches = current.mode === String(runtime.gatewayMode || "").toLowerCase();
+  const orderAvailable = current.mode === "live" ? current.liveOrderExecutionAvailable
+    : current.mode === "demo" ? current.demoOrderExecutionAvailable : false;
+  const orderSummary = !guardReady || current.mode === "shadow" ? summary
+    : !modeMatches ? "รอรายงานสถานะการเทรด • โหมด EA ล่าสุดไม่ตรงกับรายงาน"
+      : current.mode === "live" && !current.liveArmed ? "ยังไม่เทรดจริง • EA ล่าสุดยังไม่เปิด LiveArmed"
+      : !orderAvailable ? `สถานะ EA ล่าสุด: ยังไม่อนุญาตส่ง Order • ${mode}` : summary;
+  const liveSummary = !guardReady ? summary
+    : current.mode !== "live" ? `ยังไม่เทรดจริง • EA ล่าสุดอยู่ ${mode}`
+      : !current.liveArmed ? "ยังไม่เทรดจริง • EA ล่าสุดยังไม่เปิด LiveArmed"
+        : !current.liveOrderExecutionAvailable ? "ยังไม่เทรดจริง • EA ล่าสุดยังไม่อนุญาต Order บัญชีจริง"
+          : orderSummary;
   return {
     status: data.connected === true ? `EA ล่าสุด: ${current.status}` : "EA ล่าสุด: ยังไม่เชื่อม",
     mode: data.connected === true ? `${mode}${current.mode === "shadow" ? " • ไม่ส่ง Order" : ""}` : "ยังไม่เชื่อม EA",
-    summary, tone: guardReady ? "info" : "warning",
+    summary, tone: guardReady ? "info" : "warning", orderSummary, liveSummary,
+    vetoGuardReadyDisplay: !guardReady,
+    vetoOrderReadyDisplay: !guardReady || !modeMatches || !orderAvailable
+      || (current.mode === "live" && !current.liveArmed),
+    vetoLiveReadyDisplay: !guardReady || !modeMatches || current.mode !== "live"
+      || !current.liveArmed || !current.liveOrderExecutionAvailable,
   };
 }
 
@@ -13252,10 +13275,12 @@ function renderSignalMarketStrip(container, report, runtime) {
     ["สถานะ Gateway", initFailure?.label || currentGateway?.status || pendingReportLabel || displayStatus(runtime.gatewayStatus), initFailure ? "error" : currentGateway?.tone || (runtime.gatewayConnected ? "info" : "warning")],
     [
       "สิทธิ์ส่ง Order",
-      initFailure?.messageTh || pendingReportLabel || (runtime.gatewayExecutionGuardReady
+      initFailure?.messageTh || pendingReportLabel || (currentGateway?.vetoOrderReadyDisplay
+        ? currentGateway.orderSummary : runtime.gatewayExecutionGuardReady
         ? "Execution Guard พร้อม"
         : signalExecutionGuardReasonLabel(effectiveGuardReason)),
-      initFailure ? "error" : runtime.gatewayExecutionGuardReady ? "ready" : "warning",
+      initFailure ? "error" : !pendingReportLabel && !currentGateway?.vetoOrderReadyDisplay
+        && runtime.gatewayExecutionGuardReady ? "ready" : "warning",
     ],
     [
       "โหมด Gateway",
@@ -15293,6 +15318,8 @@ function signalLiveAccountStatus(runtime = {}, modeAccount = signalGatewayModeAc
   if (initFailure) return initFailure.messageTh;
   const pendingLabel = signalTradingReportPendingLabel(runtime);
   if (pendingLabel) return pendingLabel;
+  const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
+  if (currentGateway?.vetoLiveReadyDisplay) return currentGateway.liveSummary;
   const guardReady = runtime.gatewayExecutionGuardReady === true;
   const signedCommandReady = runtime.backendSignedCommandVerificationAvailable === true
     && runtime.signedCommandVerificationAvailable === true
@@ -15356,7 +15383,8 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
       ? "รอข้อมูลจาก EA"
       : `${current} / ${maximum}${suffix}`
   );
-  const guardReady = !initFailure && runtime.gatewayExecutionGuardReady === true;
+  const guardReady = !initFailure && !currentGateway?.vetoGuardReadyDisplay
+    && runtime.gatewayExecutionGuardReady === true;
   const signedCommandReady = runtime.backendSignedCommandVerificationAvailable === true
     && runtime.signedCommandVerificationAvailable === true
     && runtime.signingKeyMatch === true;
@@ -15378,7 +15406,8 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
     ["ระบบหลาย Agent", runtime.ensembleAvailable, runtime.ensembleAvailable ? "พร้อมวิเคราะห์" : "รอ Adapter"],
     [
       "MetafxHQ AI Council EA",
-      !initFailure && runtime.gatewayConnected && runtime.gatewayMode !== "shadow",
+      !initFailure && !currentGateway?.vetoOrderReadyDisplay
+        && runtime.gatewayConnected && runtime.gatewayMode !== "shadow",
       initFailure?.label || currentGateway?.mode || (runtime.gatewayConnected
         ? (runtime.gatewayMode === "shadow" ? "SHADOW • ไม่ส่ง Order" : runtime.gatewayMode.toUpperCase())
         : signalTradingReportPendingLabel(runtime) || "ยังไม่เชื่อม"),
@@ -15416,7 +15445,8 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
     ["ลายเซ็นคำสั่งจาก Local Runner", signedCommandReady, signedCommandReady ? `ตรวจได้ • ${runtime.signatureAlgorithm || "HMAC-SHA256"}` : "ยังตรวจแบบครบเส้นทางไม่ได้"],
     ["Key ID สำหรับตั้ง Live", signingKey.ready, signingKey.label, signingKey.copyValue],
     ["Key สำหรับบัญชีจริง", runtime.signingKeyPinned === true && runtime.signingKeyMatch === true, runtime.signingKeyPinned === true ? (runtime.signingKeyMatch === true ? "ปักหมุดแล้วและตรงกับ Backend" : "ปักหมุดแล้วแต่ Key ไม่ตรง") : "ยังไม่ปักหมุดใน EA • Live ถูกล็อก"],
-    ["บัญชีจริง", !initFailure && runtime.liveOrderExecutionAvailable, liveAccountStatus],
+    ["บัญชีจริง", !initFailure && !currentGateway?.vetoLiveReadyDisplay
+      && runtime.liveOrderExecutionAvailable, liveAccountStatus],
   ];
   container.innerHTML = "";
   items.forEach(([label, ready, value, copyValue]) => {
@@ -17229,14 +17259,15 @@ function renderSignalLivePanel(report = {}) {
   if (gatewayAction) {
     const initFailure = signalCurrentInitFailureDisplay(runtime);
     const currentGateway = signalCurrentGatewayStatusDisplay(runtime);
-    gatewayAction.textContent = initFailure?.label || currentGateway?.summary || signalTradingReportPendingLabel(runtime) || (runtime.gatewayMode === "shadow"
+    gatewayAction.textContent = initFailure?.label || currentGateway?.orderSummary || signalTradingReportPendingLabel(runtime) || (runtime.gatewayMode === "shadow"
       ? "SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order"
       : runtime.gatewayExecutionGuardReady
         ? `พร้อมรับคำสั่งรอบใหม่ • ${runtime.gatewayMode.toUpperCase()}`
       : runtime.gatewayConnected
         ? `เชื่อม EA แล้ว • ยังไม่พร้อมส่ง Order`
         : "ยังไม่เชื่อม EA");
-    gatewayAction.dataset.ready = !initFailure && runtime.gatewayExecutionGuardReady && runtime.gatewayMode !== "shadow" ? "true" : "false";
+    gatewayAction.dataset.ready = !initFailure && !currentGateway?.vetoOrderReadyDisplay
+      && runtime.gatewayExecutionGuardReady && runtime.gatewayMode !== "shadow" ? "true" : "false";
   }
   if (gatewayDetail) {
     const sizing = signalGatewaySizingSummary(runtime);

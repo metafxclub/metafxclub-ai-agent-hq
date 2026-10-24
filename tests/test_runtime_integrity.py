@@ -1992,7 +1992,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 with mock.patch.object(
                     self.bridge,
                     "_assert_unambiguous_metatrader_candidate_unlocked",
-                ):
+                ), mock.patch.object(self.bridge, "_metatrader_process_locations", return_value=[]):
                     results = [
                         self.bridge.select_metatrader_target("right_server_racks", candidate["candidateId"]),
                         self.bridge.select_metatrader_target("right_tool_console", candidate["candidateId"]),
@@ -4407,9 +4407,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('"artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\\MetafxHQTradeGateway.ex4"', installer)
         self.assertIn('"integrations", "runner", "scripts", "tests"', installer)
         self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"', installer)
-        self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt5-trade-gateway-v1.07-visible-compile-readiness"', installer)
-        self.assertIn('"artifacts\\mt5-trade-gateway-v1.07-visible-compile-readiness\\MANIFEST.json"', installer)
-        self.assertIn('"artifacts\\mt5-trade-gateway-v1.07-visible-compile-readiness\\COMPILE_PROOF.png"', installer)
+        self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt5-trade-gateway-v1.07-isolated-compile-readiness"', installer)
+        self.assertIn('"artifacts\\mt5-trade-gateway-v1.07-isolated-compile-readiness\\MANIFEST.json"', installer)
+        self.assertIn('"artifacts\\mt5-trade-gateway-v1.07-isolated-compile-readiness\\COMPILE_LOG.log"', installer)
         self.assertIn("Assert-Mt5CompileArtifactIntegrity", installer)
         self.assertIn('"1-INSTALL-HQ.bat", "UPDATE-HQ.bat"', installer)
         self.assertIn('"AGENTS.md", ".gitattributes", ".gitignore"', installer)

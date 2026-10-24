@@ -1,4 +1,4 @@
-# Strategy Spec — MetafxHQ Unified MT4 Gateway v2.19
+# Strategy Spec — MetafxHQ Unified MT4 Gateway v2.20
 
 ## โปรไฟล์และขอบเขต
 
@@ -71,7 +71,7 @@ Daily/Weekly Loss ใช้สถานะ Latch ตามวัน/สัปด
 
 สำหรับหลาย Channel แนะนำให้ใช้ Magic ไม่ซ้ำต่อ Channel และให้ทุก EA ใส่ Magic ทั้งหมดใน `ManagedMagicNumbers` ชุดเดียวกัน หากแชร์ Magic ต้องให้ทุก Instance ใช้รายการ Managed Magic และเพดาน Risk ชุดเดียวกัน Account Execution Lock ผูกกับ Account Number + Broker Server โดยไม่รวม Channel จึง Serialize Guard + Bar Claim + `OrderSend()` รวมถึง Optional Lifecycle `OrderClose()` ข้ามทุก Channel/Terminal ที่ใช้ Windows `FILE_COMMON` เดียวกัน และ OS จะคืน Handle เมื่อ Process ล้มโดยไม่เกิด stale-lock deadlock
 
-Account Portfolio Policy Lease ใช้ Digest ของรายการ Magic หลัง Sort รวมกับ `MaxManagedOpenPositions`, `MaxManagedTotalLots`, `MaxTradesPerBrokerDay`, Daily/Weekly Loss, Consecutive Loss/Cooldown และ Account Drawdown หากมี EA ของบัญชีเดียวกันที่ถือ Lease ด้วย Digest อื่น `OnInit` ต้องจบด้วย `PORTFOLIO_POLICY_MISMATCH`; ถ้าไม่มี Active Lease ระบบจึงอนุญาตเขียน Policy ใหม่ ทำให้เปลี่ยนค่าอย่างตั้งใจได้หลังหยุด EA เดิมครบแล้ว ชื่อไฟล์ Lease เป็นช่องแบบสั้นและจำกัดพาธขยายไว้ไม่เกิน 259 ตัวอักษร แต่ Payload ต้องเก็บ Account/Policy/Channel SHA-256 เต็มพร้อม Snapshot Channel ที่ไม่ใช่ Secret และคำนวณ Channel digest ซ้ำให้ตรงครบ 64 hex จึงห้ามใช้ prefix ในชื่อไฟล์เป็นหลักฐานอนุญาต และต้องตรวจทั้ง Lease แบบสั้นกับชื่อ Legacy `policy-<64>-channel-<64>.lease` รวมถึงความผิดพลาดระหว่างสแกนแบบ fail-closed
+Account Portfolio Policy Lease ใช้ Digest ของรายการ Magic หลัง Sort รวมกับ `MaxManagedOpenPositions`, `MaxManagedTotalLots`, `MaxTradesPerBrokerDay`, Daily/Weekly Loss, Consecutive Loss/Cooldown และ Account Drawdown หากมี EA ของบัญชีเดียวกันที่ถือ Lease ด้วย Digest อื่น initialization ต้องถูกบล็อกด้วย `PORTFOLIO_POLICY_MISMATCH` โดยEAรุ่น2.20คงอยู่บนกราฟแบบ BLOCKED; ถ้าไม่มี Active Lease ระบบจึงอนุญาตเขียน Policy ใหม่ ทำให้เปลี่ยนค่าอย่างตั้งใจได้หลังหยุด EA เดิมครบแล้ว ชื่อไฟล์ Lease เป็นช่องแบบสั้นและจำกัดพาธขยายไว้ไม่เกิน 259 ตัวอักษร แต่ Payload ต้องเก็บ Account/Policy/Channel SHA-256 เต็มพร้อม Snapshot Channel ที่ไม่ใช่ Secret และคำนวณ Channel digest ซ้ำให้ตรงครบ 64 hex จึงห้ามใช้ prefix ในชื่อไฟล์เป็นหลักฐานอนุญาต และต้องตรวจทั้ง Lease แบบสั้นกับชื่อ Legacy `policy-<64>-channel-<64>.lease` รวมถึงความผิดพลาดระหว่างสแกนแบบ fail-closed
 
 `status.json` schema v5 ต้องรายงาน `portfolioPolicyStatus`, `portfolioPolicyDigest`, `portfolioGuardScope`, `managedMagicNumbers`, `allowedSymbols`, `allowedTimeframes`, `concurrencyBoundary` และ `crossVpsDistributedLock` เพื่อให้ Backend/UI ตรวจขอบเขตจริงจาก EA ได้โดยไม่คาดเดาจากค่าใน Dashboard
 
@@ -96,7 +96,7 @@ Policy enforcement ต้องใช้ v2.16 ขึ้นไปทุก Insta
 2. เริ่ม `GATEWAY_SHADOW` และ `LiveArmed=false`
 3. ทดสอบ Snapshot, Status v5, Signature Verification, SHADOWED ACK v3, stale bar, price drift, spread, margin, risk และ Kill Switch
 4. ทดสอบบัญชี Demo ด้วย Lot ต่ำ โดยใช้ Signed Envelope เส้นทางเดียวกับ Live
-5. ก่อน Live สามารถเลือก `GATEWAY_LIVE` โดยยังคง `LiveArmed=false` เพื่อดู Readiness ได้ โดย EA ต้องไม่หลุดจากกราฟและห้ามส่ง Order จากนั้นปักหมุด Active Key ID ใน `TrustedSigningKeyId`, ตรวจ Key match แล้วจึงตั้ง `LiveArmed=true` จากหน้า Inputs ของ EA เท่านั้น; เมื่อ Arm แล้ว Pin/Key ที่ไม่พร้อมต้องทำให้ `OnInit()` ล้มเหลวแบบ fail-closed
+5. ก่อน Live สามารถเลือก `GATEWAY_LIVE` โดยยังคง `LiveArmed=false` เพื่อดู Readiness ได้ โดย EA ต้องไม่หลุดจากกราฟและห้ามส่ง Order จากนั้นปักหมุด Active Key ID ใน `TrustedSigningKeyId`, ตรวจ Key match แล้วจึงตั้ง `LiveArmed=true` จากหน้า Inputs ของ EA เท่านั้น; เมื่อ Arm แล้ว Pin/Key ที่ไม่พร้อมต้องทำให้ `InitializeGateway()` ล้มเหลวแบบ fail-closed โดยresident wrapperคงEAไว้แบบ BLOCKED
 6. Live จะส่ง Order ได้เมื่อคะแนนถึงเกณฑ์ 1/3, 2/3 หรือ 3/3 ที่ผู้ใช้เลือก ไม่มีเสียง BUY/SELL ขัดกัน, News ไม่ VETO, Price Action มี SL/TP, Signed Envelope และ Guard ทุกชั้นผ่านครบ; ค่าเริ่มต้นยังคง Shadow และไม่เปิด Live อัตโนมัติ
 7. Status v5 ส่งประเภทบัญชีจาก EA ให้ Backend ตรวจซ้ำ: `GATEWAY_DEMO` ใช้ได้กับบัญชี Demo และ `GATEWAY_LIVE` ใช้ได้กับบัญชีจริงเท่านั้น
 8. `roundDeadlineAt` แบบ UTC เป็นขอบเขตสุดท้ายของการ Publish คำสั่งใหม่ เพื่อไม่ให้ Bridge ส่ง Order จากผลวิเคราะห์เก่าหลัง Restart หรือจากเวลาแท่งโบรกเกอร์ที่มี timezone ต่างกัน; Command ที่ส่งไปแล้วจะยังติดตาม ACK ต่อจนจบ
@@ -113,3 +113,10 @@ Policy enforcement ต้องใช้ v2.16 ขึ้นไปทุก Insta
 - Lock และ Policy Lease ข้าม Terminal ได้เฉพาะใน Windows User/`FILE_COMMON` เดียวกัน บัญชีเดียวกันบนหลาย VPS เป็นขอบเขตที่ไม่รองรับ ต้องมี Active Execution Owner เพียง VPS เดียวจนกว่าจะมี Distributed Lock ภายนอก
 
 ไฟล์ Source ชุดนี้ยังไม่ถือว่าผ่าน Compile หรือ Runtime จนกว่าจะ Compile บน MT4 เป้าหมาย และยืนยัน Shadow/Demo ตามขั้นตอนข้างต้น
+
+
+## v2.20: Resident initialization และ ownership
+
+OnInit เรียก AttemptGatewayInitialization แล้วคืน INIT_SUCCEEDED เพื่อคง EA บนกราฟ แต่ GatewayInitializationReady เปิดได้เมื่อ runtime initialized, ไม่ blocked และถือ channel lock เท่านั้น ทุก command/execution/lifecycle-close entry ถูก gate นี้ครอบ ส่วน InitializeGateway คง validation, signing, policy, loss latch และ risk checks เดิมครบ เมื่อ failure ลบเฉพาะ publication ของตัวเองก่อนปล่อย channel lock ไม่ลบ/เขียน diagnostic ของ instance อื่น
+
+Transient readiness/file failures ที่ระบุใน source retry initialization ทุก10วินาที ไม่ retry OrderSend/OrderClose Inputs ผิดหรือ policy/crypto/pin mismatch ต้องแก้สาเหตุเอง ถ้าสร้าง timer ไม่ได้ EA ยังคง BLOCKED แต่ไม่อ้างว่าจะฟื้นเอง; terminal crash/ผู้ใช้ลบ EA/เปลี่ยน template อยู่นอกการรับประกันนี้ การกระจาย source/EX4 ไม่เปิด Live อัตโนมัติ

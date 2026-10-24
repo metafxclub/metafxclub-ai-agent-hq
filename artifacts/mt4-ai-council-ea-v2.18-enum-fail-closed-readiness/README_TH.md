@@ -1,5 +1,9 @@
 # MetafxHQ Unified MT4 Snapshot + Trade Gateway
 
+> อัปเดต v2.20 — Resident fail-closed initialization: EA คงอยู่บนกราฟแบบ `ATTACHED / BLOCKED` หาก Inputs หรือ readiness ไม่ผ่าน โดยไม่เปิดทางส่ง/ปิดออเดอร์จน initialization สำเร็จครบทุก guard ปัญหาชั่วคราวที่ระบุไว้ลองใหม่ทุก 10 วินาที; Inputs ผิด, duplicate channel, crypto/pin/policy mismatch ต้องแก้สาเหตุแล้ว reapply Inputs ก่อน ไม่มีการ retry ออเดอร์หรือวิเคราะห์ย้อนหลัง EA ที่ไม่ได้ถือ channel lock ไม่ลบ/เขียนทับ publication ของ instance เจ้าของเดิม และเมื่อ disconnect ต้องรับ tick ใหม่ก่อนผ่าน freshness gate
+
+> รุ่นก่อนหน้าบาง initialization failure ทำให้ EA หลุดจากกราฟ ในรุ่น2.20 failure reason เดิมยังอยู่ แต่ resident wrapper คง EA ไว้แบบ BLOCKED การ compile/source tests ไม่ยืนยัน native attachment หรือ live account execution และยังไม่มีการรัน native attach ใน release proof นี้
+
 > อัปเดต v2.19 — Money Management: ผู้ใช้เลือกที่ Inputs ของ EA ได้ระหว่าง `MONEY_MANAGEMENT_FIXED_LOT` และ `MONEY_MANAGEMENT_RISK_PERCENT` โดยโหมด Risk Percent คำนวณ Lot จาก `RiskPercent` ของ Equity หรือ Balance, เผื่อ Slippage/ค่าธรรมเนียมที่กำหนด และปัด Lot ลงตาม Min/Max/Step ที่ Broker รายงาน หาก Lot ที่ปลอดภัยต่ำกว่า Min Lot จะปฏิเสธคำสั่งแทนการฝืนเปิด Min Lot ใช้หลักเดียวกันกับบัญชี Standard, Cent และ Pro-Cent โดยไม่เดาจากชื่อบัญชีและไม่คูณ/หาร 100 เอง
 
 > อัปเดต v2.16: การย้าย EA ไป Symbol/Timeframe ใหม่จะล้างสถานะ Runtime เก่าทันที, ผูก Stream/Bar Claim ด้วย Channel + ชื่อ Symbol เต็ม + Timeframe, แยกประวัติ/Outcome ตาม Channel อย่างเคร่งครัด และใช้ OS file-handle lock ระดับบัญชีครอบ Guard + Bar Claim + `OrderSend()` เพื่อไม่ให้หลาย Channel ที่ทำงานพร้อมกันทะลุ Max Order
@@ -21,7 +25,7 @@
 - ส่ง `snapshot.json` ให้ Dashboard อ่านข้อมูลกราฟและข้อมูลสรุปบัญชี
 - รับคำสั่งซื้อขายแบบ Flat JSON จาก Local Runner แล้วตรวจ Guard ก่อนส่ง Order
 
-เวอร์ชันปัจจุบัน `2.19` รวมหน้าที่ของ Snapshot Indicator เดิมเข้ามาใน Gateway EA แล้ว จึงติดกราฟเพียง EA ตัวเดียวได้ โดยยังคง Contract `metafx-hq-mt4-snapshot-v1` สำหรับข้อมูลอ่านอย่างเดียว และใช้ Signed Envelope รอบ Command/Heartbeat สำหรับเส้นทางส่งคำสั่งทั้ง Shadow, Demo และ Live Source ที่ใช้งานจริงใน Release ปัจจุบันอยู่ที่ `artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/MetafxHQTradeGateway.mq4` (ชื่อโฟลเดอร์เดิมคงไว้เพื่อไม่ทำลายพาธติดตั้งและชุดทดสอบ)
+เวอร์ชันปัจจุบัน `2.20` รวมหน้าที่ของ Snapshot Indicator เดิมเข้ามาใน Gateway EA แล้ว จึงติดกราฟเพียง EA ตัวเดียวได้ โดยยังคง Contract `metafx-hq-mt4-snapshot-v1` สำหรับข้อมูลอ่านอย่างเดียว และใช้ Signed Envelope รอบ Command/Heartbeat สำหรับเส้นทางส่งคำสั่งทั้ง Shadow, Demo และ Live Source ที่ใช้งานจริงใน Release ปัจจุบันอยู่ที่ `artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/MetafxHQTradeGateway.mq4` (ชื่อโฟลเดอร์เดิมคงไว้เพื่อไม่ทำลายพาธติดตั้งและชุดทดสอบ)
 
 - Timer มีเพียงตัวเดียวและทำงานทุก 1 วินาที
 - คำสั่ง, Heartbeat, `status.json` และ Kill Switch ถูกตรวจทุก 1 วินาที
@@ -36,7 +40,7 @@
 - เพดาน Position, Lot, จำนวนเทรด และ P/L ใช้ขอบเขต `ManagedMagicNumbers` แบบรวมทั้งบัญชี ไม่จำกัดเฉพาะ Symbol/กราฟปัจจุบัน เพื่อให้หลาย Channel ใช้เพดาน Portfolio เดียวกันได้
 - จำนวนในประวัติของ Channel ที่เลือก **ไม่ใช่** จำนวน Portfolio ทั้งหมดและห้ามใช้แทน Max Order; ค่าที่ Guard ใช้จริงคือ `currentManagedPositions` จากทุก Market Order ในบัญชีที่ Magic อยู่ใน `ManagedMagicNumbers`
 - แนวทางที่แนะนำคือให้แต่ละ Channel ใช้ `MagicNumber` ไม่ซ้ำกัน แล้วใส่ Magic ของทุก Channel ใน `ManagedMagicNumbers` ชุดเดียวกันบน EA ทุกตัว หากจำเป็นต้องแชร์ Magic ก็ต้องให้ EA ทุก Channel ใช้รายการ `ManagedMagicNumbers` และเพดาน Portfolio ชุดเดียวกัน มิฉะนั้นให้ถือว่าการตั้งค่าไม่ปลอดภัยสำหรับการทำงานพร้อมกัน
-- v2.16 บังคับเงื่อนไขนี้ด้วย Account Portfolio Policy Lease: EA ทุกตัวของบัญชีเดียวกันภายใต้ Windows User/`FILE_COMMON` เดียวกันต้องมีชุด Magic หลัง Sort และเพดาน `MaxManagedOpenPositions`, `MaxManagedTotalLots`, `MaxTradesPerBrokerDay`, Daily/Weekly Loss, Consecutive-loss/Cooldown และ Account Drawdown ตรงกัน หากต่างกัน EA ตัวใหม่หยุดที่ `OnInit` ด้วย `PORTFOLIO_POLICY_MISMATCH` เมื่อ EA เดิมหยุดครบแล้วจึงเปลี่ยน Policy ได้; Lease ที่เหลือจาก Process crash จะถูกตรวจและล้างโดยไม่เกิด stale-lock deadlock
+- v2.16 บังคับเงื่อนไขนี้ด้วย Account Portfolio Policy Lease: EA ทุกตัวของบัญชีเดียวกันภายใต้ Windows User/`FILE_COMMON` เดียวกันต้องมีชุด Magic หลัง Sort และเพดาน `MaxManagedOpenPositions`, `MaxManagedTotalLots`, `MaxTradesPerBrokerDay`, Daily/Weekly Loss, Consecutive-loss/Cooldown และ Account Drawdown ตรงกัน หากต่างกัน initialization ของ EA ตัวใหม่ถูกบล็อกด้วย `PORTFOLIO_POLICY_MISMATCH` โดยรุ่น2.20คงอยู่บนกราฟแบบ BLOCKED เมื่อ EA เดิมหยุดครบแล้วจึงเปลี่ยน Policy ได้; Lease ที่เหลือจาก Process crash จะถูกตรวจและล้างโดยไม่เกิด stale-lock deadlock
 - ชื่อ Lease ใช้ช่องแบบสั้น `policy-p-<policy-prefix16>-c-<channel-prefix16>.lease` เพื่อให้พาธที่ขยายใต้ `FILE_COMMON` ไม่เกินงบ 259 ตัวอักษรบน Windows แบบ `MAX_PATH`; prefix ใช้เลือกชื่อไฟล์เท่านั้น การยืนยันสิทธิ์อ่าน Payload V2 ซึ่งมี Account/Policy/Channel SHA-256 เต็ม 64 hex พร้อม Snapshot Channel ที่ไม่ใช่ Secret แล้วคำนวณ Channel SHA-256 ซ้ำให้ตรงครบ 64 hex หาก prefix ชนกัน, digest ส่วนท้ายถูกแก้, Payload ผิดรูป, อ่านไม่ได้, สแกนไดเรกทอรีผิดพลาด หรือพาธเกินงบ ระบบหยุดแบบ fail-closed โดย `init-status.json` รายงานเฉพาะ Error Code และความยาวพาธ ไม่เผยพาธจริง
 - ตัวสแกนยังอ่าน Lease ชื่อเดิม `policy-<policy-digest64>-channel-<channel-digest64>.lease` และตรวจ Payload เดิมแบบเต็ม เพื่อไม่มองข้าม Instance รุ่นก่อนหน้า; ก่อนอ่าน Payload จะ probe ownership แบบ exclusive ทำให้ไฟล์ stale ว่าง/เขียนค้างจาก Process crash ถูกลบได้ แต่ไฟล์ที่ยังมี owner ต้องผ่านการตรวจเต็ม; ชื่อใหม่ยังอยู่ใน namespace `policy-*.lease` ทำให้ EA v2.16 ก่อนแพตช์เห็นรูปแบบที่ไม่รู้จักแล้วหยุด fail-closed แทนการรันปะปน
 - `status.json` v5 เปิดเผยสถานะที่ตรวจได้โดยตรง ได้แก่ `portfolioPolicyStatus=ready`, Digest ที่ไม่ใช่ Secret, ชุด Managed Magic/Allowed Symbol/Timeframe, `concurrencyBoundary=same_windows_user_file_common` และ `crossVpsDistributedLock=false`; หาก Policy ไม่ตรง EA จะไม่เผยแพร่สถานะ READY และ `init-status.json` จะระบุ `PORTFOLIO_POLICY_MISMATCH`
@@ -51,7 +55,7 @@
 - Snapshot แยกสรุป `ACCOUNT_WIDE` ออกจาก `MANAGED_MAGIC_NUMBERS_ACCOUNT_WIDE` และรายงาน `marketOpen` จากสถานะ Connection, Broker trade flag และความสดของ Tick เท่านั้น โดยไม่เดาชื่อ Session ตลาด
 - ตัวเลขรายวัน รายสัปดาห์ และจำนวนแพ้ต่อเนื่องอ้างอิงเฉพาะประวัติบัญชีที่ MT4 โหลดไว้ (`MT4_LOADED_ACCOUNT_HISTORY`) จึงควรตั้งแท็บ Account History เป็น All History ก่อนใช้ Guard ใน Demo
 
-> Source ไม่ติดตั้งหรือเปิด MT4 ให้อัตโนมัติในเครื่องใหม่ ผู้ใช้ต้องเลือก Terminal เป้าหมายก่อนเสมอ Source v2.19 ต้อง Compile ให้ผ่าน `0 errors, 0 warnings` และตรวจ Hash ของ EX4 ก่อนติดตั้งแทนรุ่นเดิม การมีโค้ด Live ไม่ได้หมายความว่าบัญชีจริงถูกเปิดอัตโนมัติ
+> Source ไม่ติดตั้งหรือเปิด MT4 ให้อัตโนมัติในเครื่องใหม่ ผู้ใช้ต้องเลือก Terminal เป้าหมายก่อนเสมอ Source v2.20 ต้อง Compile ให้ผ่าน `0 errors, 0 warnings` และตรวจ Hash ของ EX4 ก่อนติดตั้งแทนรุ่นเดิม การมีโค้ด Live ไม่ได้หมายความว่าบัญชีจริงถูกเปิดอัตโนมัติ
 
 ## ความเข้ากันได้กับ Indicator เดิม
 
@@ -330,7 +334,7 @@ FAILED_FINAL
 - `init-status.json` สำหรับสถานะเริ่มต้นล่าสุด ส่วน Audit จะเก็บประวัติคำเตือนและสาเหตุที่เริ่มไม่สำเร็จ
 - Experts Log ของ MT4
 
-หาก EA หายจากกราฟทันที ให้เปิด `init-status.json` ก่อน สาเหตุที่ทำให้ `OnInit()` ล้มเหลวได้แก่ Channel ไม่ถูกต้อง, ค่า Gateway/Lifecycle/Money Management Mode นอก Enum ที่รองรับ, Input/Magic/Lot/Symbol/Timeframe ไม่ผ่าน, Channel ถูก EA อีกตัวครอบครอง, HMAC Self-test, Signing Key ไม่พร้อมขณะ `LiveArmed=true`, สร้าง Timer ไม่สำเร็จ หรือเขียน Snapshot/Status/Capabilities ไม่ได้ การเลือก Live โดยยังไม่ Arm จะไม่ถอด EA แต่จะเขียนคำเตือนและคง Execution Guard เป็น `LIVE_NOT_ARMED` เมื่อ EA ถูกถอด, Terminal ปิด หรือเปลี่ยนกราฟ รุ่น v2.19 จะลบ `status.json`, `capabilities.json` และ `snapshot.json` เก่าก่อนปล่อย Channel Lock เพื่อไม่ให้ Backend เห็นสถานะ READY ของกราฟเดิม ส่วน `init-status.json` ยังคงบอก Stage/Reason Code ที่แน่นอน
+หาก EA รุ่น2.20แสดง ATTACHED / BLOCKED ให้ดู reason/stage บนกราฟและ `init-status.json` (เมื่อไม่มี instance อื่นครอง channel) สาเหตุรวมถึง Channel/Enum/Input/Magic/Lot/Symbol/Timeframe ไม่ผ่าน, duplicate channel, HMAC, Signing Key ขณะ Arm, Timer หรือ initial file write ไม่พร้อม EAยังคงอยู่แต่ทุกorder entryถูกปิดจน initialization ผ่าน ปัญหาชั่วคราวตามallowlistลองใหม่ทุก10วินาที; ค่าผิด/pin-policy-crypto mismatch ต้องแก้แล้วreapply เมื่อถอดEAหรือเปลี่ยนกราฟ จะล้าง publication เฉพาะที่ตนถือchannel lockและรักษาเหตุinit failureเดิม ไม่ลบหรือทับของinstanceเจ้าของอื่น หากterminalเองcrash/ผู้ใช้ลบEA ระบบนี้ป้องกันไม่ได้
 
 ## Preflight ก่อนย้าย Symbol / Timeframe / Terminal
 
@@ -338,19 +342,19 @@ FAILED_FINAL
 2. ตรวจชื่อ Symbol **เต็มตาม Broker** เช่น `XAUUSD.r` และเพิ่มชื่อฐานใน `AllowedSymbols`; ตรวจ Timeframe อยู่ใน `AllowedTimeframes` และตั้งแต่ M5 ขึ้นไป
 3. ใช้ `SnapshotChannel` ไม่ซ้ำสำหรับแต่ละ EA/กราฟ/Terminal หากย้าย EA ตัวเดิมให้คง Channel เดิมได้ แต่ Backend จะตั้ง Baseline ของ Stream ใหม่และไม่เอางานค้างจาก Stream เดิมมาส่ง
 4. กำหนด Magic แบบแยก Channel แล้วให้ EA ทุกตัวประกาศ `ManagedMagicNumbers` ชุดเดียวกัน เพื่อให้ `MaxManagedOpenPositions` และ Lot/Loss Guard นับทั้ง Portfolio ตรงกัน
-5. Reload/Attach v2.19 แล้วรอ `init-status.json = INIT_SUCCEEDED`, `status.json` และ `snapshot.json` แสดง Channel + Symbol + Timeframe ใหม่ตรงกันก่อนเปิด Automation
+5. Reload/Attach v2.20 แล้วรอ `init-status.json = INIT_SUCCEEDED`, `status.json` และ `snapshot.json` แสดง Channel + Symbol + Timeframe ใหม่ตรงกันก่อนเปิด Automation
 6. ทดสอบ Shadow ก่อน Demo และห้ามเปิด Live ระหว่างการย้ายกราฟหรือระหว่างที่สถานะทั้งสามไฟล์ยังไม่ตรงกัน
 
 Stream identity และ `command.symbol` ใช้ชื่อ Symbol เต็มหลังตัดช่องว่างและแปลงเป็นตัวพิมพ์ใหญ่เสมอ เช่น Snapshot `eurusd#` ต้องคำนวณด้วย `EURUSD#`; สูตรคือ `SHA256(channelId + "\n" + UPPERCASE(fullSymbol) + "\n" + UPPERCASE(timeframe))` การใช้ตัวพิมพ์จาก Display โดยไม่ Normalize จะถูกปฏิเสธแบบ fail-closed อย่างไรก็ตาม EA ส่ง Order ด้วย `Symbol()` ของกราฟที่ Attach จริง จึงคงชื่อ/case ที่ Broker ใช้ใน execution ไว้
 
-## ข้อสมมติและขอบเขตของ v2.19
+## ข้อสมมติและขอบเขตของ v2.20
 
 - รองรับ Market Order `BUY` และ `SELL` เท่านั้น
 - SL/TP เป็นราคา Absolute ไม่ใช่ Points
 - หนึ่ง Channel มี Gateway EA เจ้าของเพียงตัวเดียว
 - Local Runner Publish คำสั่งทีละรายการ
 - FILE_COMMON เป็น Local Trust Boundary และ Signed Envelope ใช้ Shared Secret ภายใน Windows User เดียวกัน; ก่อน Live ควรจำกัด ACL และใช้ Windows User/VPS เฉพาะ
-- Backend ไม่มีคำสั่ง Close, Modify, Pending Order, Martingale, Grid หรือ Hedge; EA จะเรียก `OrderClose()` ได้เฉพาะ Optional Position Lifecycle (Max Holding/Session Close) ที่ผู้ใช้เปิดเองและผ่าน Mode, Account, Signing (ทั้ง Demo/Live), LiveArmed (เมื่อเป็น Live) และ Safety Guard ครบ โดยถือ Account Execution Lock เดียวกับ `OrderSend()` และตรวจซ้ำภายใต้ Lock ที่ขอบก่อนปิด Order ส่วน Shadow/Tester/Optimizer ห้ามปิดอัตโนมัติ และ Recovery ใน v2.19 เป็นการกู้หลักฐาน Ticket/Outcome แบบอ่านอย่างเดียวโดยไม่สร้างคำสั่งซื้อขาย
+- Backend ไม่มีคำสั่ง Close, Modify, Pending Order, Martingale, Grid หรือ Hedge; EA จะเรียก `OrderClose()` ได้เฉพาะ Optional Position Lifecycle (Max Holding/Session Close) ที่ผู้ใช้เปิดเองและผ่าน Mode, Account, Signing (ทั้ง Demo/Live), LiveArmed (เมื่อเป็น Live) และ Safety Guard ครบ โดยถือ Account Execution Lock เดียวกับ `OrderSend()` และตรวจซ้ำภายใต้ Lock ที่ขอบก่อนปิด Order ส่วน Shadow/Tester/Optimizer ห้ามปิดอัตโนมัติ และ Recovery ใน v2.20 เป็นการกู้หลักฐาน Ticket/Outcome แบบอ่านอย่างเดียวโดยไม่สร้างคำสั่งซื้อขาย
 - ไม่มีการ Retry `OrderSend()` อัตโนมัติ และไม่มีโหมดเปิด Order แบบไม่ใส่ SL/TP สำหรับ Broker แบบ ECN; หาก Broker ไม่ยอมรับ SL/TP ตอนเปิด คำสั่งจะจบแบบ Fail-closed
 - EA หนึ่งตัวดูแล Symbol และ Timeframe ของกราฟที่ติดอยู่เพียงชุดเดียว การใช้หลาย Symbol ต้องแยก Channel/EA และต้องกำหนด `ManagedMagicNumbers` ให้ครอบคลุมพอร์ตที่ต้องการคุมร่วมกัน
 - ขอบเขต Concurrency/Portfolio Lock รองรับเฉพาะ MT4 Terminal ที่รันด้วย Windows User เดียวกันและมองเห็น `FILE_COMMON` เดียวกันเท่านั้น การรันบัญชี Broker เดียวกันข้าม VPS/Windows คนละเครื่องไม่แชร์ Lock และยังไม่รองรับ Active Trading พร้อมกัน ต้องกำหนดให้มี Active Execution Owner เพียงเครื่องเดียว

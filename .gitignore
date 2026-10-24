@@ -101,3 +101,8 @@ Desktop.ini
 /frontend/public/sentiment-universe/market.json
 /frontend/sentiment-universe-src/dist/
 /frontend/sentiment-universe-src/.vite/
+# Exact audited release evidence; unrelated binaries/logs remain ignored.
+!integrations/mt5-trade-gateway/MetafxHQTradeGateway.ex5
+!artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/
+!artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/**
+!artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/COMPILE_LOG.log

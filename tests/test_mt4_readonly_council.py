@@ -1536,26 +1536,24 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             self.assertEqual(finished["councilVote"]["decision"], "HOLD")
             self.assertEqual(finished["workStatus"], "completed")
 
-    def test_standalone_status_endpoint_reuses_canonical_prop_report(self) -> None:
-        original_prop_report = self.bridge.prop_report
+    def test_standalone_status_endpoint_reuses_canonical_council_model(self) -> None:
         expected = {
             "schemaVersion": "ai-trade-council-v2",
             "runtimeTruth": "backend_observed_only",
         }
-        observed_prop_ids: list[str] = []
-        try:
-            self.bridge.prop_report = lambda prop_id: (
-                observed_prop_ids.append(prop_id)
-                or {"aiTradeCouncil": expected}
-            )
+        with (
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
+            mock.patch.object(self.bridge, "bridge_status", return_value={}),
+            mock.patch.object(self.bridge, "find_dashboard_connection_profile", return_value={}),
+            mock.patch.object(self.bridge, "_capture_ai_trade_council_read_context", return_value=({}, {}, {}, {})),
+            mock.patch.object(self.bridge, "_ai_trade_council_read_model", return_value=expected) as project,
+            mock.patch.object(self.bridge, "prop_report", side_effect=AssertionError("Unrelated prop archives must not be polled")),
+        ):
             actual = self.bridge.ai_trade_council_status_read_model()
-        finally:
-            self.bridge.prop_report = original_prop_report
-
         self.assertIs(actual, expected)
-        self.assertEqual(
-            observed_prop_ids,
-            [self.bridge.AI_TRADE_COUNCIL_PROP_ID],
+        project.assert_called_once_with(
+            [], [], {}, gateway_snapshot={}, global_metatrader_snapshot={}, metatrader_snapshot={},
         )
         source = BRIDGE_PATH.read_text(encoding="utf-8")
         self.assertIn(

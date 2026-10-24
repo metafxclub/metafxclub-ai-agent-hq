@@ -2524,6 +2524,28 @@ class MT4TradeGatewayTests(unittest.TestCase):
         self.assertEqual(observed["executionState"], "CLOSED")
         self.assertEqual(observed["closedPnl"], 4.25)
 
+    def test_non_object_outcome_is_rejected_without_changing_durable_ack(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        gateway.ingest_ack(self.ack(
+            command, status="EXECUTED", reasonCode="ORDER_ACCEPTED",
+            mode="demo", ticket=123456,
+        ))
+        valid = self.write_outcome(command)
+        before = gateway.read_outcome(str(command["commandId"]))
+        command_before = gateway.read_command(str(command["commandId"]))
+        path = self.outcome_path(command)
+        for payload in (None, True, 42, 0.25, "closePrice", [], ["closePrice"]):
+            with self.subTest(payload=payload):
+                path.write_text(json.dumps(payload), encoding="ascii")
+                with self.assertRaises(self.gateway_module.GatewayValidationError) as raised:
+                    gateway.read_outcome(str(command["commandId"]))
+                self.assertEqual(raised.exception.code, "invalid_mt4_outcome")
+                self.assertEqual(gateway.read_command(str(command["commandId"])), command_before)
+        self.write_outcome(command)
+        self.assertEqual(gateway.read_outcome(str(command["commandId"])), before)
+        self.assertEqual(before, valid)
+
     def test_outcome_lot_must_match_durable_ea_resolved_lot(self) -> None:
         gateway = self.gateway()
         command = gateway.queue_trade_intent(self.intent())["command"]

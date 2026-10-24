@@ -150,13 +150,14 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4",
             "integrations/mt4-trade-gateway/README_TH.md",
             "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5",
+            "integrations/mt5-trade-gateway/MetafxHQTradeGateway.ex5",
             "integrations/mt5-trade-gateway/README_TH.md",
-            "artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/README_TH.md",
-            "artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/AUDIT_TH.md",
-            "artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/SHA256SUMS.txt",
-            "artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/BUILD_LOG.txt",
-            "artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/MANIFEST.json",
-            "artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/COMPILE_PROOF.png",
+            "artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/README_TH.md",
+            "artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/AUDIT_TH.md",
+            "artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/SHA256SUMS.txt",
+            "artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/BUILD_LOG.txt",
+            "artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/MANIFEST.json",
+            "artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/COMPILE_LOG.log",
             "runner/codex_app_server_gateway.py",
             "runner/codex_cli_runner.py",
             "scripts/verify-full-agent-workspace-sentinel.py",
@@ -187,12 +188,12 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
         missing = [path for path in required if not (PROJECT_ROOT / path).is_file()]
         self.assertEqual(missing, [])
 
-    def test_mt5_gateway_release_is_source_only(self) -> None:
+    def test_mt5_gateway_release_contains_only_the_verified_binary(self) -> None:
         gateway_roots = (
             PROJECT_ROOT / "integrations" / "mt5-trade-gateway",
             PROJECT_ROOT
             / "artifacts"
-            / "mt5-trade-gateway-v1.07-visible-compile-readiness",
+            / "mt5-trade-gateway-v1.07-isolated-compile-readiness",
         )
         binaries = sorted(
             path.relative_to(PROJECT_ROOT).as_posix()
@@ -200,7 +201,10 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             for path in gateway_root.rglob("*")
             if path.is_file() and path.suffix.casefold() == ".ex5"
         )
-        self.assertEqual(binaries, [])
+        self.assertEqual(binaries, ["integrations/mt5-trade-gateway/MetafxHQTradeGateway.ex5"])
+        manifest = json.loads((gateway_roots[1] / "MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["releasePolicy"], "source_and_verified_binary")
+        self.assertEqual(manifest["binarySha256"], hashlib.sha256((PROJECT_ROOT / binaries[0]).read_bytes()).hexdigest().upper())
 
     def test_local_visual_qa_captures_are_root_ignored_and_not_distributed(self) -> None:
         captures = (

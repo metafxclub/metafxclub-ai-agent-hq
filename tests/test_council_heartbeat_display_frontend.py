@@ -240,6 +240,120 @@ for(let n=0;n<4;n++) {
 }
 """)
 
+    def readiness_display_fixture(self):
+        return r"""
+globalThis.signalGatewaySizingSummary=()=>({value:'fixed lot'});
+globalThis.signalGatewayAckSizingSummary=()=>'';
+globalThis.signalGatewayModeAccountStatus=()=>({observed:false,mismatch:false});
+globalThis.signalMarketModel=()=>({freshnessMinutes:null,spread:null});
+globalThis.signalSigningKeyCopyState=()=>({ready:false,label:'รอ Key',copyValue:''});
+globalThis.displayStatus=value=>String(value);
+const node=()=>({children:[],dataset:{},append(...children){this.children.push(...children);},
+ appendChild(child){this.children.push(child);},setAttribute(){},addEventListener(){}});
+document.createElement=node;
+const oldReady={selectedCandidateId:'selected',selectedPlatform:'MT5',gatewayMode:'live',
+ gatewayConnected:true,gatewayExecutionGuardReady:true,gatewayExecutionGuardReason:'READY',
+ liveOrderExecutionAvailable:true,orderSubmissionAvailable:true,gatewayLiveArmed:true,
+ singleHostLiveAcknowledged:true,liveSafetyScope:'single_windows_user_file_common_only'};
+const fullLive=overrides=>fullResponse({mode:'live',liveArmed:true,liveOrderExecutionAvailable:true,...overrides});
+async function heartbeat(overrides={}) {
+ state.aiTradeCouncilHeartbeat.nextPollAt=0;
+ const pending=pollAiTradeHeartbeat(); fetches.at(-1).resolve(fullLive(overrides)); await pending;
+}
+function readinessView(runtime) {
+ const strip=node(); renderSignalMarketStrip(strip,report,runtime);
+ const metric=strip.children.find(row=>row.children[0]?.textContent==='สิทธิ์ส่ง Order');
+ const risk=node(); renderSignalRiskList(risk,runtime);
+ const rows=Object.fromEntries(risk.children.map(row=>[row.children[1].textContent,row]));
+ const action={disabled:true,dataset:{}},detail={};
+ renderGatewayControlsOnly({querySelector:s=>s==='[data-signal-gateway-action]'?action:detail},runtime);
+ assert.equal(action.disabled,true); // Display changes cannot enable actions.
+ return {metric,rows,action,live:signalLiveAccountStatus(runtime,{})};
+}
+"""
+
+    def test_current_blocked_heartbeat_vetoes_all_old_ready_labels_without_mutation(self):
+        self.run_js(self.readiness_display_fixture() + r"""
+const before=structuredClone(oldReady), reportBefore=structuredClone(report);
+for(const overrides of [
+ {executionGuardReady:false,executionGuardReason:'RISK_LIMIT'},
+ {killSwitchActive:true}, {connected:false,status:'DISCONNECTED'}]) {
+ await heartbeat(overrides);
+ const view=readinessView(oldReady);
+ assert.equal(view.metric.dataset.tone,'warning');
+ assert.doesNotMatch(view.metric.children[1].textContent,/Execution Guard พร้อม/);
+ assert.doesNotMatch(view.live,/พร้อมส่ง Order บัญชีจริง/);
+ for(const key of ['MetafxHQ AI Council EA','Execution Guard ของ EA','บัญชีจริง'])
+  assert.equal(view.rows[key].dataset.ready,'false',key);
+ assert.equal(view.action.dataset.ready,'false');
+ assert.deepEqual(oldReady,before); assert.deepEqual(report,reportBefore);
+}
+// Readiness for validation alone or for another mode cannot imply live trading.
+for(const overrides of [
+ {mode:'shadow',liveArmed:false,liveOrderExecutionAvailable:false},
+ {mode:'demo',demoOrderExecutionAvailable:true},
+ {liveArmed:false}, {liveOrderExecutionAvailable:false}]) {
+ await heartbeat(overrides); const view=readinessView(oldReady);
+ assert.equal(view.metric.dataset.tone,'warning');
+ assert.equal(view.rows['บัญชีจริง'].dataset.ready,'false');
+ assert.equal(view.action.dataset.ready,'false');
+ assert.doesNotMatch(view.live,/พร้อมส่ง Order บัญชีจริง/);
+ assert.deepEqual(oldReady,before);
+}
+""")
+
+    def test_unavailable_or_unbound_heartbeat_does_not_resurrect_old_ready_labels(self):
+        self.run_js(self.readiness_display_fixture() + r"""
+const before=structuredClone(oldReady);
+for(const overrides of [
+ {observedAt:new Date(clock-21000).toISOString()}, {ageSeconds:21},
+ {selectedCandidateId:'other'}, {selectedPlatform:'mt4'}, {selectionRevision:2},
+ {executionGuardReady:'true'}, {status:''}]) {
+ await heartbeat({...overrides,executionGuardReason:'OTHER_OR_EXPIRED_REASON'});
+ const view=readinessView(oldReady);
+ assert.equal(view.metric.dataset.tone,'warning');
+ assert.match(view.live,/รอรายงานสถานะการเทรด/);
+ assert.doesNotMatch(view.live,/OTHER_OR_EXPIRED_REASON/);
+ for(const key of ['MetafxHQ AI Council EA','Execution Guard ของ EA','บัญชีจริง'])
+  assert.equal(view.rows[key].dataset.ready,'false',key);
+ assert.equal(view.action.dataset.ready,'false');
+}
+await heartbeat();
+state.aiTradeCouncilHeartbeat.nextPollAt=0;
+const failed=pollAiTradeHeartbeat(); fetches.at(-1).reject(new Error('offline')); await failed;
+const unavailable=readinessView(oldReady);
+assert.match(unavailable.live,/รอรายงานสถานะการเทรด/);
+assert.equal(unavailable.action.dataset.ready,'false');
+assert.equal(unavailable.rows['บัญชีจริง'].dataset.ready,'false');
+assert.deepEqual(oldReady,before);
+// Paused/closed polling contributes no observation; report authority is unchanged.
+stopAiTradeHeartbeatPolling(); assert.equal(signalCurrentGatewayStatusDisplay(oldReady),null);
+assert.deepEqual(oldReady,before);
+""")
+
+    def test_ready_heartbeat_never_promotes_report_permissions_and_preserves_matching_ready(self):
+        self.run_js(self.readiness_display_fixture() + r"""
+await heartbeat();
+const blocked={...oldReady,gatewayExecutionGuardReady:false,gatewayExecutionGuardReason:'REPORT_GUARD_BLOCK',
+ liveOrderExecutionAvailable:false,orderSubmissionAvailable:false};
+const before=structuredClone(blocked);
+const blockedView=readinessView(blocked);
+assert.equal(blockedView.metric.dataset.tone,'warning');
+assert.equal(blockedView.rows['Execution Guard ของ EA'].dataset.ready,'false');
+assert.equal(blockedView.rows['บัญชีจริง'].dataset.ready,'false');
+assert.equal(blockedView.action.dataset.ready,'false');
+assert.match(blockedView.live,/REPORT_GUARD_BLOCK/);
+assert.deepEqual(blocked,before);
+// A matching observation may leave an already valid report display intact.
+const readyView=readinessView(oldReady);
+assert.equal(readyView.metric.dataset.tone,'ready');
+assert.equal(readyView.rows['Execution Guard ของ EA'].dataset.ready,'true');
+assert.equal(readyView.rows['บัญชีจริง'].dataset.ready,'true');
+assert.equal(readyView.action.dataset.ready,'true');
+assert.match(readyView.live,/พร้อมส่ง Order บัญชีจริง/);
+assert.equal(readyView.action.disabled,true);
+""")
+
     def test_hide_blur_close_abort_and_single_flight_lifecycle(self):
         self.run_js(r"""
 focused=false; startAiTradeHeartbeatPolling(); await pollAiTradeHeartbeat(); assert.equal(fetches.length,0);

@@ -51,7 +51,8 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         if "function signalTicketText(" not in script:
             script = function_block(self.main, "function signalTicketText(") + "\n" + script
         result = subprocess.run(
-            [self.node_binary(), "-e", script],
+            [self.node_binary(), "-"],
+            input=script,
             check=True,
             capture_output=True,
             text=True,

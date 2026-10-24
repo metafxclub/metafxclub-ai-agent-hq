@@ -1,14 +1,15 @@
-# รายงานตรวจรับ MetafxHQTradeGateway v2.19
+# รายงานตรวจรับ MetafxHQTradeGateway v2.20
 
-วันที่ตรวจรับ: 8 ตุลาคม 2569
+ตรวจวันที่24ตุลาคม2569: Source/EX4ตรงชุดที่ตรวจแล้วและคอมไพล์ด้วย signed MetaEditor5.0.0.2425 ในโฟลเดอร์ audit แยก ได้0errors/0warnings/128ms ไม่ใช้ editor session ที่เปิดอยู่ ไม่มีการติด EA/เปิดterminal/เปลี่ยนบัญชีหรือส่งคำสั่งเทรด ตัวเลขhashและขนาดจริงอยู่ในMANIFEST.jsonและBUILD_LOG.txt
 
-- Source ปัจจุบันและ Source ที่ใช้ Compile เป็นไฟล์เดียวกันทุกไบต์ SHA-256: `CAEA0CB1627636FF3E532B9E2A893CB686CD1D43D4B04B5B48B0F5A48DECC2FD`
-- Compile ผ่าน MetaEditor 5.0.0.2418 แบบมองเห็นบนหน้าจอจริง ผล `0 errors, 0 warnings` ใช้เวลา 107 ms
-- EX4 สร้างใหม่จาก Source ข้างต้นในโฟลเดอร์ staging ของ Terminal ที่เลือก ขนาด 456326 bytes, SHA-256: `66437C7F14167C4510F54E408F05927D1B8F05A0514E8D678062DB3292F6F4A4`
-- ภาพหลักฐาน `COMPILE_PROOF.png` แสดงชื่อไฟล์ เวอร์ชัน 2.19 และผล Compile จริง SHA-256: `F1E3A004177FE9FCC950D3FEF5C7AB02FD3397B69538EE24C0301A102114B1DB`
-- ตรวจ Source hash ซ้ำหลัง Compile แล้วไม่เปลี่ยน และไม่ได้กด Save ใน MetaEditor
-- Static regression `python -m unittest tests.test_mt4_unified_ea` ผ่าน 65 tests กับ Source ปัจจุบัน
-- ระหว่างตรวจรับ Terminal ยังคงเปิดอยู่ ไม่มีการติด EA ลงกราฟ เปลี่ยน Inputs/บัญชี/Gateway Mode/`LiveArmed` หรือส่ง Order/คำสั่งซื้อขาย
-- หลักฐานนี้ยืนยันความพร้อมระดับ Source และ Compile เท่านั้น ไม่ใช่การรับรองผลกำไรหรือยืนยันว่า Broker/บัญชีจริงทุกประเภทจะรับคำสั่ง ต้องผ่าน Shadow และ Demo ของ Broker เป้าหมายก่อน Live
+แก้ P1 ownership: instance ที่แย่ง channel ไม่ได้ไม่สามารถลบ status/capabilities/snapshot หรือเขียนทับ diagnostic ของเจ้าของเดิม Late initialization failureลบเฉพาะpublicationของตัวเองขณะยังถือlockก่อนปล่อยownership
 
-สถานะ: `READY_VISIBLE_METAEDITOR_COMPILED`
+เพิ่ม resident initialization: EAคงติดกราฟแบบATTACHED/BLOCKEDพร้อมreasonเมื่อเริ่มไม่สำเร็จ ทุกexecution/lifecycle entry ถูกreadinesslatchปิดจนinitializationผ่านครบ guard ปัญหาชั่วคราวที่ระบุretryเฉพาะinitializationทุก10วินาที ไม่ retryออเดอร์หรือ replayงานเก่า เมื่อdisconnectล้างtick markerและต้องรอtickใหม่
+
+ชุดauditแรกผ่าน13regressionใหม่+52legacy contracts และnativecompile; releaseนำ65legacy testsทั้งหมดมาปรับให้ตรวจInitializeGatewayแทนOnInit wrapper โดยคงassertionsเดิม และเพิ่มportable resident regression/proof checks ผลreleaseล่าสุด82/82ผ่าน (65legacyครบไม่มีskip +13resident +4compile-proof), 0failures/0errors/0skips; เป็นsource/proof contracts ไม่ใช่native account execution
+
+COMPILE_LOG.logเป็นผลnativeจริงที่ลบเฉพาะabsolute source prefixของเครื่องauditแล้วแปลงเป็นUTF-8; manifestเก็บทั้งnativeLogSha256และpublic logSha256 ไม่มีการใช้ภาพcompileของ2.19มายืนยัน2.20 Process exit codeจริงเป็น1แม้logผ่าน จึงตรวจด้วยfreshEX4และlog/hashร่วมกัน
+
+ไม่ได้ตรวจnativeattachment/demo/live execution: FILE_COMMONเป็นพื้นที่ร่วมทุกterminalของWindowsuserตามเอกสารMQL4 https://docs.mql4.com/files/fileopen การเปิดportableภายใต้userเดิมยังไม่พิสูจน์ว่าแยกnamespaceจากระบบจริงได้ จึงไม่launch/attachเพื่อทดสอบกับเครื่องที่มีออเดอร์ทำงานอยู่ Compile/source testsไม่ใช่คำรับรองbrokerหรือบัญชีจริงทุกประเภท
+
+โฟลเดอร์artifactยังใช้ชื่อlegacy v2.18เพื่อรักษาcompatibilityของพาธติดตั้ง รุ่นจริงคือ2.20ตามsource/manifest/hash ไม่มีการเปิดLiveอัตโนมัติ เมื่อติดตั้งเครื่องใหม่ต้องเลือกterminalของตนและตรวจShadow/Demoกับbrokerเป้าหมายก่อนLive

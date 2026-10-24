@@ -128,14 +128,8 @@ Outcome เดิมที่ไม่มีรายละเอียดต้
 
 เปิด MetaEditor 5 จาก MT5 ที่ต้องการใช้งาน เปิดไฟล์ `MetafxHQTradeGateway.mq5` จากโฟลเดอร์ `MQL5\Experts\Metafxclub\TradeGateway` แล้วกด **Compile** จากนั้นตรวจผลใน Toolbox ว่าไม่มี Error หรือ Warning ก่อนนำ EA ไปวางบนกราฟ
 
-หลักฐานเดิมของรุ่น 1.03: source SHA-256 `42CB8A410DDE98E608307C12FC272513ED30F1E23F5B3267F7DCDF128A69175C` ผ่าน Visible Compile ด้วย MetaEditor64 `5.0.0.6230` ผล `0 errors, 0 warnings` ภายใน 9358 ms บน `AVX2+FMA3` หลักฐานอยู่ที่ `artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/` ซึ่งไม่ใช่หลักฐาน compile ของ source รุ่น 1.04
+หมายเหตุหลักฐาน: รุ่น 1.07 รวม MetafxHQTradeGateway.mq5 และ MetafxHQTradeGateway.ex5 ที่คอมไพล์แบบ isolated portable CLI ด้วย MetaEditor64 5.0.0.6230 ได้ 0 errors / 0 warnings, X64 Regular, 11603 ms หลักฐานและ hash อยู่ที่ artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/ ไม่ใช้ภาพ Compile ของรุ่นเก่ามายืนยันไฟล์ใหม่
 
-หลักฐานรุ่น 1.04 คงอยู่ที่ `artifacts/mt5-trade-gateway-v1.04-visible-compile-readiness/` สำหรับ Source SHA-256 `21BD0EAE671740B67590BE0CD188FBF6649EA154CCE2E1E8E46A27A21F2FC946` เท่านั้น ไม่ใช่หลักฐานของ 1.05
+ตัวติดตั้ง HQ เก็บไฟล์ใน integrations เท่านั้น ไม่คัดลอกลง Experts ไม่ attach EA และไม่เปิด Algo Trading ให้ ผู้ใช้ต้องตั้งค่าและยืนยันบนบัญชีที่ตั้งใจใช้งาน เริ่ม Shadow → Demo ก่อนพิจารณา Live ตามสิทธิ์ของเจ้าของบัญชี
 
-หลักฐานรุ่น 1.05 คงอยู่ที่ `artifacts/mt5-trade-gateway-v1.05-visible-compile-readiness/` เป็นหลักฐานย้อนหลังของรุ่นนั้น ไม่ใช้แทนการตรวจรุ่น 1.06
-
-หลักฐานรุ่น 1.06 คงอยู่ที่ `artifacts/mt5-trade-gateway-v1.06-visible-compile-readiness/` สำหรับการตรวจย้อนหลัง ไม่ใช้ยืนยัน source รุ่น 1.07
-
-รุ่น 1.07 ต้องตรวจหลักฐานที่ `artifacts/mt5-trade-gateway-v1.07-visible-compile-readiness/` ให้ Source/Binary hash ตรงกับไฟล์ที่จะใช้ก่อนติดกราฟ การระบุ path นี้ การเปลี่ยนหมายเลขรุ่น หรือผ่าน harness tests ไม่ถือเป็นหลักฐานว่า MetaEditor compile ผ่าน ต้องมีผล Compile จริงและ Manifest ที่ตรงกันก่อนใช้งาน Release ยังคงเป็นแบบ Source-only และไม่บรรจุ `.ex5`
-
-ผล Compile เป็นเพียง `compile_verified` ยังไม่ใช่หลักฐานว่าได้ส่งคำสั่งจริงบนบัญชี Demo หรือ Live ต้องทดสอบแบบมองเห็นได้บน MT5 Demo อีกครั้งก่อนใช้งานเงินจริง และระบบนี้ไม่ใช่การรับประกันผลกำไร
+รุ่นนี้คงติดกราฟแบบ ATTACHED / BLOCKED เมื่อ Input ไม่ผ่านเพื่อแสดงสาเหตุ จึงไม่ควรใช้คำว่า attached แปลว่ารับคำสั่งเทรดได้ หลัง reinitialize/reconnect ต้องรอ Tick จริง ค่า MaxSnapshotAgeSeconds รับ5–900 วินาที, MaxSignalDriftPoints1–10000จุด และ MaxQuoteAgeSeconds1–120วินาที ไม่เพิ่มค่าเหล่านี้เพื่อหลบ guard
