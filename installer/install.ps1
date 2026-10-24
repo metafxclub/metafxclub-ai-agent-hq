@@ -3561,7 +3561,13 @@ try {
         throw $installError
     }
     finally {
-        Restore-SentimentAfterUpdateFailure
+        # A Sentiment restore failure must not skip the watchdog restore below.
+        try {
+            Restore-SentimentAfterUpdateFailure
+        }
+        catch {
+            Write-Warning "คืนบริการ Sentiment Universe อัตโนมัติไม่สำเร็จ กรุณาเปิด Sentiment Universe ใหม่หลังติดตั้ง"
+        }
         if ($script:rollbackIncomplete) {
             Write-Warning "คง Watchdog ไว้ในสถานะปิด เพราะ Rollback ไม่สมบูรณ์ กรุณาตรวจ Last-good ที่แจ้งไว้ก่อนเปิดระบบ"
         }

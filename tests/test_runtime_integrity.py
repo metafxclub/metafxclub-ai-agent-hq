@@ -473,10 +473,12 @@ class RuntimeIntegrityTests(unittest.TestCase):
             },
             "left_signal_cube": {
                 "functionName": "Daily Market News & FX Bias",
-                "owner": None,
-                "primaryReportType": "fx_news_bias_report",
-                "actions": set(),
-                "direct": True,
+                "owner": "codex_mcp_operator",
+                "primaryReportType": "fx28_trend_report",
+                "actions": {"analyze_fx28_trends"},
+                # Daily news keeps its direct store; FX28 has its own route.
+                "routeKey": "trendReportRoute",
+                "directNewsRoute": True,
             },
             "terminal_workstation": {
                 "functionName": "EA Development Studio",
@@ -505,11 +507,17 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertEqual(set(role["allowedDashboardActions"]), expected["actions"])
                 self.assertIn(expected["primaryReportType"], role["acceptedReportTypes"])
                 self.assertIn(prop_id, report_targets[expected["primaryReportType"]])
-                self.assertEqual(profile["reportRoute"]["targetPropId"], prop_id)
-                self.assertEqual(
-                    profile["reportRoute"]["primaryReportType"],
-                    expected["primaryReportType"],
-                )
+                route = profile[expected.get("routeKey", "reportRoute")]
+                self.assertEqual(route["targetPropId"], prop_id)
+                self.assertEqual(route["primaryReportType"], expected["primaryReportType"])
+                if expected.get("directNewsRoute"):
+                    self.assertEqual(profile["reportRoute"]["targetPropId"], prop_id)
+                    self.assertEqual(profile["reportRoute"]["primaryReportType"], "fx_news_bias_report")
+                    self.assertIsNone(profile["reportRoute"]["missionReportRoute"])
+                    self.assertEqual(profile["reportRoute"]["primaryStore"], "fx-daily-news-direct-store-v1")
+                    self.assertEqual(route["summaryTargetPropId"], "mission_strategy_table")
+                    self.assertIn("missionId", role["workflowTracking"]["missionFields"])
+                    continue
                 if expected.get("direct"):
                     self.assertIsNone(profile["reportRoute"]["missionReportRoute"])
                     self.assertEqual(
@@ -786,7 +794,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         self.assertEqual(role_map["left_signal_cube"]["defaultTab"], "pair_bias")
         self.assertEqual(role_map["left_signal_cube"]["dashboardUx"]["historyReportTabId"], "history")
-        self.assertEqual(role_map["left_signal_cube"]["primaryReportType"], "fx_news_bias_report")
+        self.assertEqual(role_map["left_signal_cube"]["primaryReportType"], "fx28_trend_report")
+        self.assertIn("fx_news_bias_report", role_map["left_signal_cube"]["acceptedReportTypes"])
         self.assertEqual(role_map["left_signal_cube"]["executionPolicy"]["mode"], "analysis_only")
         self.assertFalse(role_map["left_signal_cube"]["executionPolicy"]["liveTradingEnabled"])
         self.assertEqual(role_map["left_analytics_console"]["primaryOwnerAgentId"], "manager")
@@ -1491,6 +1500,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
                         {
                             "implemented",
                             "implemented_read_only_snapshot",
+                            # FX28 closed-bar reads and guarded Codex explanations.
+                            "implemented_read_only",
+                            "implemented_guarded",
                             "implemented_unified_ea_snapshot",
                             "implemented_guarded_manual",
                             "implemented_guarded_read_only",
@@ -1621,7 +1633,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         for prop_id, profile in profiles.items():
             with self.subTest(prop=prop_id):
                 role = role_map[prop_id]
-                primary_type = profile["reportRoute"]["primaryReportType"]
+                route = profile.get("trendReportRoute") if prop_id == "left_signal_cube" else profile["reportRoute"]
+                primary_type = route["primaryReportType"]
+                self.assertEqual(route["targetPropId"], prop_id)
                 self.assertEqual(profile["reportRoute"]["targetPropId"], prop_id)
                 self.assertEqual(primary_type, role["primaryReportType"])
                 self.assertIn(primary_type, role["acceptedReportTypes"])
@@ -1812,7 +1826,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('right_tool_console: "ห้องทดลอง EA"', main)
         self.assertIn('terminal_workstation: "EA Development Studio"', main)
         self.assertIn('left_audit_crystals: "Radar Website Tool"', main)
-        self.assertIn('left_signal_cube: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex"', main)
+        self.assertIn('left_signal_cube: "Sentiment Universe · 32 สินทรัพย์"', main)
         self.assertIn('right_status_crystals: "ศูนย์การเชื่อมต่ออุปกรณ์ HQ"', main)
         self.assertIn('defaultTarget: "right_tool_console"', optimization_block)
         self.assertIn('homeTarget: "right_tool_console"', optimization_block)
@@ -4367,7 +4381,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('$savedStateVersion -lt 3 -and $savedWatchdogMinutes -eq 5', installer)
         self.assertIn('ผูก Watchdog ใหม่ไม่สำเร็จและคืน Task เดิมแล้ว', installer)
         self.assertIn('การติดตั้งแบบ SkipLaunch ต้องใช้พอร์ตเดิม', installer)
-        self.assertIn('finally {\n        if ($script:rollbackIncomplete)', installer)
+        self.assertIn('finally {\n        # A Sentiment restore failure must not skip the watchdog restore below.\n        try {\n            Restore-SentimentAfterUpdateFailure\n        }\n        catch {', installer)
+        self.assertIn('        }\n        if ($script:rollbackIncomplete) {\n            Write-Warning', installer)
         self.assertIn('Restore-BridgeScheduledTask -WasEnabled $bridgeTaskWasEnabled', installer)
         self.assertIn('คง Watchdog ไว้ในสถานะปิด เพราะ Rollback ไม่สมบูรณ์', installer)
         self.assertIn('Enable-ScheduledTask -TaskName $bridgeTaskName', installer)

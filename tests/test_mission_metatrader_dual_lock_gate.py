@@ -367,6 +367,9 @@ class MissionMetatraderDualLockGateTests(unittest.TestCase):
                 self.request_turn_called = True
                 raise AssertionError("request_turn must not be reached")
 
+            def lookup_turn_request(self, *args, **kwargs):
+                return None  # No idempotent replay exists for this new turn.
+
         runtime = RuntimeDouble()
         with (
             mock.patch.object(self.bridge, "_full_agent_runtime", return_value=runtime),
@@ -378,7 +381,8 @@ class MissionMetatraderDualLockGateTests(unittest.TestCase):
                 self.bridge.full_agent_request_turn(
                     "thread-mt-lock-test",
                     {
-                        "message": "Implement the requested crossover logic.",
+                        # Source-only edits no longer need MT locks; terminal work does.
+                        "message": "Compile the EA and run a backtest in the MT5 terminal.",
                         "idempotencyKey": "full-agent-mt-lock-test",
                     },
                 )

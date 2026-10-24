@@ -3,6 +3,7 @@
 Execute through work/run-radar-isolated.py. No collector, Codex process,
 network, terminal or account is accessed by this suite.
 """
+import contextlib
 import copy
 import json
 import tempfile
@@ -16,6 +17,14 @@ import test_radar_batch_repair_lifecycle as lifecycle
 import test_radar_daily_batch_corrective_retry as daily
 
 
+def frozen_clock(moment):
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+    return FrozenClock
+
+
 class Fx28TrendIntegrationTests(unittest.TestCase):
     runtime = lifecycle.RadarBatchRepairLifecycleTests.runtime
     setUp = lifecycle.RadarBatchRepairLifecycleTests.setUp
@@ -27,10 +36,20 @@ class Fx28TrendIntegrationTests(unittest.TestCase):
         cls.runner = fixtures.load_runner("fx28_integration_runner")
         cls.engine = cls.bridge.fx_trend
 
+    def market_day(self, moment=None):
+        # The fixtures are pinned to one closed-bar market day, and the worker
+        # rejects assignments from another day. Keep the bridge on that day
+        # unless a test installs its own clock to exercise expiry or retry.
+        if self.bridge.datetime is not datetime:
+            return contextlib.nullcontext()
+        moment = moment or fixtures.market_snapshot(self.engine)[1] + timedelta(minutes=1)
+        return mock.patch.object(self.bridge, "datetime", frozen_clock(moment))
+
     def tick(self, *, quota_allowed=True, now=None, news=False):
         snapshot, default_now = fixtures.market_snapshot(self.engine)
         now = now or default_now
-        with mock.patch.object(self.bridge, "_fx_trend_collect", return_value=snapshot), \
+        with self.market_day(), \
+             mock.patch.object(self.bridge, "_fx_trend_collect", return_value=snapshot), \
              mock.patch.object(self.bridge, "_fx_trend_news_sources", return_value=[{"url": "https://www.ecb.europa.eu/press/pr/date/2026/html/index.en.html", "title": "ECB statement"}] if news else []), \
              mock.patch.object(self.bridge, "_dashboard_workflow_scheduler_gate", return_value={"allowed": quota_allowed, "reason": "ready" if quota_allowed else "quota_limit_reached", "remainingPercent": 80 if quota_allowed else 0}):
             result = self.bridge.fx_trend_service_tick(now=now)
@@ -70,7 +89,11 @@ class Fx28TrendIntegrationTests(unittest.TestCase):
                 output_limit=int(command[command.index("--output-limit") + 1]))
             return {"ok": True, "exitCode": 0, "processStarted": True, "output": json.dumps(result, ensure_ascii=False)}
 
-        with mock.patch.object(self.bridge, "codex_rate_limits", return_value=self.quota()), \
+        # The isolated Runner below stands in for Codex, so report it ready
+        # instead of depending on the developer machine's Codex login.
+        with self.market_day(), \
+             mock.patch.object(self.bridge, "bridge_status", return_value={"codex": {"status": "ready"}, "time": self.bridge.utc_now()}), \
+             mock.patch.object(self.bridge, "codex_rate_limits", return_value=self.quota()), \
              mock.patch.object(self.bridge, "_collaboration_quota_gate", return_value={"allowed": True, "reason": "ready"}), \
              mock.patch.object(self.bridge, "run_safe_command", side_effect=fake_wrapper), \
              mock.patch.object(self.bridge, "heartbeat_auto_mission"), \

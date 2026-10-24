@@ -142,6 +142,7 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         )
         script = "\n".join([
             "const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;",
+            "const SENTIMENT_UNIVERSE_ENABLED = true; const FX_NEWS_BIAS_PROP_ID = 'left_signal_cube';",
             "const EA_FACTORY_PROP_ID = 'right_server_racks';",
             "const EA_OPTIMIZATION_LAB_PROP_ID = 'right_tool_console';",
             "const EA_OPTIMIZATION_LAB_ACTIVE_POLL_MS = 3000;",
@@ -204,18 +205,21 @@ class FrontendPollingStabilityTests(unittest.TestCase):
             "let resolveFetch = null;",
             "let renderCount = 0;",
             "const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;",
+            "const SENTIMENT_UNIVERSE_ENABLED = true; const FX_NEWS_BIAS_PROP_ID = 'left_signal_cube';",
             "const state = { propReports: {}, propReportLoadedAt: {}, propReportLoadState: {}, panelObject: null };",
             "const fetchJson = async () => { fetchCount += 1; return await new Promise((resolve) => { resolveFetch = resolve; }); };",
             "const renderOperationalSidebars = () => { renderCount += 1; };",
             "const selectObject = () => {};",
             load_report,
             "(async () => {",
-            "  const first = loadPropReport('left_signal_cube');",
-            "  const second = loadPropReport('left_signal_cube');",
+            "  // Sentiment Universe owns left_signal_cube: legacy FX report reads stay retired.",
+            "  if (await loadPropReport('left_signal_cube') !== null || fetchCount !== 0) throw new Error('retired FX report was fetched');",
+            "  const first = loadPropReport('left_server_racks');",
+            "  const second = loadPropReport('left_server_racks');",
             "  if (fetchCount !== 1) throw new Error(`expected one fetch, got ${fetchCount}`);",
-            "  resolveFetch({ ok: true, propId: 'left_signal_cube' });",
+            "  resolveFetch({ ok: true, propId: 'left_server_racks' });",
             "  const values = await Promise.all([first, second]);",
-            "  process.stdout.write(JSON.stringify({ fetchCount, renderCount, pending: propReportInFlight.size, loadState: state.propReportLoadState.left_signal_cube?.status, values }));",
+            "  process.stdout.write(JSON.stringify({ fetchCount, renderCount, pending: propReportInFlight.size, loadState: state.propReportLoadState.left_server_racks?.status, values }));",
             "})().catch((error) => { console.error(error); process.exit(1); });",
         ])
         result = subprocess.run(
@@ -238,14 +242,15 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         script = "\n".join([
             "const propReportInFlight = new Map();",
             "const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;",
+            "const SENTIMENT_UNIVERSE_ENABLED = true; const FX_NEWS_BIAS_PROP_ID = 'left_signal_cube';",
             "const state = { propReports: {}, propReportLoadedAt: {}, propReportLoadState: {}, panelObject: null };",
             "const fetchJson = async () => { throw new Error('transport details must not reach the UI'); };",
             "const renderOperationalSidebars = () => {};",
             "const selectObject = () => {};",
             load_report,
             "(async () => {",
-            "  const value = await loadPropReport('left_signal_cube');",
-            "  process.stdout.write(JSON.stringify({ value, pending: propReportInFlight.size, loadState: state.propReportLoadState.left_signal_cube }));",
+            "  const value = await loadPropReport('left_server_racks');",
+            "  process.stdout.write(JSON.stringify({ value, pending: propReportInFlight.size, loadState: state.propReportLoadState.left_server_racks }));",
             "})().catch((error) => { console.error(error); process.exit(1); });",
         ])
         result = subprocess.run(

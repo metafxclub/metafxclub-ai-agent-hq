@@ -63,7 +63,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             )
 
     def test_fx_default_presentation_has_assessments_news_and_backend_history(self):
-        self.assertIn('left_signal_cube: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex"', self.main)
+        self.assertIn('left_signal_cube: "Sentiment Universe · 32 สินทรัพย์"', self.main)
         self.assertIn(
             'const FX_NEWS_BIAS_PRESENTATION_TAB_IDS = Object.freeze(["pair_bias", "today", "history"]);',
             self.main,

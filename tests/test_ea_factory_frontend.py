@@ -321,6 +321,7 @@ class EaFactoryFrontendTests(unittest.TestCase):
         script = "\n".join([
             "const assert=require('node:assert/strict');",
             "const EA_FACTORY_PROP_ID='right_server_racks',EA_OPTIMIZATION_LAB_PROP_ID='right_tool_console',AI_TRADE_COUNCIL_PROP_ID='left_analytics_console';",
+            "const FX_NEWS_BIAS_PROP_ID='left_signal_cube';let sentimentDisposals=0;const disposeSentimentUniverse=()=>{sentimentDisposals++;};",
             "const heartbeatController=new AbortController(),cancelledTimers=[];",
             "const state={modal:{open:true,id:EA_FACTORY_PROP_ID,type:'prop',workflowTabs:{},workflowVoice:{},eaFactory:{explicitPageId:''}},propReports:{},aiTradeCouncilHeartbeat:{timer:7,controller:heartbeatController,data:{stale:true},status:'ready',nextPollAt:100}};",
             "const tabs=[{id:'source'},{id:'progress'},{id:'result'}];",

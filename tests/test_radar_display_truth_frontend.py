@@ -41,6 +41,7 @@ class RadarDisplayTruthFrontendTests(unittest.TestCase):
 const assert=require('node:assert/strict');
 const INDICATOR_SCOUT_DEFAULT_TIME='09:00',INDICATOR_SCOUT_TIMEZONE='Asia/Bangkok',INDICATOR_SCOUT_EXPECTED_BATCH_SIZE=3;
 const INDICATOR_SCOUT_PROP_ID='left_audit_crystals',PROP_REPORT_FETCH_TIMEOUT_MS=20000,OPEN_PROP_REPORT_POLL_TTL_MS=1000;
+const SENTIMENT_UNIVERSE_ENABLED=true,FX_NEWS_BIAS_PROP_ID='left_signal_cube';
 const EA_FACTORY_PROP_ID='right_server_racks',EA_OPTIMIZATION_LAB_PROP_ID='terminal_workstation';
 const EA_OPTIMIZATION_LAB_ACTIVE_POLL_MS=1000,EA_OPTIMIZATION_LAB_IDLE_POLL_MS=1000;
 const now='2026-10-23T03:08:00Z';
@@ -315,8 +316,8 @@ assert.equal(domain.readState.hasData,false);assert.equal(getRadarTodayRunState(
 
     def test_other_dashboard_failure_does_not_trigger_radar_render(self):
         self.probe("""
-await loadPropReport('left_signal_cube');assert.equal(rendered.length,0);
-assert.equal(state.propReportLoadState.left_signal_cube.status,'error');
+await loadPropReport('left_server_racks');assert.equal(rendered.length,0);
+assert.equal(state.propReportLoadState.left_server_racks.status,'error');
 """)
 
 

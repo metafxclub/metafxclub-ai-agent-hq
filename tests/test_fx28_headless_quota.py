@@ -24,6 +24,7 @@ class Fx28HeadlessQuotaTests(unittest.TestCase):
                  mock.patch.object(self.bridge, "_fx_trend_collect", return_value=snapshot), \
                  mock.patch.object(self.bridge, "_fx_trend_news_sources", return_value=[]), \
                  mock.patch.object(self.bridge, "mission_worker_read_model", return_value={"operational": True}), \
+                 mock.patch.object(self.bridge, "bridge_status", return_value={"codex": {"status": "ready"}}), \
                  mock.patch.object(self.bridge, "codex_rate_limits", return_value=daily.RadarDailyBatchCorrectiveRetryTests.quota()) as refresh:
                 self.assertEqual(self.bridge.peek_codex_rate_limits()["status"], "not_checked")
                 # Use the actual admission and quota gates; no browser, queued
@@ -46,6 +47,7 @@ class Fx28HeadlessQuotaTests(unittest.TestCase):
                  mock.patch.object(self.bridge, "_fx_trend_collect", return_value=snapshot), \
                  mock.patch.object(self.bridge, "_fx_trend_news_sources", return_value=[]), \
                  mock.patch.object(self.bridge, "mission_worker_read_model", return_value={"operational": True}), \
+                 mock.patch.object(self.bridge, "bridge_status", return_value={"codex": {"status": "ready"}}), \
                  mock.patch.object(self.bridge, "codex_rate_limits", side_effect=[{"ok": False, "status": "unavailable"}, daily.RadarDailyBatchCorrectiveRetryTests.quota()]) as refresh:
                 blocked = self.bridge.fx_trend_service_tick(now=now)
                 self.assertEqual(blocked["ai"]["status"], "deferred")

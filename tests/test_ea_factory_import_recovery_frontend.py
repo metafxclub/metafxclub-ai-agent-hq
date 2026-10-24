@@ -252,6 +252,7 @@ assert.equal(eaFactoryPhaseGateProgress({}).shouldPoll,true);
         self.run_js(poll + r"""
 const document={visibilityState:'visible',hasFocus:()=>true,activeElement:null};
 const OPEN_PROP_REPORT_POLL_TTL_MS=30000; const EA_OPTIMIZATION_LAB_PROP_ID='other-lab';
+const SENTIMENT_UNIVERSE_ENABLED=true, FX_NEWS_BIAS_PROP_ID='left_signal_cube';
 const EA_OPTIMIZATION_LAB_ACTIVE_POLL_MS=3000, EA_OPTIMIZATION_LAB_IDLE_POLL_MS=30000;
 const eaOptimizationLabSessionIsActive=()=>false, renderGameModal=()=>{};
 const getModalSubject=()=>({}), getPropertyRole=()=>({});

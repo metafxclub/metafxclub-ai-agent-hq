@@ -390,6 +390,7 @@ assert.equal(session.confirmationRequest, null);
         self.run_node(loader + """
 const propReportInFlight = new Map();
 const PROP_REPORT_FETCH_TIMEOUT_MS = 1000;
+const SENTIMENT_UNIVERSE_ENABLED = true, FX_NEWS_BIAS_PROP_ID = 'left_signal_cube';
 const renderOperationalSidebars = () => {};
 const selectObject = () => {};
 state.propReports = {[TRADING_RESEARCH_LAB_PROP_ID]: report};

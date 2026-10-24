@@ -1543,6 +1543,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
             for evidence_kind in action.get("evidenceRequired", [])
         }
         reviewed = {
+            "28_pair_explanations",
             "28_pair_rows",
             "acceptance_criteria",
             "adapter_status_truth",
@@ -1561,6 +1562,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
             "frontend_safe_candidate_registry",
             "local_settings_record",
             "local_terminal_selection_record",
+            "locked_price_snapshot",
             "no_unverified_profit_claim",
             "overfit_guard",
             "parameter_plan",
@@ -1607,6 +1609,10 @@ class EquipmentOutputContractTests(unittest.TestCase):
         # field so the semantic verifier can evaluate truth rather than trusting
         # the evidenceKinds label alone.
         required_any_output = {
+            # FX28 output is checked against the Backend-locked snapshot and
+            # assignment by _fx_trend_validate_result before completion.
+            "28_pair_explanations": {"fxTrendAnalysis"},
+            "locked_price_snapshot": {"fxTrendAnalysis"},
             "28_pair_rows": {"pairBias"},
             "acceptance_criteria": {"acceptanceCriteria"},
             "backend_observed_at": {"checkedAt", "backendObservedAt"},

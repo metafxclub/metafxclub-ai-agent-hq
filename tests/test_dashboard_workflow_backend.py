@@ -396,6 +396,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     {
                         "refresh_daily_market_news",
                         "save_news_bias_schedule",
+                        # Daily FX28 explanation of Backend-locked closed bars.
+                        "analyze_fx28_trends",
                     },
                 )
                 continue

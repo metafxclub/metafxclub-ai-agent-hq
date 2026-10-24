@@ -702,6 +702,7 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
         factory_loader = function_source(self.main, "loadEaFactoryReadModel")
         script = "\n".join([
             "const PROP_REPORT_FETCH_TIMEOUT_MS=1000; const EA_FACTORY_PROP_ID='right_server_racks';",
+            "const SENTIMENT_UNIVERSE_ENABLED=true, FX_NEWS_BIAS_PROP_ID='left_signal_cube';",
             "const propReportInFlight=new Map(); let eaFactoryReadModelInFlight=null;",
             "const state={propReportLoadState:{},propReports:{},propReportLoadedAt:{},panelObject:null,eaFactoryReadModel:{inFlight:false,lastLoadedAt:0,payload:null},modal:{open:false,id:null,eaFactory:{inFlight:false,stageId:''}}};",
             "let propCalls=0; let factoryCalls=0; let resolveProp; let resolveFactory;",

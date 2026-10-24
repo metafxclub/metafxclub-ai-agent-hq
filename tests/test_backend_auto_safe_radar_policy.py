@@ -1620,6 +1620,20 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
                     },
                 )
 
+                if self.bridge.radar_publication.is_v2(mission):
+                    # Scheduled Radar now publishes V2; a V2 terminal result is
+                    # final and never takes the legacy exact-output repair path.
+                    self.assertEqual(
+                        self.bridge.reconcile_current_day_public_research_output_repairs(),
+                        0,
+                    )
+                    unchanged = self.bridge.find_mission(mission["id"])
+                    self.assertEqual(unchanged["status"], case["status"])
+                    self.assertNotIn("outputContractRepair", unchanged)
+                    schedule = self.bridge.load_dashboard_workflow_settings()[case["settingsKey"]]
+                    self.assertEqual(schedule["dailyExecutionCount"], 1)
+                    self.assertEqual(schedule["dailyExecutionSlotKeys"], [slot_key])
+                    continue
                 self.assertEqual(
                     self.bridge.reconcile_current_day_public_research_output_repairs(),
                     1,

@@ -44,6 +44,7 @@ const context = {
   state, WORKFLOW_DASHBOARD_HISTORY_TAB_IDS: new Set(['history']),
   EA_FACTORY_PROP_ID: 'right_server_racks', EA_OPTIMIZATION_LAB_PROP_ID: 'right_tool_console',
   TRADING_RESEARCH_LAB_PROP_ID: 'left_server_racks', FX_NEWS_BIAS_PROP_ID: 'left_signal_cube', INDICATOR_SCOUT_PROP_ID: 'left_audit_crystals',
+  SENTIMENT_UNIVERSE_ENABLED: true, renderSentimentUniverse: () => { throw new Error('Sentiment Universe must render only for its own equipment'); },
   els: {workflowDashboardContent: content, workflowResultsPanel: resultPanel},
   getModalSubject: () => portal, getPropertyRole: () => ({}),
   isWorkflowDashboardPropId: id => id === portal.id,

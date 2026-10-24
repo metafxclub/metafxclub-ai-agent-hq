@@ -122,10 +122,9 @@ class BackendQueueHistoryRegressionTests(unittest.TestCase):
         )
         self.assertEqual(model["state"]["pending"]["queuePosition"], 1)
         self.assertEqual(model["state"]["pending"]["queueDepth"], 2)
-        self.assertEqual(
-            model["backlogPolicy"]["queueOrder"],
-            "current_closed_bar_then_audit_fifo",
-        )
+        # Council runs only the newest closed bar; it never backfills audits.
+        self.assertEqual(model["backlogPolicy"]["queueOrder"], "new_closed_bar_only")
+        self.assertEqual(model["backlogPolicy"]["policy"], "new_closed_bar_only_no_backfill")
         self.assertEqual(model["backlogPolicy"]["staleTradeCommand"], "blocked")
 
     def test_history_endpoint_rejects_invalid_cursor_instead_of_restarting_page_one(self) -> None:
