@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.03"
+#property version   "1.07"
 #property description "Metafxclub AI Agent HQ Unified MT5 Gateway"
 #property description "Snapshot publisher plus guarded FILE_COMMON command adapter"
 
@@ -39,8 +39,9 @@ input ENUM_MONEY_MANAGEMENT_MODE MoneyManagementMode = MONEY_MANAGEMENT_FIXED_LO
 input double FixedLot = 0.01;
 input double RiskPercent = 1.0;
 input ENUM_RISK_CAPITAL_BASE RiskCapitalBase = RISK_CAPITAL_EQUITY;
-input double EstimatedCommissionPerLot = 0.0;
-input bool CommissionFreeAccountConfirmed = false;
+// Legacy Inputs retained for saved-set compatibility; ignored by v1.05 sizing.
+input double EstimatedCommissionPerLot = 0.0; // Legacy fee estimate (ignored in v1.05)
+input bool CommissionFreeAccountConfirmed = false; // Legacy fee confirmation (ignored in v1.05)
 input int MagicNumber = 4186001;
 input string ManagedMagicNumbers = "4186001";
 input int PollIntervalSeconds = 1;
@@ -86,7 +87,7 @@ string STATUS_SCHEMA = "metafx-hq-mt4-status-v5";
 string SNAPSHOT_SCHEMA = "metafx-hq-mt4-snapshot-v1";
 string EXECUTION_ATTEMPT_SCHEMA = "metafx-hq-mt5-execution-attempt-v1";
 string EA_PROFILE = "special";
-string EA_VERSION = "1.03";
+string EA_VERSION = "1.07";
 const int ATOMIC_WRITE_MAX_ATTEMPTS = 3;
 const int ATOMIC_WRITE_BACKOFF_MILLIS = 25;
 const int LEGACY_BACKFILL_MAX_ACKS = 256;
@@ -114,7 +115,9 @@ string g_portfolio_policy_digest = "";
 int g_portfolio_policy_lease_open_error = 0;
 int g_portfolio_policy_lease_scan_error = 0;
 int g_portfolio_policy_lease_expanded_path_length = 0;
-uint g_last_tick_millis = 0;
+bool g_tick_observed = false;
+ulong g_last_tick_millis = 0;
+datetime g_last_tick_server_time = 0;
 int g_risk_cache_at = 0;
 int g_cached_managed_positions = 0;
 double g_cached_managed_lots = 0.0;
@@ -129,9 +132,15 @@ bool g_cached_execution_guard_ready = false;
 string g_cached_execution_guard_reason = "STARTING";
 bool g_cached_history_telemetry_ready = false;
 int g_last_outcome_refresh_at = 0;
+long g_outcome_search_handle = INVALID_HANDLE;
+string g_outcome_search_filename = "";
+string g_completed_outcome_keys[];
+string g_completed_outcome_payloads[];
+int g_completed_outcome_next = 0;
 bool g_ack_has_execution_evidence = false;
 double g_ack_filled_price = 0.0;
 double g_ack_filled_slippage_points = 0.0;
+bool g_ack_filled_slippage_known = false;
 double g_ack_actual_stop_loss = 0.0;
 double g_ack_actual_take_profit = 0.0;
 int g_ack_actual_magic_number = 0;
@@ -147,6 +156,24 @@ string g_trusted_signing_key_id = "";
 bool g_signing_key_pinned = false;
 string g_last_signature_verification_status = "NOT_CHECKED";
 string g_init_warning_code = "";
+bool g_runtime_initialized = false;
+bool g_init_blocked = false;
+string g_init_failure_stage = "";
+string g_init_failure_reason = "";
+int g_init_failure_return_code = INIT_FAILED;
+int g_last_init_diagnostic_at = 0;
+bool g_diagnostic_timer_ready = false;
+string g_invalid_input_field = "";
+double g_invalid_input_value = 0.0;
+double g_invalid_input_minimum = 0.0;
+double g_invalid_input_maximum = 0.0;
+bool g_invalid_input_has_minimum = true;
+bool g_invalid_input_has_maximum = true;
+bool g_invalid_input_minimum_inclusive = true;
+bool g_invalid_input_maximum_inclusive = true;
+string g_invalid_input_constraint = "range";
+// The current backend emits 30-second command and heartbeat packets.
+const int BACKEND_PACKET_TTL_SECONDS = 30;
 bool g_ack_has_sizing_evidence = false;
 double g_ack_reported_volume = 0.0;
 string g_ack_position_sizing_mode = "";
@@ -1041,6 +1068,12 @@ string ExecutionAttemptPath(const string command_id)
 }
 
 
+string OutcomeCommandPath(const string command_id)
+{
+   return BasePath() + "\\processed\\outcome-commands\\" + command_id + ".json";
+}
+
+
 string LegacyLastOrderBarPath()
 {
    return BasePath() + "\\state\\last-order-bar.txt";
@@ -1364,6 +1397,7 @@ void EnsureFolders()
    EnsureFolder(BasePath() + "\\processed");
    EnsureFolder(BasePath() + "\\processed\\commands");
    EnsureFolder(BasePath() + "\\processed\\idempotency");
+   EnsureFolder(BasePath() + "\\processed\\outcome-commands");
    EnsureFolder(BasePath() + "\\state");
    EnsureFolder(BasePath() + "\\audit");
    EnsureFolder(BasePath() + "\\outcomes");
@@ -2252,10 +2286,9 @@ bool BuildPortfolioPolicyCanonical(
    canonical += "|riskPercent=" +
       DoubleToString(EffectiveRiskPercent(), 8);
    canonical += "|riskCapitalBase=" + RiskCapitalBaseName();
+   canonical += "|riskCostBasis=" + RiskCostBasisName();
    canonical += "|estimatedCommissionPerLot=" +
       DoubleToString(EffectiveEstimatedCommissionPerLot(), 8);
-   canonical += "|commissionFreeAccountConfirmed=" +
-      (CommissionFreeAccountConfirmed ? "true" : "false");
    canonical += "|maxManagedOpenPositions=" +
       IntegerToString(MaxManagedOpenPositions);
    canonical += "|maxManagedTotalLots=" +
@@ -2800,17 +2833,31 @@ bool SignedCommandVerificationAvailable()
 }
 
 
+bool GatewayInitializationReady()
+{
+   return g_runtime_initialized && !g_init_blocked &&
+      g_channel_lock_handle != INVALID_HANDLE;
+}
+
+
+string InitializationBlockReason()
+{
+   if(g_init_blocked && StringLen(g_init_failure_reason) > 0)
+      return g_init_failure_reason;
+   return "GATEWAY_INITIALIZATION_INCOMPLETE";
+}
+
+
 string BuildCapabilitiesJson()
 {
+   bool initialized = GatewayInitializationReady();
    string signing_reason = "";
-   bool signed_ready = RefreshSigningReadiness(signing_reason);
+   bool signed_ready = initialized && RefreshSigningReadiness(signing_reason);
    bool demo_account = IsDemo();
-   bool demo_ready = GatewayMode == GATEWAY_DEMO &&
+   bool demo_ready = initialized && GatewayMode == GATEWAY_DEMO &&
       demo_account && signed_ready;
    bool explicit_live_pin = StringLen(g_trusted_signing_key_id) > 0 &&
       g_trusted_signing_key_id == g_active_signing_key_id;
-   bool live_commission_policy_confirmed =
-      LiveCommissionPolicyConfirmed();
    bool live_symbol_exact_allowlist_confirmed =
       LiveSymbolExactAllowlistConfirmed();
    string live_owner_reason = "";
@@ -2818,13 +2865,14 @@ string BuildCapabilitiesJson()
    // LIVE is deliberately limited to one Windows user on one host. FILE_COMMON
    // cannot coordinate another user, machine, or VPS, so the operator must
    // explicitly acknowledge that boundary before this local owner lock counts.
-   bool live_ready = GatewayMode == GATEWAY_LIVE &&
+   bool live_ready = initialized && GatewayMode == GATEWAY_LIVE &&
       !demo_account && LiveArmed && SingleHostLiveAcknowledged &&
       signed_ready && explicit_live_pin &&
-      live_commission_policy_confirmed &&
       live_symbol_exact_allowlist_confirmed && live_owner_ready;
    string live_block_reason = "";
-   if(GatewayMode != GATEWAY_LIVE)
+   if(!initialized)
+      live_block_reason = InitializationBlockReason();
+   else if(GatewayMode != GATEWAY_LIVE)
       live_block_reason = "LIVE_MODE_NOT_SELECTED";
    else if(demo_account)
       live_block_reason = "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT";
@@ -2836,8 +2884,6 @@ string BuildCapabilitiesJson()
       live_block_reason = signing_reason;
    else if(!explicit_live_pin)
       live_block_reason = "LIVE_SIGNING_KEY_NOT_PINNED";
-   else if(!live_commission_policy_confirmed)
-      live_block_reason = "LIVE_COMMISSION_POLICY_UNCONFIRMED";
    else if(!live_symbol_exact_allowlist_confirmed)
       live_block_reason = "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST";
    else if(!live_owner_ready)
@@ -2850,7 +2896,7 @@ string BuildCapabilitiesJson()
    payload += "\"accountMode\":" + JsonString(AccountModeName()) + ",";
    payload += "\"commandSchemaVersion\":" + JsonString(COMMAND_SCHEMA) + ",";
    payload += "\"ackSchemaVersion\":" + JsonString(ACK_SCHEMA) + ",";
-   payload += "\"shadowValidationAvailable\":true,";
+   payload += "\"shadowValidationAvailable\":" + JsonBoolean(initialized) + ",";
    payload += "\"signedEnvelopeSchemaVersion\":" + JsonString(SIGNED_ENVELOPE_SCHEMA) + ",";
    payload += "\"signatureAlgorithm\":" + JsonString(SIGNATURE_ALGORITHM) + ",";
    payload += "\"demoExecutionAvailable\":" + JsonBoolean(demo_ready) + ",";
@@ -2867,7 +2913,7 @@ string BuildCapabilitiesJson()
    payload += "\"historyScope\":\"MT5_SELECTED_DEAL_HISTORY\",";
    payload += "\"managedMagicNumbers\":" + JsonString(ManagedMagicNumbers) + ",";
    payload += "\"positionLifecycleMode\":" + JsonString(LifecycleModeName()) + ",";
-   payload += "\"outcomeTracking\":false,";
+   payload += "\"outcomeTracking\":true,";
    payload += "\"postOrderVerification\":true,";
    payload += "\"executionUnknownRecovery\":\"EA_RECONCILE_OR_BACKEND_QUARANTINE\"";
    payload += "}";
@@ -2877,6 +2923,8 @@ string BuildCapabilitiesJson()
 
 bool WriteCapabilitiesSnapshot()
 {
+   if(g_init_blocked || g_channel_lock_handle == INVALID_HANDLE)
+      return false;
    return WriteCommonTextAtomic(CapabilitiesPath(), BuildCapabilitiesJson());
 }
 
@@ -2886,6 +2934,7 @@ void ResetAckExecutionEvidence()
    g_ack_has_execution_evidence = false;
    g_ack_filled_price = 0.0;
    g_ack_filled_slippage_points = 0.0;
+   g_ack_filled_slippage_known = false;
    g_ack_actual_stop_loss = 0.0;
    g_ack_actual_take_profit = 0.0;
    g_ack_actual_magic_number = 0;
@@ -2930,7 +2979,8 @@ void SetAckSizingEvidence(
 string BuildStatusJson()
 {
    UpdateRiskTelemetry(false);
-   bool signed_ready = SignedCommandVerificationAvailable();
+   bool initialized = GatewayInitializationReady();
+   bool signed_ready = initialized && SignedCommandVerificationAvailable();
    bool demo_account = IsDemo();
    string normalized_managed_magics = "";
    string normalized_allowed_symbols = "";
@@ -2946,7 +2996,7 @@ string BuildStatusJson()
          normalized_allowed_timeframes
       );
    bool portfolio_policy_ready =
-      status_config_valid &&
+      initialized && status_config_valid &&
       g_portfolio_policy_lease_handle != INVALID_HANDLE &&
       IsSha256Hex(g_portfolio_policy_digest);
    string account_binding_id = "";
@@ -2957,6 +3007,11 @@ string BuildStatusJson()
       g_cached_execution_guard_ready = false;
       g_cached_execution_guard_reason =
          "ACCOUNT_IDENTITY_BINDING_UNAVAILABLE";
+   }
+   if(!initialized)
+   {
+      g_cached_execution_guard_ready = false;
+      g_cached_execution_guard_reason = InitializationBlockReason();
    }
    string payload = "{";
    payload += "\"schemaVersion\":" + JsonString(STATUS_SCHEMA) + ",";
@@ -2980,6 +3035,7 @@ string BuildStatusJson()
       JsonNumber(EffectiveRiskPercent(), 8) + ",";
    payload += "\"riskCapitalBase\":" +
       JsonString(RiskCapitalBaseName()) + ",";
+   payload += "\"riskCostBasis\":" + JsonString(RiskCostBasisName()) + ",";
    payload += "\"estimatedCommissionPerLot\":" +
       JsonNumber(EffectiveEstimatedCommissionPerLot(), 8) + ",";
    payload += "\"commissionFreeAccountConfirmed\":" +
@@ -3043,12 +3099,17 @@ string BuildStatusJson()
 
 bool WriteStatusSnapshot()
 {
+   if(g_init_blocked || g_channel_lock_handle == INVALID_HANDLE)
+      return false;
    return WriteCommonTextAtomic(StatusPath(), BuildStatusJson());
 }
 
 
 void InvalidatePublishedRuntimeState()
 {
+   // A failed second attachment must never remove the active owner's files.
+   if(g_channel_lock_handle == INVALID_HANDLE || !IsSafeChannel(SnapshotChannel))
+      return;
    // A chart symbol/timeframe change deinitializes the EA before the new chart
    // initializes. Remove the old READY/status/snapshot immediately so the
    // backend cannot briefly bind a fresh command to the previous chart.
@@ -3186,7 +3247,9 @@ string BuildAckJson(
    if(g_ack_has_execution_evidence)
    {
       payload += "\"filledPrice\":" + JsonNumber(g_ack_filled_price, _Digits) + ",";
-      payload += "\"filledSlippagePoints\":" + JsonNumber(g_ack_filled_slippage_points, 2) + ",";
+      payload += "\"filledSlippageKnown\":" + JsonBoolean(g_ack_filled_slippage_known) + ",";
+      payload += "\"filledSlippagePoints\":" +
+         (g_ack_filled_slippage_known ? JsonNumber(g_ack_filled_slippage_points, 2) : "null") + ",";
       payload += "\"actualStopLoss\":" + JsonNumber(g_ack_actual_stop_loss, _Digits) + ",";
       payload += "\"actualTakeProfit\":" + JsonNumber(g_ack_actual_take_profit, _Digits) + ",";
       payload += "\"actualMagicNumber\":" + IntegerToString(g_ack_actual_magic_number) + ",";
@@ -4621,12 +4684,71 @@ bool CurrentMarginLevelPercent(double &margin_level_percent)
 }
 
 
+void ResetObservedTick()
+{
+   g_tick_observed = false;
+   g_last_tick_millis = 0;
+   g_last_tick_server_time = 0;
+   g_risk_cache_at = 0;
+}
+
+
+void ObserveChartTick()
+{
+   MqlTick tick;
+   ZeroMemory(tick);
+   datetime server_now = TimeCurrent();
+   if(!IsConnected() || !SymbolInfoTick(_Symbol, tick) ||
+      !MathIsValidNumber(tick.bid) || !MathIsValidNumber(tick.ask) ||
+      tick.bid <= 0.0 || tick.ask <= tick.bid || tick.time <= 0 ||
+      server_now < tick.time || server_now - tick.time > MaxQuoteAgeSeconds)
+   {
+      ResetObservedTick();
+      return;
+   }
+   // Called only by OnTick: timer reads of a cached quote cannot renew this age.
+   if(!g_tick_observed || g_cached_execution_guard_reason == "QUOTE_NOT_OBSERVED" ||
+      g_cached_execution_guard_reason == "QUOTE_STALE_OR_FUTURE" ||
+      g_cached_execution_guard_reason == "TERMINAL_NOT_CONNECTED")
+      g_risk_cache_at = 0;
+   g_last_tick_millis = GetTickCount64();
+   g_last_tick_server_time = tick.time;
+   g_tick_observed = true;
+}
+
+
+bool ValidateObservedTickAge(const MqlTick &tick, string &reason)
+{
+   if(!IsConnected())
+   {
+      ResetObservedTick();
+      reason = "TERMINAL_NOT_CONNECTED";
+      return false;
+   }
+   if(!g_tick_observed)
+   {
+      reason = "QUOTE_NOT_OBSERVED";
+      return false;
+   }
+   ulong elapsed_now = GetTickCount64();
+   if(elapsed_now < g_last_tick_millis ||
+      elapsed_now - g_last_tick_millis > (ulong)MaxQuoteAgeSeconds * 1000 ||
+      tick.time < g_last_tick_server_time)
+   {
+      reason = "QUOTE_STALE_OR_FUTURE";
+      return false;
+   }
+   return true;
+}
+
+
 bool SnapshotMarketOpen(
    const MqlTick &tick,
    const bool tick_available
 )
 {
-   if(!IsConnected() || !tick_available ||
+   string quote_reason = "";
+   if(!tick_available || !ValidateObservedTickAge(tick, quote_reason) ||
       tick.bid <= 0.0 || tick.ask <= tick.bid)
       return false;
    ENUM_SYMBOL_TRADE_MODE trade_mode =
@@ -4794,6 +4916,8 @@ bool BuildSnapshotJson(string &payload)
 
 bool WriteSnapshot()
 {
+   if(g_init_blocked || g_channel_lock_handle == INVALID_HANDLE)
+      return false;
    g_last_snapshot_attempt_at = NowUtc();
    string payload = "";
    bool ok = BuildSnapshotJson(payload) &&
@@ -4848,19 +4972,15 @@ double EffectiveRiskPercent()
 
 double EffectiveEstimatedCommissionPerLot()
 {
-   if(!MathIsValidNumber(EstimatedCommissionPerLot))
-      return 0.0;
-   return NormalizeDouble(EstimatedCommissionPerLot, 8);
+   // New command sizing excludes commission. Recovery still uses the immutable
+   // estimate recorded in each earlier execution attempt, never this Input.
+   return 0.0;
 }
 
 
-bool LiveCommissionPolicyConfirmed()
+string RiskCostBasisName()
 {
-   return MathIsValidNumber(EstimatedCommissionPerLot) &&
-      EstimatedCommissionPerLot >= 0.0 &&
-      EstimatedCommissionPerLot <= 1000000.0 &&
-      (EffectiveEstimatedCommissionPerLot() >= 0.00000001 ||
-       CommissionFreeAccountConfirmed);
+   return "price_and_slippage_excluding_commission";
 }
 
 
@@ -4983,18 +5103,6 @@ bool ValidateMoneyManagementConfiguration(string &reason)
       reason = "RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP";
       return false;
    }
-   if(!MathIsValidNumber(EstimatedCommissionPerLot) ||
-      EstimatedCommissionPerLot < 0.0 ||
-      EstimatedCommissionPerLot > 1000000.0)
-   {
-      reason = "ESTIMATED_COMMISSION_PER_LOT_INVALID";
-      return false;
-   }
-   if(GatewayMode == GATEWAY_LIVE && !LiveCommissionPolicyConfirmed())
-   {
-      reason = "LIVE_COMMISSION_POLICY_UNCONFIRMED";
-      return false;
-   }
    double minimum = 0.0;
    double maximum = 0.0;
    double step = 0.0;
@@ -5051,11 +5159,14 @@ bool ReadFreshTick(MqlTick &tick, string &reason)
 {
    ZeroMemory(tick);
    if(!SymbolInfoTick(_Symbol, tick) ||
+      !MathIsValidNumber(tick.bid) || !MathIsValidNumber(tick.ask) ||
       tick.bid <= 0.0 || tick.ask <= tick.bid)
    {
       reason = "QUOTE_UNAVAILABLE";
       return false;
    }
+   if(!ValidateObservedTickAge(tick, reason))
+      return false;
    datetime server_now = TimeCurrent();
    if(server_now <= 0 || tick.time <= 0 || server_now < tick.time ||
       server_now - tick.time > MaxQuoteAgeSeconds)
@@ -6030,6 +6141,11 @@ bool ValidateRuntime(
    string &reason
 )
 {
+   if(!GatewayInitializationReady())
+   {
+      reason = InitializationBlockReason();
+      return false;
+   }
    if(!ValidateConfiguredModes(reason))
       return false;
    if(GatewayMode == GATEWAY_LIVE)
@@ -6203,6 +6319,29 @@ bool ValidateRuntime(
 
 bool UpdateRiskTelemetry(const bool force)
 {
+   // Initial snapshot publication needs read-only telemetry before the ready
+   // latch opens. A blocked or unowned instance must not read or reuse it.
+   // Execution readiness remains closed even when startup telemetry succeeds.
+   if(!GatewayInitializationReady())
+   {
+      g_cached_execution_guard_ready = false;
+      g_cached_execution_guard_reason = InitializationBlockReason();
+      if(g_init_blocked || g_channel_lock_handle == INVALID_HANDLE)
+      {
+         g_cached_history_telemetry_ready = false;
+         g_risk_cache_at = 0;
+         return false;
+      }
+   }
+   MqlTick readiness_tick;
+   string quote_reason = "";
+   bool quote_ready = ReadFreshTick(readiness_tick, quote_reason);
+   // Quote expiry is checked on every status read, even inside the risk cache.
+   if(!quote_ready && GatewayInitializationReady())
+   {
+      g_cached_execution_guard_ready = false;
+      g_cached_execution_guard_reason = quote_reason;
+   }
    int now = NowUtc();
    if(!force && g_risk_cache_at > 0 &&
       now >= g_risk_cache_at &&
@@ -6279,7 +6418,12 @@ bool UpdateRiskTelemetry(const bool force)
    g_cached_history_telemetry_ready = true;
    string reason = "";
    double readiness_probe_volume = 0.0;
-   if(!IsHedgingAccount())
+   if(!GatewayInitializationReady())
+   {
+      g_cached_execution_guard_ready = false;
+      g_cached_execution_guard_reason = InitializationBlockReason();
+   }
+   else if(!IsHedgingAccount())
    {
       g_cached_execution_guard_ready = false;
       g_cached_execution_guard_reason =
@@ -6294,6 +6438,11 @@ bool UpdateRiskTelemetry(const bool force)
    {
       g_cached_execution_guard_ready = false;
       g_cached_execution_guard_reason = "TERMINAL_NOT_CONNECTED";
+   }
+   else if(!quote_ready)
+   {
+      g_cached_execution_guard_ready = false;
+      g_cached_execution_guard_reason = quote_reason;
    }
    else if(GatewayMode == GATEWAY_LIVE && IsDemo())
    {
@@ -6561,6 +6710,19 @@ bool CaptureExecutionEvidence(
    double position_sl = PositionGetDouble(POSITION_SL);
    double position_tp = PositionGetDouble(POSITION_TP);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(!MathIsValidNumber(point) || point <= 0.0 ||
+      !MathIsValidNumber(deal_price) ||
+      !MathIsValidNumber(request.price) || request.price <= 0.0)
+   {
+      reason = "EXECUTION_SLIPPAGE_EVIDENCE_UNAVAILABLE";
+      return false;
+   }
+   double measured_slippage = MathAbs(deal_price - request.price) / point;
+   if(!MathIsValidNumber(measured_slippage) || measured_slippage > 1000000000.0)
+   {
+      reason = "EXECUTION_SLIPPAGE_EVIDENCE_UNAVAILABLE";
+      return false;
+   }
    double price_tolerance = MathMax(0.00000001, point / 2.0);
    if(actual_position_type != expected_position_type ||
       position_magic != (long)MagicNumber ||
@@ -6576,10 +6738,8 @@ bool CaptureExecutionEvidence(
 
    g_ack_has_execution_evidence = true;
    g_ack_filled_price = deal_price;
-   g_ack_filled_slippage_points =
-      point > 0.0
-      ? MathAbs(deal_price - request.price) / point
-      : 0.0;
+   g_ack_filled_slippage_points = measured_slippage;
+   g_ack_filled_slippage_known = true;
    g_ack_actual_stop_loss = position_sl;
    g_ack_actual_take_profit = position_tp;
    g_ack_actual_magic_number = MagicNumber;
@@ -7170,6 +7330,8 @@ void ReconcileExecutingCommand(
    const string signed_raw
 )
 {
+   if(!GatewayInitializationReady())
+      return;
    ExecutionAttempt attempt;
    string reason = "";
    if(!ReadExecutionAttempt(command, signed_raw, attempt, reason))
@@ -7274,6 +7436,8 @@ void ReconcileExecutingCommand(
       g_ack_has_execution_evidence = true;
       g_ack_filled_price = open_price;
       g_ack_filled_slippage_points = 0.0;
+      // The pre-send entry was not persisted; recovery cannot measure slippage.
+      g_ack_filled_slippage_known = false;
       g_ack_actual_stop_loss = position_sl;
       g_ack_actual_take_profit = position_tp;
       g_ack_actual_magic_number = MagicNumber;
@@ -7299,6 +7463,7 @@ void ReconcileExecutingCommand(
       g_ack_has_execution_evidence = true;
       g_ack_filled_price = entry_price;
       g_ack_filled_slippage_points = 0.0;
+      g_ack_filled_slippage_known = false;
       g_ack_actual_stop_loss = history_order_sl;
       g_ack_actual_take_profit = history_order_tp;
       g_ack_actual_magic_number = MagicNumber;
@@ -7322,6 +7487,413 @@ void ReconcileExecutingCommand(
 }
 
 
+bool ReadOutcomeTicket(const string value, ulong &ticket)
+{
+   ticket = 0;
+   if(!IsUnsignedIntegerText(value) || StringLen(value) > 20)
+      return false;
+   const ulong maximum = (ulong)-1;
+   for(int index = 0; index < StringLen(value); index++)
+   {
+      ulong digit = (ulong)(StringGetCharacter(value, index) - '0');
+      if(ticket > maximum / 10 || (ticket == maximum / 10 && digit > maximum % 10))
+         return false;
+      ticket = ticket * 10 + digit;
+   }
+   return ticket > 0 && StringFormat("%I64u", ticket) == value;
+}
+
+
+bool ReadOutcomeExecutionIdentity(
+   const CommandPayload &command,
+   const ExecutionAttempt &attempt,
+   LegacyExecutedAck &ack,
+   string &identity_digest
+)
+{
+   string raw = "";
+   string idempotency_raw = "";
+   if(!ReadCommonText(CommandLedgerPath(command.command_id), MaxCommandBytes, raw) ||
+      !ReadCommonText(IdempotencyLedgerPath(command.idempotency_key), MaxCommandBytes, idempotency_raw) ||
+      Trimmed(raw) != Trimmed(idempotency_raw))
+      return false;
+   string keys[];
+   string values[];
+   int quoted[];
+   string reason = "";
+   if(!ParseFlatJson(raw, keys, values, quoted, reason))
+      return false;
+   string schema = "", command_id = "", idempotency_key = "", channel = "";
+   string status = "", verification = "", signature = "";
+   bool persisted = false;
+   if(!ReadRequiredString(keys, values, quoted, "schemaVersion", schema, reason) ||
+      !ReadRequiredString(keys, values, quoted, "commandId", command_id, reason) ||
+      !ReadRequiredString(keys, values, quoted, "idempotencyKey", idempotency_key, reason) ||
+      !ReadRequiredString(keys, values, quoted, "channelId", channel, reason) ||
+      !ReadRequiredString(keys, values, quoted, "status", status, reason) ||
+      !ReadRequiredString(keys, values, quoted, "verificationStatus", verification, reason) ||
+      !ReadRequiredString(keys, values, quoted, "signatureVerificationStatus", signature, reason) ||
+      !ReadRequiredBoolean(keys, values, quoted, "statePersisted", persisted, reason) ||
+      !ReadRequiredString(keys, values, quoted, "symbol", ack.symbol, reason) ||
+      !ReadRequiredString(keys, values, quoted, "action", ack.action, reason) ||
+      !ReadRequiredString(keys, values, quoted, "actualComment", ack.actual_comment, reason) ||
+      !ReadRequiredInteger(keys, values, quoted, "actualMagicNumber", ack.magic_number, reason) ||
+      !ReadRequiredDouble(keys, values, quoted, "fixedLot", ack.fixed_lot, reason) ||
+      !ReadRequiredDouble(keys, values, quoted, "filledPrice", ack.filled_price, reason) ||
+      !ReadRequiredDouble(keys, values, quoted, "actualStopLoss", ack.stop_loss, reason) ||
+      !ReadRequiredDouble(keys, values, quoted, "actualTakeProfit", ack.take_profit, reason))
+      return false;
+   int ticket_index = FindKey(keys, "ticket");
+   if(ticket_index < 0 || quoted[ticket_index] != 0 ||
+      !ReadOutcomeTicket(values[ticket_index], ack.ticket))
+      return false;
+   double tolerance = MathMax(0.00000001, SymbolInfoDouble(_Symbol, SYMBOL_POINT) / 2.0);
+   return Sha256TextHex(raw, identity_digest) &&
+      schema == ACK_SCHEMA && command_id == command.command_id &&
+      idempotency_key == command.idempotency_key && channel == SnapshotChannel &&
+      command.channel_id == SnapshotChannel && status == "EXECUTED" &&
+      (verification == "VERIFIED_OPEN" || verification == "VERIFIED_CLOSED") &&
+      signature == "VERIFIED" && persisted && ack.symbol == command.symbol &&
+      ack.action == command.action && ack.actual_comment == attempt.broker_comment &&
+      ack.magic_number == MagicNumber &&
+      MathIsValidNumber(ack.fixed_lot) && MathIsValidNumber(ack.filled_price) &&
+      MathIsValidNumber(ack.stop_loss) && MathIsValidNumber(ack.take_profit) &&
+      ack.filled_price > 0.0 &&
+      MathAbs(ack.fixed_lot - attempt.expected_volume) <= 0.00000001 &&
+      MathAbs(ack.stop_loss - NormalizeSymbolPrice(command.stop_loss)) <= tolerance &&
+      MathAbs(ack.take_profit - NormalizeSymbolPrice(command.take_profit)) <= tolerance;
+}
+
+
+bool OutcomeOrderIsSettled(const ulong order_ticket)
+{
+   int total = OrdersTotal();
+   if(total < 0)
+      return false;
+   for(int index = 0; index < total; index++)
+   {
+      ulong ticket = OrderGetTicket(index);
+      if(ticket == 0 || ticket == order_ticket)
+         return false;
+   }
+   return true;
+}
+
+
+bool BuildExecutedOutcome(
+   const CommandPayload &command,
+   const ExecutionAttempt &attempt,
+   const LegacyExecutedAck &ack,
+   string &payload
+)
+{
+   payload = "";
+   ulong order_ticket = 0, seed_deal = 0;
+   if(!ReadOutcomeTicket(attempt.order_id, order_ticket) ||
+      !ReadOutcomeTicket(attempt.deal_id, seed_deal) ||
+      !HistoryDealSelect(seed_deal))
+      return false;
+   long position_id = 0;
+   long seed_order = 0;
+   if(!ReadHistoryDealIntegerStrict(seed_deal, DEAL_POSITION_ID, position_id) ||
+      !ReadHistoryDealIntegerStrict(seed_deal, DEAL_ORDER, seed_order) ||
+      position_id <= 0 || (ulong)seed_order != order_ticket ||
+      (ack.ticket != (ulong)position_id && ack.ticket != order_ticket) ||
+      !HistoryOrderSelect(order_ticket))
+      return false;
+   long order_magic = 0, order_type = 0, order_position = 0;
+   string order_symbol = "", order_comment = "";
+   double order_volume = 0.0, order_sl = 0.0, order_tp = 0.0;
+   if(!ReadHistoryOrderIntegerStrict(order_ticket, ORDER_MAGIC, order_magic) ||
+      !ReadHistoryOrderIntegerStrict(order_ticket, ORDER_TYPE, order_type) ||
+      !ReadHistoryOrderIntegerStrict(order_ticket, ORDER_POSITION_ID, order_position) ||
+      !ReadHistoryOrderStringStrict(order_ticket, ORDER_SYMBOL, order_symbol) ||
+      !ReadHistoryOrderStringStrict(order_ticket, ORDER_COMMENT, order_comment) ||
+      !ReadHistoryOrderDoubleStrict(order_ticket, ORDER_VOLUME_INITIAL, order_volume) ||
+      !ReadHistoryOrderDoubleStrict(order_ticket, ORDER_SL, order_sl) ||
+      !ReadHistoryOrderDoubleStrict(order_ticket, ORDER_TP, order_tp))
+      return false;
+   long expected_order_type = command.action == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   long expected_deal_type = command.action == "BUY" ? DEAL_TYPE_BUY : DEAL_TYPE_SELL;
+   long exit_deal_type = command.action == "BUY" ? DEAL_TYPE_SELL : DEAL_TYPE_BUY;
+   double tolerance = MathMax(0.00000001, SymbolInfoDouble(_Symbol, SYMBOL_POINT) / 2.0);
+   if(order_magic != MagicNumber || order_type != expected_order_type ||
+      order_position != position_id || order_symbol != command.symbol ||
+      order_comment != attempt.broker_comment ||
+      !MathIsValidNumber(order_volume) || !MathIsValidNumber(order_sl) || !MathIsValidNumber(order_tp) ||
+      MathAbs(order_volume - attempt.expected_volume) > 0.00000001 ||
+      MathAbs(order_sl - ack.stop_loss) > tolerance ||
+      MathAbs(order_tp - ack.take_profit) > tolerance ||
+      !OutcomeOrderIsSettled(order_ticket) || !HistorySelectByPosition((ulong)position_id))
+      return false;
+
+   double entered = 0.0, exited = 0.0, entry_value = 0.0, closed_pnl = 0.0;
+   double gross_profit = 0.0, total_swap = 0.0, total_commission = 0.0, total_fee = 0.0;
+   double exit_value = 0.0;
+   long opened_at = 0, closed_at = 0;
+   bool seed_found = false;
+   int total = HistoryDealsTotal();
+   if(total <= 0)
+      return false;
+   for(int index = 0; index < total; index++)
+   {
+      ulong deal = HistoryDealGetTicket(index);
+      long deal_position = 0, deal_order = 0, entry = 0, type = 0, magic = 0, when = 0;
+      string symbol = "", comment = "";
+      double volume = 0.0, price = 0.0, profit = 0.0, swap = 0.0, commission = 0.0, fee = 0.0;
+      if(deal == 0 ||
+         !ReadHistoryDealIntegerStrict(deal, DEAL_POSITION_ID, deal_position) ||
+         !ReadHistoryDealIntegerStrict(deal, DEAL_ORDER, deal_order) ||
+         !ReadHistoryDealIntegerStrict(deal, DEAL_ENTRY, entry) ||
+         !ReadHistoryDealIntegerStrict(deal, DEAL_TYPE, type) ||
+         !ReadHistoryDealIntegerStrict(deal, DEAL_MAGIC, magic) ||
+         !ReadHistoryDealIntegerStrict(deal, DEAL_TIME, when) ||
+         !ReadHistoryDealStringStrict(deal, DEAL_SYMBOL, symbol) ||
+         !ReadHistoryDealStringStrict(deal, DEAL_COMMENT, comment) ||
+         !ReadHistoryDealDoubleStrict(deal, DEAL_VOLUME, volume) ||
+         !ReadHistoryDealDoubleStrict(deal, DEAL_PRICE, price) ||
+         !ReadHistoryDealDoubleStrict(deal, DEAL_PROFIT, profit) ||
+         !ReadHistoryDealDoubleStrict(deal, DEAL_SWAP, swap) ||
+         !ReadHistoryDealDoubleStrict(deal, DEAL_COMMISSION, commission) ||
+         !ReadHistoryDealDoubleStrict(deal, DEAL_FEE, fee) ||
+         deal_position != position_id || symbol != command.symbol || when <= 0 ||
+         !MathIsValidNumber(volume) || volume <= 0.0 ||
+         !MathIsValidNumber(price) || price <= 0.0 ||
+         !MathIsValidNumber(profit) || !MathIsValidNumber(swap) ||
+         !MathIsValidNumber(commission) || !MathIsValidNumber(fee))
+         return false;
+      if(entry == DEAL_ENTRY_IN)
+      {
+         // Split fills are allowed only for this exact original order.
+         if((ulong)deal_order != order_ticket || type != expected_deal_type ||
+            magic != MagicNumber || comment != attempt.broker_comment)
+            return false;
+         entered += volume;
+         entry_value += volume * price;
+         if(opened_at == 0 || when < opened_at)
+            opened_at = when;
+         if(deal == seed_deal)
+            seed_found = true;
+      }
+      else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+      {
+         // Broker SL/TP and manual closes may have different comments/magic;
+         // the exact position identifier binds them, never the close comment.
+         if(type != exit_deal_type)
+            return false;
+         exited += volume;
+         exit_value += volume * price;
+         if(when > closed_at)
+            closed_at = when;
+      }
+      else
+         return false; // Reversals and unrelated adjustments are not evidence.
+      closed_pnl += profit + swap + commission + fee;
+      gross_profit += profit;
+      total_swap += swap;
+      total_commission += commission;
+      total_fee += fee;
+   }
+   if(!seed_found || opened_at <= 0 ||
+      !MathIsValidNumber(entered) || !MathIsValidNumber(exited) ||
+      !MathIsValidNumber(entry_value) || !MathIsValidNumber(closed_pnl) ||
+      !MathIsValidNumber(gross_profit) || !MathIsValidNumber(total_swap) ||
+      !MathIsValidNumber(total_commission) || !MathIsValidNumber(total_fee) ||
+      !MathIsValidNumber(exit_value) ||
+      MathAbs(entered - attempt.expected_volume) > 0.00000001 ||
+      exited > entered + 0.00000001 ||
+      (exited > 0.0 && closed_at < opened_at) ||
+      MathAbs(entry_value / entered - ack.filled_price) > tolerance)
+      return false;
+
+   int position_count = 0;
+   int positions = PositionsTotal();
+   if(positions < 0)
+      return false;
+   for(int index = 0; index < positions; index++)
+   {
+      ulong ticket = PositionGetTicket(index);
+      long identifier = 0;
+      if(ticket == 0 || !ReadSelectedPositionIntegerStrict(POSITION_IDENTIFIER, identifier))
+         return false;
+      if(identifier != position_id)
+         continue;
+      long magic = 0, type = 0;
+      string symbol = "", comment = "";
+      double volume = 0.0, price = 0.0, sl = 0.0, tp = 0.0;
+      if(!ReadSelectedPositionIntegerStrict(POSITION_MAGIC, magic) ||
+         !ReadSelectedPositionIntegerStrict(POSITION_TYPE, type) ||
+         !ReadSelectedPositionStringStrict(POSITION_SYMBOL, symbol) ||
+         !ReadSelectedPositionStringStrict(POSITION_COMMENT, comment) ||
+         !ReadSelectedPositionDoubleStrict(POSITION_VOLUME, volume) ||
+         !ReadSelectedPositionDoubleStrict(POSITION_PRICE_OPEN, price) ||
+         !ReadSelectedPositionDoubleStrict(POSITION_SL, sl) ||
+         !ReadSelectedPositionDoubleStrict(POSITION_TP, tp) ||
+         ticket != ack.ticket || magic != MagicNumber || symbol != command.symbol ||
+         comment != attempt.broker_comment ||
+         type != (command.action == "BUY" ? POSITION_TYPE_BUY : POSITION_TYPE_SELL) ||
+         !MathIsValidNumber(volume) || volume <= 0.0 ||
+         !MathIsValidNumber(price) || !MathIsValidNumber(sl) || !MathIsValidNumber(tp) ||
+         MathAbs(volume - (entered - exited)) > 0.00000001 ||
+         MathAbs(price - ack.filled_price) > tolerance ||
+         MathAbs(sl - ack.stop_loss) > tolerance || MathAbs(tp - ack.take_profit) > tolerance)
+         return false;
+      position_count++;
+   }
+   bool is_closed = position_count == 0 &&
+      MathAbs(exited - entered) <= 0.00000001 && closed_at >= opened_at;
+   if(!is_closed && (position_count != 1 || exited + 0.00000001 >= entered))
+      return false;
+   payload = "{";
+   payload += "\"schemaVersion\":\"metafx-hq-mt4-outcome-v1\",";
+   payload += "\"channelId\":" + JsonString(command.channel_id) + ",";
+   payload += "\"commandId\":" + JsonString(command.command_id) + ",";
+   payload += "\"executionState\":" + JsonString(is_closed ? "CLOSED" : "OPEN") + ",";
+   payload += "\"observedAt\":" + IntegerToString(is_closed ? closed_at : NowUtc()) + ",";
+   payload += "\"ticket\":" + StringFormat("%I64u", ack.ticket) + ",";
+   payload += "\"symbol\":" + JsonString(command.symbol) + ",";
+   payload += "\"action\":" + JsonString(command.action) + ",";
+   payload += "\"openedAt\":" + IntegerToString(opened_at) + ",";
+   payload += "\"closedAt\":" + (is_closed ? IntegerToString(closed_at) : "null") + ",";
+   payload += "\"openPrice\":" + JsonNumber(ack.filled_price, _Digits) + ",";
+   payload += "\"stopLoss\":" + JsonNumber(ack.stop_loss, _Digits) + ",";
+   payload += "\"takeProfit\":" + JsonNumber(ack.take_profit, _Digits) + ",";
+   payload += "\"lots\":" + JsonNumber(attempt.expected_volume, 8) + ",";
+   payload += "\"magicNumber\":" + IntegerToString(MagicNumber) + ",";
+   payload += "\"comment\":" + JsonString(attempt.broker_comment) + ",";
+   payload += "\"closedPnl\":" + (is_closed ? JsonNumber(closed_pnl, 2) : "null") + ",";
+   payload += "\"closePrice\":" + (is_closed ? JsonNumber(exit_value / exited, _Digits) : "null") + ",";
+   payload += "\"grossProfit\":" + (is_closed ? JsonNumber(gross_profit, 2) : "null") + ",";
+   payload += "\"commission\":" + (is_closed ? JsonNumber(total_commission, 2) : "null") + ",";
+   payload += "\"swap\":" + (is_closed ? JsonNumber(total_swap, 2) : "null") + ",";
+   payload += "\"fee\":" + (is_closed ? JsonNumber(total_fee, 2) : "null");
+   payload += "}";
+   return true;
+}
+
+
+bool CompletedOutcomeCached(const string key, const string payload)
+{
+   for(int index = 0; index < ArraySize(g_completed_outcome_keys); index++)
+   {
+      if(g_completed_outcome_keys[index] == key &&
+         g_completed_outcome_payloads[index] == payload)
+         return true;
+   }
+   return false;
+}
+
+
+void RememberCompletedOutcome(const string key, const string payload)
+{
+   int index = ArraySize(g_completed_outcome_keys);
+   if(index < 256)
+   {
+      if(ArrayResize(g_completed_outcome_keys, index + 1) != index + 1 ||
+         ArrayResize(g_completed_outcome_payloads, index + 1) != index + 1)
+      {
+         ArrayResize(g_completed_outcome_keys, 0);
+         ArrayResize(g_completed_outcome_payloads, 0);
+         g_completed_outcome_next = 0;
+         return;
+      }
+   }
+   else
+   {
+      index = g_completed_outcome_next;
+      g_completed_outcome_next = (g_completed_outcome_next + 1) % 256;
+   }
+   g_completed_outcome_keys[index] = key;
+   g_completed_outcome_payloads[index] = payload;
+}
+
+
+void ReleaseOutcomeSearch()
+{
+   if(g_outcome_search_handle != INVALID_HANDLE)
+      FileFindClose(g_outcome_search_handle);
+   g_outcome_search_handle = INVALID_HANDLE;
+   g_outcome_search_filename = "";
+}
+
+
+void RefreshExecutedCommandOutcome(const CommandPayload &command, const string signed_raw)
+{
+   // This path never finalizes/reconciles an execution ACK and cannot send.
+   if(!GatewayInitializationReady() || !IsConnected() ||
+      command.channel_id != SnapshotChannel || command.symbol != Uppercase(_Symbol) ||
+      TimeframeToPeriod(command.timeframe) != _Period)
+      return;
+   string reason = "";
+   string identity_digest = "";
+   ExecutionAttempt attempt;
+   LegacyExecutedAck ack;
+   if(!ReverifyCommandEnvelope(signed_raw, command, reason) ||
+      !ReadExecutionAttempt(command, signed_raw, attempt, reason) ||
+      !ReadOutcomeExecutionIdentity(command, attempt, ack, identity_digest))
+      return;
+   // Retain the verified envelope for read-only tracking after command.json
+   // advances. Existing v1.06 EXECUTED commands seed this on their first poll.
+   string archived = "";
+   if(!ReadCommonText(OutcomeCommandPath(command.command_id), MaxCommandBytes, archived) ||
+      Trimmed(archived) != Trimmed(signed_raw))
+   {
+      if(!WriteCommonTextAtomic(OutcomeCommandPath(command.command_id), signed_raw))
+         return;
+   }
+   string existing = "";
+   ReadCommonText(OutcomePath(command.command_id), MaxCommandBytes, existing);
+   string cache_key = attempt.account_binding_id + "|" + attempt.stream_key + "|" +
+      attempt.signed_command_digest + "|" + identity_digest;
+   // Cache only broker-verified CLOSED evidence from this process. Account,
+   // signed command, persisted ACK, or outcome changes force a fresh scan.
+   if(CompletedOutcomeCached(cache_key, Trimmed(existing)))
+      return;
+   string payload = "";
+   if(!BuildExecutedOutcome(command, attempt, ack, payload))
+      return;
+   if(Trimmed(existing) != payload &&
+      !WriteCommonTextAtomic(OutcomePath(command.command_id), payload))
+      return;
+   if(StringFind(payload, "\"executionState\":\"CLOSED\"") >= 0)
+      RememberCompletedOutcome(cache_key, payload);
+}
+
+
+void RefreshManagedOutcomeFiles(const bool force)
+{
+   if(!GatewayInitializationReady())
+      return;
+   int now = NowUtc();
+   if(!force && now - g_last_outcome_refresh_at < 5)
+      return;
+   g_last_outcome_refresh_at = now;
+   if(g_outcome_search_handle == INVALID_HANDLE)
+   {
+      g_outcome_search_handle = FileFindFirst(
+         BasePath() + "\\processed\\outcome-commands\\*.json", g_outcome_search_filename, FILE_COMMON);
+      if(g_outcome_search_handle == INVALID_HANDLE)
+         return;
+   }
+   // Keep each timer bounded and continue on the next tick without starving
+   // commands beyond the first batch. The handle is released on deinit.
+   for(int scanned = 0; scanned < 8; scanned++)
+   {
+      string filename = g_outcome_search_filename;
+      string raw = "", reason = "";
+      CommandPayload command;
+      if(ReadCommonText(BasePath() + "\\processed\\outcome-commands\\" + filename, MaxCommandBytes, raw) &&
+         ParseCommand(raw, command, reason) && filename == command.command_id + ".json")
+         RefreshExecutedCommandOutcome(command, raw);
+      if(!FileFindNext(g_outcome_search_handle, g_outcome_search_filename))
+      {
+         ReleaseOutcomeSearch();
+         break;
+      }
+   }
+}
+
+
 void ExecuteCommand(
    const CommandPayload &command,
    const string signed_raw,
@@ -7330,6 +7902,8 @@ void ExecuteCommand(
    const double estimated_risk_money
 )
 {
+   if(!GatewayInitializationReady())
+      return;
    SetAckSizingEvidence(
       order_volume,
       PositionSizingModeName(),
@@ -7650,11 +8224,15 @@ void ExecuteCommand(
    while(false);
 
    ReleaseAccountExecutionLock();
+   RefreshExecutedCommandOutcome(command, signed_raw);
 }
 
 
 void ProcessCommandFile()
 {
+   // Do not consume, reject, acknowledge or reconcile commands after failed init.
+   if(!GatewayInitializationReady())
+      return;
    ResetAckExecutionEvidence();
    string signed_raw = "";
    if(!ReadCommonText(CommandPath(), MaxCommandBytes, signed_raw))
@@ -7688,13 +8266,17 @@ void ProcessCommandFile()
           processed_status == "EXECUTION_UNKNOWN"))
       {
          ReconcileExecutingCommand(command, signed_raw);
+         RefreshExecutedCommandOutcome(command, signed_raw);
          return;
       }
       if(StringLen(processed_status) == 0 && execution_attempt_exists)
       {
          ReconcileExecutingCommand(command, signed_raw);
+         RefreshExecutedCommandOutcome(command, signed_raw);
          return;
       }
+      if(processed_status == "EXECUTED")
+         RefreshExecutedCommandOutcome(command, signed_raw);
       if(!FileIsExist(AckPath(command.command_id), FILE_COMMON))
          RepairAckFromLedger(command);
       return;
@@ -7702,6 +8284,7 @@ void ProcessCommandFile()
    if(execution_attempt_exists)
    {
       ReconcileExecutingCommand(command, signed_raw);
+      RefreshExecutedCommandOutcome(command, signed_raw);
       return;
    }
    if(FileIsExist(
@@ -7769,8 +8352,59 @@ void ProcessCommandFile()
 }
 
 
+string InitializationRecoveryHint()
+{
+   string reason = InitializationBlockReason();
+   if(reason == "GATEWAY_INPUT_CONFIGURATION_INVALID" && g_invalid_input_field != "")
+      return InputValidationMessage() + ". Correct this Input, then press OK to reinitialize.";
+   if(reason == "LIVE_COMMISSION_POLICY_UNCONFIRMED")
+      return "Legacy EstimatedCommissionPerLot and CommissionFreeAccountConfirmed inputs are ignored by v1.05. Reapply Inputs to recheck current guards.";
+   if(StringFind(reason, "SIGNING") >= 0 || StringFind(reason, "CRYPTO") >= 0)
+      return "Check approved signing configuration and TrustedSigningKeyId. Do not disable signature verification or copy credentials into the chart.";
+   if(reason == "SNAPSHOT_CHANNEL_INVALID")
+      return "Inputs: set the exact SnapshotChannel shown by HQ.";
+   if(reason == "SNAPSHOT_CHANNEL_ALREADY_OWNED")
+      return "Another Gateway owns this SnapshotChannel. Keep one Gateway on the selected chart; this attachment will not change its files.";
+   if(reason == "LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE")
+      return "Another LIVE Gateway may own this account. Keep one owner on one Windows user/host; do not delete lock or execution-history files.";
+   if(reason == "MT5_HEDGING_ACCOUNT_REQUIRED")
+      return "This Gateway requires an MT5 Hedging account; Netting/Exchange accounts are unsupported.";
+   if(reason == "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT")
+      return "LIVE requires a real account. Use DEMO mode when testing on a demo account.";
+   if(reason == "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST" ||
+      reason == "SYMBOL_OR_TIMEFRAME_NOT_ALLOWED" ||
+      reason == "ALLOWED_CHART_LIST_INVALID")
+      return "Inputs: check AllowedSymbols (exact broker symbol for LIVE) and AllowedTimeframes against this chart.";
+   if(g_init_failure_stage == "money_management")
+      return "Inputs: check MoneyManagementMode, FixedLot/RiskPercent, broker volume limits and the configured risk caps.";
+   if(g_init_failure_stage == "portfolio_policy")
+      return "Resolve the reported portfolio policy conflict with the existing Gateway settings; do not clear policy or execution-history files.";
+   if(g_init_failure_stage == "timer")
+      return "The terminal could not start the timer. Check terminal resources, then reapply Inputs to retry initialization.";
+   if(g_init_failure_stage == "snapshot" ||
+      g_init_failure_stage == "capabilities" ||
+      g_init_failure_stage == "status")
+      return "Check local FILE_COMMON write access and disk space, then reapply Inputs. Execution-history files are preserved.";
+   return "Review the reported stage and Inputs, correct the configuration, then press OK in Inputs to initialize again.";
+}
+
+
 void UpdateChartStatus()
 {
+   if(!GatewayInitializationReady())
+   {
+      Comment(
+         "MetafxHQ MT5 Gateway ", EA_VERSION, " - ATTACHED / BLOCKED\n",
+         "Requested mode: ", ModeName(), "\n",
+         "Trading: BLOCKED; this Gateway does not process commands\n",
+         "Stage: ", g_init_failure_stage, "\n",
+         "Reason: ", InitializationBlockReason(),
+         "\nAction: ", InitializationRecoveryHint(), "\n",
+         "After correction: reapply Inputs; no automatic activation.\n",
+         "Diagnostic timer: ", g_diagnostic_timer_ready ? "running" : "unavailable; this message stays visible"
+      );
+      return;
+   }
    UpdateRiskTelemetry(false);
    string live_owner_reason = "";
    bool live_owner_ready =
@@ -7812,7 +8446,7 @@ void UpdateChartStatus()
       "Risk Percent: ",
          DoubleToString(EffectiveRiskPercent(), 8), "% of ",
          RiskCapitalBaseName(), "\n",
-      "Estimated Commission/Lot: ",
+      "Risk cost basis: price + slippage; commission excluded. Reserved fee/lot: ",
          DoubleToString(EffectiveEstimatedCommissionPerLot(), 8), " ",
          AccountCurrency(), "\n",
       "Risk Guard: ", g_cached_execution_guard_reason, "\n",
@@ -7825,12 +8459,13 @@ bool RecordInitDiagnostic(
    const string severity,
    const string stage,
    const string reason_code,
-   const int return_code
+   const int return_code,
+   const bool append_audit = true,
+   const bool ea_attached = true
 )
 {
-   if(!IsSafeChannel(SnapshotChannel))
+   if(!IsSafeChannel(SnapshotChannel) || g_channel_lock_handle == INVALID_HANDLE)
       return false;
-   EnsureFolders();
    string payload = "{";
    payload += "\"schemaVersion\":\"metafx-hq-mt4-init-status-v1\",";
    payload += "\"eaVersion\":" + JsonString(EA_VERSION) + ",";
@@ -7839,10 +8474,13 @@ bool RecordInitDiagnostic(
    payload += "\"gatewayMode\":" + JsonString(ModeName()) + ",";
    payload += "\"accountMode\":" + JsonString(AccountModeName()) + ",";
    payload += "\"liveArmed\":" + JsonBoolean(LiveArmed) + ",";
+   payload += "\"eaAttached\":" + JsonBoolean(ea_attached) + ",";
+   payload += "\"runtimeReady\":" + JsonBoolean(ea_attached && GatewayInitializationReady()) + ",";
    payload += "\"severity\":" + JsonString(severity) + ",";
    payload += "\"stage\":" + JsonString(stage) + ",";
    payload += "\"reasonCode\":" + JsonString(reason_code) + ",";
    payload += "\"warningCode\":" + JsonString(g_init_warning_code) + ",";
+   payload += "\"inputValidation\":" + BuildInputValidationJson() + ",";
    payload += "\"portfolioPolicyLeaseOpenErrorCode\":" +
       IntegerToString(g_portfolio_policy_lease_open_error) + ",";
    payload += "\"portfolioPolicyLeaseScanErrorCode\":" +
@@ -7855,8 +8493,26 @@ bool RecordInitDiagnostic(
    payload += "\"observedAt\":" + IntegerToString(NowUtc());
    payload += "}";
    bool status_ok = WriteCommonTextAtomic(InitStatusPath(), payload);
-   bool audit_ok = AppendAudit(payload);
+   bool audit_ok = !append_audit || AppendAudit(payload);
    return status_ok && audit_ok;
+}
+
+
+void UpdateBlockedInitDiagnostic(const bool force)
+{
+   UpdateChartStatus();
+   if(!g_init_blocked || g_channel_lock_handle == INVALID_HANDLE)
+      return;
+   int now = NowUtc();
+   if(!force && g_last_init_diagnostic_at > 0 &&
+      now >= g_last_init_diagnostic_at && now - g_last_init_diagnostic_at < 5)
+      return;
+   g_last_init_diagnostic_at = now;
+   // Refresh only diagnostic freshness; audit the failure once, not every tick.
+   RecordInitDiagnostic(
+      "error", g_init_failure_stage, g_init_failure_reason,
+      g_init_failure_return_code, force
+   );
 }
 
 
@@ -7867,23 +8523,200 @@ int InitFailure(
    const string message
 )
 {
+   g_runtime_initialized = false;
+   g_init_blocked = true;
+   g_init_failure_stage = stage;
+   g_init_failure_reason = reason_code;
+   g_init_failure_return_code = return_code;
+   g_cached_execution_guard_ready = false;
+   g_cached_history_telemetry_ready = false;
+   g_cached_execution_guard_reason = InitializationBlockReason();
+   g_risk_cache_at = 0;
+   EventKillTimer();
+   ReleaseAccountExecutionLock();
+   ReleasePortfolioPolicyLease();
+   ReleaseLiveAccountOwnerLock();
+   // Keep only our channel lock for diagnostic ownership. No account/policy
+   // ownership and no normal snapshot/status/capability publication survives.
+   InvalidatePublishedRuntimeState();
+   g_diagnostic_timer_ready = false;
+   if(stage != "timer")
+      g_diagnostic_timer_ready = EventSetTimer(1);
    Print(message);
-   RecordInitDiagnostic("error", stage, reason_code, return_code);
-   return return_code;
+   UpdateBlockedInitDiagnostic(true);
+   // The EA remains attached solely to display the failure, even without a timer.
+   return INIT_SUCCEEDED;
+}
+
+
+void ResetInputValidationDiagnostic()
+{
+   g_invalid_input_field = "";
+   g_invalid_input_value = 0.0;
+   g_invalid_input_minimum = 0.0;
+   g_invalid_input_maximum = 0.0;
+   g_invalid_input_has_minimum = true;
+   g_invalid_input_has_maximum = true;
+   g_invalid_input_minimum_inclusive = true;
+   g_invalid_input_maximum_inclusive = true;
+   g_invalid_input_constraint = "range";
+}
+
+
+bool InvalidInput(
+   const string field,
+   const double value,
+   const double minimum,
+   const double maximum,
+   const bool minimum_inclusive = true,
+   const bool maximum_inclusive = true,
+   const bool has_minimum = true,
+   const bool has_maximum = true,
+   const string constraint = "range"
+)
+{
+   // Call sites are fixed numeric input names; never pass signing/account text.
+   g_invalid_input_field = field;
+   g_invalid_input_value = value;
+   g_invalid_input_minimum = minimum;
+   g_invalid_input_maximum = maximum;
+   g_invalid_input_has_minimum = has_minimum;
+   g_invalid_input_has_maximum = has_maximum;
+   g_invalid_input_minimum_inclusive = minimum_inclusive;
+   g_invalid_input_maximum_inclusive = maximum_inclusive;
+   g_invalid_input_constraint = constraint;
+   return false;
+}
+
+
+bool InputInRange(
+   const string field,
+   const double value,
+   const double minimum,
+   const double maximum,
+   const bool minimum_inclusive = true,
+   const bool has_maximum = true
+)
+{
+   if(!MathIsValidNumber(value) ||
+      (minimum_inclusive ? value < minimum : value <= minimum) ||
+      (has_maximum && value > maximum))
+      return InvalidInput(field, value, minimum, maximum,
+         minimum_inclusive, true, true, has_maximum);
+   return true;
+}
+
+
+string BuildInputValidationJson()
+{
+   if(g_invalid_input_field == "")
+      return "null";
+   string payload = "{\"field\":" + JsonString(g_invalid_input_field);
+   payload += ",\"value\":" + (MathIsValidNumber(g_invalid_input_value)
+      ? JsonNumber(g_invalid_input_value, 16) : "null");
+   payload += ",\"minimum\":" + (g_invalid_input_has_minimum
+      ? JsonNumber(g_invalid_input_minimum, 16) : "null");
+   payload += ",\"maximum\":" + (g_invalid_input_has_maximum
+      ? JsonNumber(g_invalid_input_maximum, 16) : "null");
+   payload += ",\"minimumInclusive\":" + JsonBoolean(g_invalid_input_minimum_inclusive);
+   payload += ",\"maximumInclusive\":" + JsonBoolean(g_invalid_input_maximum_inclusive);
+   payload += ",\"constraint\":" + JsonString(g_invalid_input_constraint) + "}";
+   return payload;
+}
+
+
+string InputValidationMessage()
+{
+   if(g_invalid_input_field == "")
+      return "Check the configured EA Inputs";
+   string value = MathIsValidNumber(g_invalid_input_value)
+      ? DoubleToString(g_invalid_input_value, 8) : "non-finite";
+   string limits = "";
+   if(g_invalid_input_has_minimum)
+      limits += (g_invalid_input_minimum_inclusive ? ">= " : "> ") +
+         DoubleToString(g_invalid_input_minimum, 8);
+   if(g_invalid_input_has_maximum)
+      limits += (limits == "" ? "" : " and ") +
+         (g_invalid_input_maximum_inclusive ? "<= " : "< ") +
+         DoubleToString(g_invalid_input_maximum, 8);
+   if(g_invalid_input_constraint == "at_most_MaxManagedTotalLots")
+      limits += " (MaxManagedTotalLots)";
+   if(g_invalid_input_constraint == "required_for_execution")
+      limits += " (true is required outside SHADOW)";
+   return g_invalid_input_field + "=" + value + "; allowed " + limits;
+}
+
+
+bool ValidateGatewayInputConfiguration()
+{
+   ResetInputValidationDiagnostic();
+   if(!InputInRange("PollIntervalSeconds", PollIntervalSeconds, 1, 1)) return false;
+   if(!InputInRange("SnapshotIntervalSeconds", SnapshotIntervalSeconds, 2, 60)) return false;
+   if(!InputInRange("SnapshotBars", SnapshotBars, 20, 1000)) return false;
+   if(!InputInRange("MaxCommandBytes", MaxCommandBytes, 256, 65536)) return false;
+   if(!InputInRange("MaxCommandTtlSeconds", MaxCommandTtlSeconds, BACKEND_PACKET_TTL_SECONDS, 120)) return false;
+   if(!InputInRange("MaxHeartbeatTtlSeconds", MaxHeartbeatTtlSeconds, BACKEND_PACKET_TTL_SECONDS, 60)) return false;
+   if(!InputInRange("MaxClockSkewSeconds", MaxClockSkewSeconds, 0, 2147483647)) return false;
+   if(!InputInRange("MaxSpreadPoints", MaxSpreadPoints, 1, MAX_SAFE_SPREAD_POINTS)) return false;
+   if(!InputInRange("SlippagePoints", SlippagePoints, 0, MAX_SAFE_SLIPPAGE_POINTS)) return false;
+   if(!InputInRange("MagicNumber", MagicNumber, 1, 2147483647)) return false;
+   if(!InputInRange("MaxSnapshotAgeSeconds", MaxSnapshotAgeSeconds, 5, 900)) return false;
+   if(!InputInRange("MaxSignalDriftPoints", MaxSignalDriftPoints, 1, MAX_SAFE_SIGNAL_DRIFT_POINTS)) return false;
+   if(!InputInRange("MaxQuoteAgeSeconds", MaxQuoteAgeSeconds, 1, 120)) return false;
+   if(!InputInRange("MaxManagedOpenPositions", MaxManagedOpenPositions, 1, 2147483647)) return false;
+   if(!InputInRange("MaxManagedTotalLots", MaxManagedTotalLots, 0, 0, false, false)) return false;
+   if(MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT && FixedLot > MaxManagedTotalLots)
+      return InvalidInput("FixedLot", FixedLot, 0, MaxManagedTotalLots,
+         true, true, false, true, "at_most_MaxManagedTotalLots");
+   if(!InputInRange("MaxTradesPerBrokerDay", MaxTradesPerBrokerDay, 1, 2147483647)) return false;
+   if(!InputInRange("MaxLossPerTradePercent", MaxLossPerTradePercent, 0, 100, false)) return false;
+   if(!InputInRange("MaxDailyLossPercent", MaxDailyLossPercent, 0, 100, false)) return false;
+   if(!InputInRange("MaxManagedWeeklyLossPercent", MaxManagedWeeklyLossPercent, 0, 100, false)) return false;
+   if(!InputInRange("MaxConsecutiveManagedLosses", MaxConsecutiveManagedLosses, 1, 100)) return false;
+   if(!InputInRange("ConsecutiveLossCooldownMinutes", ConsecutiveLossCooldownMinutes, 1, 10080)) return false;
+   if(!InputInRange("MaxAccountEquityDrawdownPercent", MaxAccountEquityDrawdownPercent, 0, 100, false)) return false;
+   if(!InputInRange("MinRewardRiskRatio", MinRewardRiskRatio, 0, 0, false, false)) return false;
+   if(!InputInRange("MinProjectedMarginLevelPercent", MinProjectedMarginLevelPercent, 100, 0, true, false)) return false;
+   if(GatewayMode != GATEWAY_SHADOW && !RequireHeartbeat)
+      return InvalidInput("RequireHeartbeat", 0, 1, 1,
+         true, true, true, true, "required_for_execution");
+   return true;
 }
 
 
 int OnInit()
 {
+   ResetObservedTick();
+   ResetInputValidationDiagnostic();
+   g_runtime_initialized = false;
+   g_init_blocked = false;
+   g_init_failure_stage = "";
+   g_init_failure_reason = "";
+   g_last_init_diagnostic_at = 0;
+   g_diagnostic_timer_ready = false;
+   g_risk_cache_at = 0;
+   g_cached_execution_guard_ready = false;
+   g_cached_history_telemetry_ready = false;
    g_init_warning_code = "";
    g_trusted_signing_key_id =
       NormalizeSigningKeyId(TrustedSigningKeyId);
 
    if(!IsSafeChannel(SnapshotChannel))
    {
-      Print("MetafxHQ MT5: SNAPSHOT_CHANNEL_INVALID");
-      return INIT_PARAMETERS_INCORRECT;
+      return InitFailure(
+         INIT_PARAMETERS_INCORRECT, "channel", "SNAPSHOT_CHANNEL_INVALID",
+         "MetafxHQ MT5: SNAPSHOT_CHANNEL_INVALID"
+      );
    }
+   EnsureFolders();
+   if(!AcquireChannelLock())
+   {
+      return InitFailure(
+         INIT_FAILED, "channel", "SNAPSHOT_CHANNEL_ALREADY_OWNED",
+         "MetafxHQ MT5: SNAPSHOT_CHANNEL_ALREADY_OWNED"
+      );
+   }
+   InvalidatePublishedRuntimeState();
    string mode_reason = "";
    if(!ValidateConfiguredModes(mode_reason))
    {
@@ -7950,60 +8783,13 @@ int OnInit()
       );
    }
 
-   if(PollIntervalSeconds != 1 ||
-      SnapshotIntervalSeconds < 2 ||
-      SnapshotIntervalSeconds > 60 ||
-      SnapshotBars < 20 || SnapshotBars > 1000 ||
-      MaxCommandBytes < 256 || MaxCommandBytes > 65536 ||
-      MaxCommandTtlSeconds < 1 ||
-      MaxCommandTtlSeconds > 120 ||
-      MaxHeartbeatTtlSeconds < 1 ||
-      MaxHeartbeatTtlSeconds > 60 ||
-      MaxClockSkewSeconds < 0 ||
-      MaxSpreadPoints <= 0 ||
-      MaxSpreadPoints > MAX_SAFE_SPREAD_POINTS ||
-      SlippagePoints < 0 ||
-      SlippagePoints > MAX_SAFE_SLIPPAGE_POINTS ||
-      MagicNumber <= 0 ||
-      MaxSnapshotAgeSeconds < 5 ||
-      MaxSnapshotAgeSeconds > 900 ||
-      MaxSignalDriftPoints <= 0 ||
-      MaxSignalDriftPoints > MAX_SAFE_SIGNAL_DRIFT_POINTS ||
-      MaxQuoteAgeSeconds < 1 ||
-      MaxQuoteAgeSeconds > 120 ||
-      MaxManagedOpenPositions < 1 ||
-      !MathIsValidNumber(MaxManagedTotalLots) ||
-      MaxManagedTotalLots <= 0.0 ||
-       (MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT &&
-        FixedLot > MaxManagedTotalLots) ||
-      MaxTradesPerBrokerDay < 1 ||
-      !MathIsValidNumber(MaxLossPerTradePercent) ||
-      MaxLossPerTradePercent <= 0.0 ||
-      MaxLossPerTradePercent > 100.0 ||
-      !MathIsValidNumber(MaxDailyLossPercent) ||
-      MaxDailyLossPercent <= 0.0 ||
-      MaxDailyLossPercent > 100.0 ||
-      !MathIsValidNumber(MaxManagedWeeklyLossPercent) ||
-      MaxManagedWeeklyLossPercent <= 0.0 ||
-      MaxManagedWeeklyLossPercent > 100.0 ||
-      MaxConsecutiveManagedLosses < 1 ||
-      MaxConsecutiveManagedLosses > 100 ||
-      ConsecutiveLossCooldownMinutes < 1 ||
-      ConsecutiveLossCooldownMinutes > 10080 ||
-      !MathIsValidNumber(MaxAccountEquityDrawdownPercent) ||
-      MaxAccountEquityDrawdownPercent <= 0.0 ||
-      MaxAccountEquityDrawdownPercent > 100.0 ||
-      !MathIsValidNumber(MinRewardRiskRatio) ||
-      MinRewardRiskRatio <= 0.0 ||
-      !MathIsValidNumber(MinProjectedMarginLevelPercent) ||
-      MinProjectedMarginLevelPercent < 100.0 ||
-      (GatewayMode != GATEWAY_SHADOW && !RequireHeartbeat))
+   if(!ValidateGatewayInputConfiguration())
    {
       return InitFailure(
          INIT_PARAMETERS_INCORRECT,
          "inputs",
          "GATEWAY_INPUT_CONFIGURATION_INVALID",
-         "MetafxHQ MT5: GATEWAY_INPUT_CONFIGURATION_INVALID"
+         "MetafxHQ MT5: GATEWAY_INPUT_CONFIGURATION_INVALID; " + InputValidationMessage()
       );
    }
 
@@ -8072,7 +8858,6 @@ int OnInit()
       );
    }
 
-   EnsureFolders();
    string signing_reason = "";
    bool signing_ready =
       RefreshSigningReadiness(signing_reason);
@@ -8087,38 +8872,27 @@ int OnInit()
       );
    }
 
-   if(!AcquireChannelLock())
-   {
-      Print("MetafxHQ MT5: SNAPSHOT_CHANNEL_ALREADY_OWNED");
-      return INIT_FAILED;
-   }
    string live_owner_reason = "";
    if(!AcquireLiveAccountOwnerLock(live_owner_reason))
    {
-      int init_result = InitFailure(
+      return InitFailure(
          INIT_FAILED,
          "live_account_owner_lock",
          live_owner_reason,
          "MetafxHQ MT5: LIVE account owner lock unavailable. Another compatible LIVE gateway may already own this account on this Windows host."
       );
-      ReleaseChannelLock();
-      return init_result;
    }
-   InvalidatePublishedRuntimeState();
 
    string account_lock_path = "";
    if(!AccountExecutionLockPath(account_lock_path) ||
       !AcquireAccountExecutionLock())
    {
-      int init_result = InitFailure(
+      return InitFailure(
          INIT_FAILED,
          "account_execution_lock",
          "ACCOUNT_EXECUTION_LOCK_UNAVAILABLE",
          "MetafxHQ MT5: ACCOUNT_EXECUTION_LOCK_UNAVAILABLE"
       );
-      ReleaseLiveAccountOwnerLock();
-      ReleaseChannelLock();
-      return init_result;
    }
    string portfolio_reason = "";
    bool portfolio_ready =
@@ -8126,80 +8900,59 @@ int OnInit()
    ReleaseAccountExecutionLock();
    if(!portfolio_ready)
    {
-      int init_result = InitFailure(
+      return InitFailure(
          INIT_FAILED,
          "portfolio_policy",
          portfolio_reason,
          "MetafxHQ MT5: " + portfolio_reason
       );
-      ReleasePortfolioPolicyLease();
-      ReleaseLiveAccountOwnerLock();
-      ReleaseChannelLock();
-      return init_result;
    }
 
    if(!EventSetTimer(1))
    {
-      int init_result = InitFailure(
+      return InitFailure(
          INIT_FAILED,
          "timer",
          "GATEWAY_TIMER_START_FAILED",
          "MetafxHQ MT5: GATEWAY_TIMER_START_FAILED"
       );
-      ReleasePortfolioPolicyLease();
-      ReleaseLiveAccountOwnerLock();
-      ReleaseChannelLock();
-      return init_result;
    }
 
    PublishSnapshotIfDue(true);
    if(!g_last_snapshot_write_ok)
    {
-      int init_result = InitFailure(
+      return InitFailure(
          INIT_FAILED,
          "snapshot",
          "INITIAL_SNAPSHOT_WRITE_FAILED",
          "MetafxHQ MT5: INITIAL_SNAPSHOT_WRITE_FAILED"
       );
-      EventKillTimer();
-      InvalidatePublishedRuntimeState();
-      ReleasePortfolioPolicyLease();
-      ReleaseLiveAccountOwnerLock();
-      ReleaseChannelLock();
-      return init_result;
    }
    if(!WriteCapabilitiesSnapshot())
    {
-      int init_result = InitFailure(
+      return InitFailure(
          INIT_FAILED,
          "capabilities",
          "INITIAL_CAPABILITIES_WRITE_FAILED",
          "MetafxHQ MT5: INITIAL_CAPABILITIES_WRITE_FAILED"
       );
-      EventKillTimer();
-      InvalidatePublishedRuntimeState();
-      ReleasePortfolioPolicyLease();
-      ReleaseLiveAccountOwnerLock();
-      ReleaseChannelLock();
-      return init_result;
    }
 
    UpdateRiskTelemetry(true);
    if(!WriteStatusSnapshot())
    {
-      int init_result = InitFailure(
+      return InitFailure(
          INIT_FAILED,
          "status",
          "INITIAL_STATUS_WRITE_FAILED",
          "MetafxHQ MT5: INITIAL_STATUS_WRITE_FAILED"
       );
-      EventKillTimer();
-      InvalidatePublishedRuntimeState();
-      ReleasePortfolioPolicyLease();
-      ReleaseLiveAccountOwnerLock();
-      ReleaseChannelLock();
-      return init_result;
    }
+   // Only a complete initialization opens the command path. Initial capability
+   // and status files were deliberately non-authorizing; the next timer refresh
+   // publishes current readiness after this latch is set.
+   g_runtime_initialized = true;
+   UpdateRiskTelemetry(true);
    AppendAudit(
       BuildSystemAckJson(
          "INIT_CONFIG",
@@ -8214,13 +8967,27 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   ReleaseOutcomeSearch();
+   ResetObservedTick();
    EventKillTimer();
-   AppendAudit(
-      BuildSystemAckJson(
-         "FAIL_SAFE",
-         "GATEWAY_STOPPED_" + IntegerToString(reason)
-      )
-   );
+   if(g_channel_lock_handle != INVALID_HANDLE && g_runtime_initialized)
+   {
+      AppendAudit(
+         BuildSystemAckJson(
+            "FAIL_SAFE",
+            "GATEWAY_STOPPED_" + IntegerToString(reason)
+         )
+      );
+   }
+   g_runtime_initialized = false;
+   g_diagnostic_timer_ready = false;
+   if(g_init_blocked && g_channel_lock_handle != INVALID_HANDLE)
+   {
+      RecordInitDiagnostic(
+         "error", g_init_failure_stage, g_init_failure_reason,
+         g_init_failure_return_code, false, false
+      );
+   }
    InvalidatePublishedRuntimeState();
    ReleaseAccountExecutionLock();
    ReleasePortfolioPolicyLease();
@@ -8232,14 +8999,22 @@ void OnDeinit(const int reason)
 
 void OnTick()
 {
-   g_last_tick_millis = GetTickCount();
+   ObserveChartTick();
 }
 
 
 void OnTimer()
 {
+   if(!IsConnected())
+      ResetObservedTick();
+   if(!GatewayInitializationReady())
+   {
+      UpdateBlockedInitDiagnostic(false);
+      return;
+   }
    PublishSnapshotIfDue(false);
    ProcessCommandFile();
+   RefreshManagedOutcomeFiles(false);
    UpdateRiskTelemetry(false);
    WriteCapabilitiesSnapshot();
    WriteStatusSnapshot();

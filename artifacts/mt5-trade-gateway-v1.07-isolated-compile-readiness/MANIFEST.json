@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "metafx-hq-mt5-ea-compile-proof-v2",
+  "packageVersion": "1.07",
+  "candidateStatus": "compile_verified_local_candidate",
+  "sourceFile": "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5",
+  "binaryFile": "integrations/mt5-trade-gateway/MetafxHQTradeGateway.ex5",
+  "sourceSha256": "0B1730F050C492904D795E944630436D224342911D7FD498B3248A5CFAC19A14",
+  "sourceBytes": 276526,
+  "binarySha256": "66387C83EFA091AF68C45AD3237D9A38418D8834A1DB438CA0FC7556FA3FBEA0",
+  "binaryBytes": 315438,
+  "releasePolicy": "source_and_verified_binary",
+  "compiledBinaryIncluded": true,
+  "compiledBinaryEligibleForDistribution": true,
+  "compileEvidence": {
+    "status": "passed",
+    "mode": "isolated_portable_metaeditor64_cli_exact_source",
+    "compilerVersion": "5.0.0.6230",
+    "compilerSha256": "CF2750BDE55D98A1F3B4E56BCDD4F59300D0CFF5CAA6760985F7EF2C2CC12229",
+    "compilerSignatureStatus": "Valid",
+    "errors": 0,
+    "warnings": 0,
+    "elapsedMs": 11603,
+    "cpuTarget": "X64 Regular",
+    "compileStartedAtUtc": "2026-10-24T12:31:33.6510976Z",
+    "compiledAtUtc": "2026-10-24T12:31:45.902424+00:00",
+    "compiledSourceSha256": "0B1730F050C492904D795E944630436D224342911D7FD498B3248A5CFAC19A14",
+    "currentSourceMatchesCompiledSource": true,
+    "log": "COMPILE_LOG.log",
+    "logSha256": "A9B6DA1047B8B676B982E8AA3D2F16DD4C150C4281B18941681997369A9217D6",
+    "processExitCode": 1,
+    "successBasis": "fresh exact-source EX5 plus zero-error zero-warning compiler log and file hashes; exit code alone is not success evidence",
+    "originalFilesAndProcessesUnchanged": true,
+    "nativeLogSha256": "FCB4677A6889FD56E54B28480B133027CDBE1B2EC48869AEE5A109BD1F7C60EF",
+    "logRedaction": "absolute_source_path_replaced_with_source_filename; original log hash retained"
+  },
+  "safety": {
+    "scope": "Compile only in the task workspace with a byte-identical signed compiler copy in /portable mode. Original editor and MT5 processes, title/start identities, active MQ5/EX5 and canonical/runtime source files preserved.",
+    "terminalStayedOpen": true,
+    "eaAttachedToChart": false,
+    "algoTradingChanged": false,
+    "orderOrTradeCommandSent": false,
+    "demoExecutionValidated": false,
+    "liveExecutionValidated": false,
+    "nativeAttachmentValidated": false
+  },
+  "references": [
+    "https://www.metatrader5.com/en/metaeditor/help/beginning/integration_ide",
+    "https://www.metatrader5.com/en/metaeditor/help/beginning/open",
+    "https://www.metatrader5.com/en/metaeditor/help/development/compile"
+  ]
+}

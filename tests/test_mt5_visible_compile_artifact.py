@@ -1,5 +1,9 @@
-from __future__ import annotations
+"""Native compile evidence. Only extracted installer validation functions run.
 
+No installer entrypoint, compiler, terminal, profile or trading action is run.
+The module name remains stable for existing release automation.
+"""
+from __future__ import annotations
 import hashlib
 import json
 import os
@@ -10,219 +14,146 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT_DIR = (
-    ROOT / "artifacts" / "mt5-trade-gateway-v1.03-visible-compile-readiness"
-)
-MANIFEST_PATH = ARTIFACT_DIR / "MANIFEST.json"
-CHECKSUMS_PATH = ARTIFACT_DIR / "SHA256SUMS.txt"
-SOURCE_PATH = (
-    ROOT / "integrations" / "mt5-trade-gateway" / "MetafxHQTradeGateway.mq5"
-)
-
+MT4_REL = Path('artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness')
+MT5_REL = Path('artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness')
+ARTIFACT_DIR = ROOT / MT5_REL
+SOURCE_REL = Path('integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5')
+BINARY_REL = SOURCE_REL.with_suffix('.ex5')
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest().upper()
+    return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
+def rehash(folder: Path) -> None:
+    files = sorted(p for p in folder.iterdir() if p.is_file() and p.name != 'SHA256SUMS.txt')
+    (folder / 'SHA256SUMS.txt').write_text(''.join(f'{sha256(p)}  {p.name}\n' for p in files), encoding='utf-8')
 
-class Mt5VisibleCompileArtifactTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+def stage_minimum(destination: Path) -> None:
+    for rel in (MT4_REL, MT5_REL):
+        shutil.copytree(ROOT / rel, destination / rel)
+    for rel in (SOURCE_REL, BINARY_REL, Path('integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4')):
+        (destination / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / rel, destination / rel)
 
-    def test_manifest_source_and_source_only_distribution_policy(self) -> None:
-        self.assertEqual(
-            self.manifest["sourceFile"],
-            "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5",
-        )
-        self.assertEqual(self.manifest["sourceSha256"], sha256(SOURCE_PATH))
-        self.assertEqual(self.manifest["releasePolicy"], "source_only")
-        self.assertFalse(self.manifest["compiledBinaryIncluded"])
-        self.assertFalse(self.manifest["compiledBinaryEligibleForDistribution"])
-
-    def test_visible_metaeditor64_compile_evidence_matches_exact_source(self) -> None:
-        evidence = self.manifest["compileEvidence"]
-        self.assertEqual(evidence["status"], "passed")
-        self.assertEqual(evidence["mode"], "visible_metaeditor64_exact_source")
-        self.assertEqual(evidence["errors"], 0)
-        self.assertEqual(evidence["warnings"], 0)
-        self.assertEqual(
-            evidence["compiledSourceSha256"],
-            self.manifest["sourceSha256"],
-        )
-        self.assertIs(evidence["currentSourceMatchesCompiledSource"], True)
-
-    def test_compile_proof_hash_matches_manifest_and_file(self) -> None:
-        evidence = self.manifest["compileEvidence"]
-        proof_name = evidence["screenshot"]
-        self.assertEqual(proof_name, "COMPILE_PROOF.png")
-        proof_path = ARTIFACT_DIR / proof_name
-        self.assertTrue(proof_path.is_file())
-        self.assertEqual(evidence["screenshotSha256"], sha256(proof_path))
-
-    def test_checksum_set_is_complete_and_every_entry_matches(self) -> None:
-        entries: dict[str, str] = {}
-        for line in CHECKSUMS_PATH.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            match = re.fullmatch(r"([0-9A-Fa-f]{64})  ([^\\/]+)", line)
-            self.assertIsNotNone(match, f"Malformed checksum line: {line!r}")
-            expected_hash, filename = match.groups()
-            self.assertNotIn(filename, entries, f"Duplicate checksum: {filename}")
-            entries[filename] = expected_hash.upper()
-
-        expected_files = {
-            path.name
-            for path in ARTIFACT_DIR.iterdir()
-            if path.is_file() and path.name != CHECKSUMS_PATH.name
-        }
-        self.assertEqual(set(entries), expected_files)
-        for filename, expected_hash in entries.items():
-            with self.subTest(filename=filename):
-                self.assertEqual(sha256(ARTIFACT_DIR / filename), expected_hash)
-
-    def test_no_compiled_mt5_binary_is_distributed(self) -> None:
-        integration_dir = ROOT / "integrations" / "mt5-trade-gateway"
-        for directory in (ARTIFACT_DIR, integration_dir):
-            ex5_files = [
-                path
-                for path in directory.rglob("*")
-                if path.is_file() and path.suffix.casefold() == ".ex5"
-            ]
-            self.assertEqual(ex5_files, [], f"EX5 must not be distributed in {directory}")
-
-    def test_compile_proof_does_not_claim_demo_or_live_execution(self) -> None:
-        safety = self.manifest["safety"]
-        self.assertIs(safety["demoExecutionValidated"], False)
-        self.assertIs(safety["liveExecutionValidated"], False)
-        self.assertIs(safety["eaAttachedToChart"], False)
-        self.assertIs(safety["algoTradingChanged"], False)
-        self.assertIs(safety["orderOrTradeCommandSent"], False)
-
-    def test_release_and_installer_preserve_the_complete_mt5_proof(self) -> None:
-        installer = (ROOT / "installer" / "install.ps1").read_text(
-            encoding="utf-8-sig"
-        )
-        workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(
-            encoding="utf-8"
-        )
-        artifact_windows = (
-            r"artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
-        )
-        expected_files = {
-            path.name for path in ARTIFACT_DIR.iterdir() if path.is_file()
-        }
-        self.assertEqual(
-            expected_files,
-            {
-                "AUDIT_TH.md",
-                "BUILD_LOG.txt",
-                "COMPILE_PROOF.png",
-                "MANIFEST.json",
-                "README_TH.md",
-                "SHA256SUMS.txt",
-            },
-        )
-        self.assertIn("Assert-Mt5CompileArtifactIntegrity", installer)
-        self.assertGreaterEqual(installer.count(artifact_windows), 4)
-        for filename in expected_files:
-            relative_path = f"{artifact_windows}\\{filename}"
-            with self.subTest(filename=filename):
-                self.assertIn(relative_path, installer)
-                self.assertIn(relative_path, workflow)
-
-        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8-sig")
-        self.assertIn(
-            "!artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/",
-            ignored,
-        )
-        self.assertIn(
-            "!artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/**",
-            ignored,
-        )
-
-    @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer gate")
-    def test_installer_rejects_a_tampered_mt5_compile_proof(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            candidate_root = Path(directory)
-            staged_artifact = (
-                candidate_root
-                / "artifacts"
-                / "mt5-trade-gateway-v1.03-visible-compile-readiness"
-            )
-            staged_source = (
-                candidate_root
-                / "integrations"
-                / "mt5-trade-gateway"
-                / "MetafxHQTradeGateway.mq5"
-            )
-            shutil.copytree(ARTIFACT_DIR, staged_artifact)
-            staged_source.parent.mkdir(parents=True)
-            shutil.copy2(SOURCE_PATH, staged_source)
-            with (staged_artifact / "README_TH.md").open("ab") as handle:
-                handle.write(b"\ntampered\n")
-
-            installer_path = str(ROOT / "installer" / "install.ps1").replace(
-                "'", "''"
-            )
-            candidate_path = str(candidate_root).replace("'", "''")
-            script = rf"""
-$ErrorActionPreference = 'Stop'
-$tokens = $null
-$parseErrors = $null
-$ast = [Management.Automation.Language.Parser]::ParseFile(
-    '{installer_path}',
-    [ref]$tokens,
-    [ref]$parseErrors
-)
-if ($parseErrors.Count -ne 0) {{ throw 'Installer parse failed' }}
-foreach ($name in @('Get-Sha256Hex', 'Assert-Mt5CompileArtifactIntegrity')) {{
-    $node = $ast.Find({{
-        param($candidate)
-        $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $candidate.Name -ceq $name
-    }}, $true)
-    if (-not $node) {{ throw "Function missing: $name" }}
+def run_gates(candidate: Path, platform: str = 'both') -> subprocess.CompletedProcess:
+    installer = str(ROOT / 'installer/install.ps1').replace("'", "''")
+    location = str(candidate).replace("'", "''")
+    calls = []
+    if platform in ('mt4', 'both'):
+        calls.append(f"Assert-EaArtifactIntegrity -CandidateRoot '{location}'")
+    if platform in ('mt5', 'both'):
+        calls.append(f"Assert-Mt5CompileArtifactIntegrity -CandidateRoot '{location}'")
+    code = """$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$tokens=$null; $parseErrors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('INSTALLER',[ref]$tokens,[ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'Installer parse failed' }
+foreach ($name in @('Get-Sha256Hex','Assert-NativeCompileArtifactIntegrity','Assert-EaArtifactIntegrity','Assert-Mt5CompileArtifactIntegrity')) {
+    $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+    if (-not $node) { throw 'Missing gate function' }
     Invoke-Expression $node.Extent.Text
-}}
-$rejected = $false
-try {{
-    Assert-Mt5CompileArtifactIntegrity -CandidateRoot '{candidate_path}'
-}}
-catch {{
-    if ($_.Exception.Message -notmatch 'SHA-256.*MT5') {{ throw }}
-    $rejected = $true
-}}
-if (-not $rejected) {{ throw 'Tampered MT5 proof was accepted' }}
-"""
-            completed = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    script,
-                ],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
-            )
-            self.assertEqual(
-                completed.returncode,
-                0,
-                completed.stdout + completed.stderr,
-            )
+}
+""".replace('INSTALLER', installer) + '\n'.join(calls)
+    return subprocess.run(['powershell.exe','-NoLogo','-NoProfile','-NonInteractive','-Command',code], cwd=ROOT, capture_output=True, encoding='utf-8', errors='replace', timeout=30, check=False)
 
+class Mt5NativeCompileArtifactTests(unittest.TestCase):
+    def test_source_binary_and_native_log_are_exact_reviewed_bytes(self) -> None:
+        manifest = json.loads((ARTIFACT_DIR / 'MANIFEST.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['schemaVersion'], 'metafx-hq-mt5-ea-compile-proof-v2')
+        self.assertEqual(manifest['packageVersion'], '1.07')
+        self.assertEqual(manifest['releasePolicy'], 'source_and_verified_binary')
+        self.assertIs(manifest['compiledBinaryIncluded'], True)
+        self.assertIs(manifest['compiledBinaryEligibleForDistribution'], True)
+        for field, rel in (('source', SOURCE_REL), ('binary', BINARY_REL)):
+            self.assertEqual(manifest[field + 'File'], rel.as_posix())
+            self.assertEqual(manifest[field + 'Sha256'], sha256(ROOT / rel))
+            self.assertEqual(manifest[field + 'Bytes'], (ROOT / rel).stat().st_size)
+        evidence = manifest['compileEvidence']
+        self.assertEqual(evidence['mode'], 'isolated_portable_metaeditor64_cli_exact_source')
+        self.assertEqual((evidence['errors'], evidence['warnings']), (0, 0))
+        self.assertEqual(evidence['compiledSourceSha256'], manifest['sourceSha256'])
+        self.assertEqual(evidence['logSha256'], sha256(ARTIFACT_DIR / 'COMPILE_LOG.log'))
+        self.assertNotIn('screenshot', evidence)
+        for key in ('eaAttachedToChart','algoTradingChanged','orderOrTradeCommandSent','demoExecutionValidated','liveExecutionValidated','nativeAttachmentValidated'):
+            self.assertIs(manifest['safety'][key], False)
 
-if __name__ == "__main__":
+    def test_checksums_complete_unique_and_public_logs_are_portable(self) -> None:
+        for relative in (MT4_REL, MT5_REL):
+            folder = ROOT / relative
+            entries = {}
+            for line in (folder / 'SHA256SUMS.txt').read_text(encoding='utf-8').splitlines():
+                match = re.fullmatch(r'([0-9A-F]{64})  ([^\\/]+)', line)
+                self.assertIsNotNone(match)
+                digest, name = match.groups()
+                self.assertNotIn(name, entries)
+                entries[name] = digest
+                self.assertEqual(sha256(folder / name), digest)
+            self.assertEqual(set(entries), {p.name for p in folder.iterdir() if p.name != 'SHA256SUMS.txt'})
+            for name in ('COMPILE_LOG.log','BUILD_LOG.txt','MANIFEST.json'):
+                self.assertNotRegex((folder / name).read_text(encoding='utf-8'), r'(?i)(?<![A-Za-z])(?:[A-Z]:[\\/]|/Users/|/home/)')
+
+    def test_all_package_boundaries_require_complete_current_evidence(self) -> None:
+        installer = (ROOT / 'installer/install.ps1').read_text(encoding='utf-8-sig')
+        workflow = (ROOT / '.github/workflows/publish-release.yml').read_text(encoding='utf-8-sig')
+        boundaries = [installer[installer.index('$requiredFiles = @('):installer.index('foreach ($relativePath in $requiredFiles)')]]
+        for marker in ('foreach ($requiredFile in @(', 'foreach ($requiredInstalledFile in @(', 'foreach ($verifiedRuntimeFile in @('):
+            start = workflow.index(marker)
+            boundaries.append(workflow[start:workflow.index(')) {', start)])
+        for rel in (MT4_REL, MT5_REL):
+            for file in (ROOT / rel).iterdir():
+                for boundary in boundaries:
+                    self.assertIn(str(file.relative_to(ROOT)).replace('/', '\\'), boundary)
+        for boundary in boundaries:
+            self.assertIn(str(BINARY_REL).replace('/', '\\'), boundary)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows PowerShell validation only')
+    def test_real_current_proofs_pass_strict_mode_without_running_installer(self) -> None:
+        result = run_gates(ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows PowerShell validation only')
+    def test_recomputed_checksums_do_not_approve_stale_forged_or_unreviewed_proof(self) -> None:
+        # Rehash each corrupted local bundle. Merely self-consistent metadata
+        # cannot replace the reviewed binaries or truthful native compile proof.
+        mutations = ('source_changed', 'binary_changed', 'stale_compile_source', 'boolean_string', 'nonzero_warning', 'screenshot_claim', 'live_claim', 'missing_log', 'duplicate_checksum', 'path_escape', 'log_failure')
+        for platform, rel in (('mt4', MT4_REL), ('mt5', MT5_REL)):
+            for mutation in mutations:
+                with self.subTest(platform=platform, mutation=mutation), tempfile.TemporaryDirectory() as temp:
+                    candidate = Path(temp)
+                    stage_minimum(candidate)
+                    folder = candidate / rel
+                    path = folder / 'MANIFEST.json'
+                    manifest = json.loads(path.read_text(encoding='utf-8'))
+                    source = folder / manifest['sourceFile'] if platform == 'mt4' else candidate / manifest['sourceFile']
+                    binary = folder / manifest['binaryFile'] if platform == 'mt4' else candidate / manifest['binaryFile']
+                    if mutation in ('source_changed', 'binary_changed'):
+                        target = source if mutation == 'source_changed' else binary
+                        target.write_bytes(target.read_bytes() + b'changed')
+                        field = 'source' if mutation == 'source_changed' else 'binary'
+                        manifest[field + 'Sha256'] = sha256(target)
+                        manifest[field + 'Bytes'] = target.stat().st_size
+                    elif mutation == 'stale_compile_source': manifest['compileEvidence']['compiledSourceSha256'] = '0' * 64
+                    elif mutation == 'boolean_string': manifest['compileEvidence']['currentSourceMatchesCompiledSource'] = 'true'
+                    elif mutation == 'nonzero_warning': manifest['compileEvidence']['warnings'] = 1
+                    elif mutation == 'screenshot_claim': manifest['compileEvidence']['screenshot'] = 'synthetic.png'
+                    elif mutation == 'live_claim': manifest['safety']['liveExecutionValidated'] = True
+                    elif mutation == 'missing_log': (folder / 'COMPILE_LOG.log').unlink()
+                    elif mutation == 'path_escape': manifest['sourceFile'] = '../outside.mq5'
+                    elif mutation == 'log_failure':
+                        log = folder / 'COMPILE_LOG.log'
+                        old_hash = sha256(log)
+                        log.write_text('Result: 1 errors, 0 warnings, 1 ms elapsed\n', encoding='utf-8')
+                        manifest['compileEvidence']['logSha256'] = sha256(log)
+                        build = folder / 'BUILD_LOG.txt'
+                        build.write_text(build.read_text(encoding='utf-8').replace(old_hash, sha256(log)), encoding='utf-8')
+                    path.write_text(json.dumps(manifest), encoding='utf-8')
+                    rehash(folder)
+                    if mutation == 'duplicate_checksum':
+                        sums = folder / 'SHA256SUMS.txt'
+                        sums.write_text(sums.read_text(encoding='utf-8') + sums.read_text(encoding='utf-8').splitlines()[0] + '\n', encoding='utf-8')
+                    result = run_gates(candidate, platform)
+                    self.assertNotEqual(result.returncode, 0, 'Tampered candidate was accepted')
+                    self.assertIn('Native compile', result.stderr, result.stdout + result.stderr)
+
+if __name__ == '__main__':
     unittest.main()

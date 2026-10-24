@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlparse
 
@@ -4318,6 +4319,43 @@ def build_chat_prompt(
 ตอบข้อความใหม่อย่างเป็นธรรมชาติในบทบาทที่กำหนด"""
 
 
+def provider_http_rate_limit_failure(result: dict) -> dict | None:
+    """Classify failed transport diagnostics; never infer quota from HTTP 429."""
+    if result.get("ok") is not False or result.get("exitCode") in {"timeout", "cancelled"}:
+        return None
+    diagnostic = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+    if not re.search(r"\b(?:(?:status|http(?:/\d(?:\.\d)?)?)\s*:?\s*429|429\s+too\s+many\s+requests)\b", diagnostic, re.I):
+        return None
+    hard_stop = bool(re.search(
+        r"insufficient[_ -]quota|\bquota\b|quota[_ -]limit|usage[_ -]limit|"
+        r"spend[_ -]?control|spending[_ -]limit|billing[_ -]hard[_ -]limit|"
+        r"(?:insufficient|exhausted|no|out of)[_ -]credits|credits[_ -](?:exhausted|depleted)|not logged in|login required|unauthorized",
+        diagnostic, re.I,
+    ))
+    retry_after = None
+    header = re.search(r"retry-after[\"']?\s*[:=]\s*[\"']?([^\r\n\"'}]+)", diagnostic, re.I)
+    if header:
+        value = header.group(1).strip()
+        try:
+            if re.fullmatch(r"\d+", value):
+                retry_after = int(value)
+            else:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    raise ValueError("Retry-After date has no timezone")
+                retry_after = max(0, math.ceil((retry_at - datetime.now(timezone.utc)).total_seconds()))
+        except (ValueError, TypeError, OverflowError):
+            # An unreadable provider wait directive must not become permission
+            # to retry earlier than requested.
+            hard_stop = True
+    return {
+        "schemaVersion": "codex-provider-http-failure-v1",
+        "httpStatus": 429,
+        "retryable": not hard_stop,
+        "retryAfterSeconds": retry_after,
+    }
+
+
 def _chat_failure_status(result: dict) -> tuple[str, str]:
     if result.get("exitCode") == "timeout":
         return "timeout", "Codex Chat ใช้เวลานานเกินกำหนดและถูกหยุดแล้ว"
@@ -4326,7 +4364,7 @@ def _chat_failure_status(result: dict) -> tuple[str, str]:
         return "auth_required", "กรุณา Login Codex ในเครื่องก่อนเริ่ม Chat"
     if any(token in diagnostic for token in ("unknown feature", "unexpected argument", "unknown variant", "error loading configuration")):
         return "guard_config_error", "Codex รุ่นนี้ไม่รองรับ Guard สำหรับ Chat ครบถ้วน ระบบจึงหยุดแบบปลอดภัย"
-    if any(token in diagnostic for token in ("rate limit", "usage limit")):
+    if provider_http_rate_limit_failure(result) or any(token in diagnostic for token in ("rate limit", "usage limit")):
         return "rate_limited", "Codex แจ้งว่า Rate Limit ยังไม่พร้อมสำหรับข้อความใหม่"
     return "failed", "Codex Chat ทำงานไม่สำเร็จและไม่ได้ลองซ้ำอัตโนมัติ"
 
@@ -15433,6 +15471,7 @@ def run_codex(
             )
 
     diagnostic = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
+    provider_failure = provider_http_rate_limit_failure(result)
     work_status = str((structured_result or {}).get("workStatus") or "")
     if result["ok"] and structured_result is None:
         result_status = "invalid_output"
@@ -15458,7 +15497,7 @@ def run_codex(
     elif any(token in diagnostic for token in ("not logged in", "login required", "unauthorized")):
         result_status = "auth_required"
         result_message = "กรุณา Login Codex ในเครื่องก่อนเริ่มงาน"
-    elif any(token in diagnostic for token in ("rate limit", "usage limit")):
+    elif provider_failure or any(token in diagnostic for token in ("rate limit", "usage limit")):
         result_status = "rate_limited"
         result_message = "Codex แจ้งว่า Rate Limit ยังไม่พร้อมสำหรับงานใหม่"
     elif (
@@ -15504,6 +15543,7 @@ def run_codex(
         "executionMode": execution_mode,
         "resultMode": result_mode,
         "resultProfile": result_profile,
+        "providerFailure": provider_failure,
         "eaFactorySourceWriterVersion": (
             EA_FACTORY_SOURCE_WRITER_VERSION
             if result_profile == EA_FACTORY_SOURCE_RESULT_PROFILE

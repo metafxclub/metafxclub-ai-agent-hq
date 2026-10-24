@@ -33,7 +33,7 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         self.assertIn('"MT5_HEDGING_ACCOUNT_REQUIRED"', self.code)
         self.assertRegex(
             self.code,
-            r"(?s)int\s+OnInit\s*\(\s*\).*?if\s*\(\s*!IsHedgingAccount\s*\(\s*\)\s*\).*?return\s+INIT_FAILED",
+            r'(?s)int\s+OnInit\s*\(\s*\).*?if\s*\(\s*!IsHedgingAccount\s*\(\s*\)\s*\)\s*\{\s*return\s+InitFailure\(\s*INIT_FAILED,\s*"account_mode",\s*"MT5_HEDGING_ACCOUNT_REQUIRED"',
         )
 
     def test_legacy_schema_names_are_preserved_but_mt5_signature_is_bound(self) -> None:
@@ -361,6 +361,24 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         self.assertIn("DEAL_COMMISSION", self.code)
         self.assertIn("DEAL_FEE", self.code)
 
+    def test_snapshot_history_accepts_1000_closed_bars_without_padding_partial_history(self) -> None:
+        body = re.search(
+            r"(?s)string\s+BuildSnapshotBarsJson\s*\(\s*\)\s*\{(.*?)\n\}\n",
+            self.code,
+        )
+        self.assertIsNotNone(body)
+        publisher = body.group(1)
+        self.assertIn("MathMax(20, MathMin(SnapshotBars, 1000))", publisher)
+        self.assertIn("ArraySetAsSeries(rates, false)", publisher)
+        self.assertIn("CopyRates(_Symbol, _Period, 1, requested, rates)", publisher)
+        self.assertIn('if(copied <= 0)\n      return "[]";', publisher)
+        self.assertIn("index < copied", publisher)
+        self.assertNotIn("index < requested", publisher)
+        self.assertRegex(
+            self.code,
+            r'InputInRange\("SnapshotBars",\s*SnapshotBars,\s*20,\s*1000\)',
+        )
+
     def test_history_and_position_telemetry_fail_closed(self) -> None:
         for signature in (
             "bool ReadSnapshotDailySummary(",
@@ -537,9 +555,9 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
             "const int MAX_SAFE_SPREAD_POINTS = 10000;",
             "const int MAX_SAFE_SLIPPAGE_POINTS = 1000;",
             "const int MAX_SAFE_SIGNAL_DRIFT_POINTS = 10000;",
-            "MaxSpreadPoints > MAX_SAFE_SPREAD_POINTS",
-            "SlippagePoints > MAX_SAFE_SLIPPAGE_POINTS",
-            "MaxSignalDriftPoints > MAX_SAFE_SIGNAL_DRIFT_POINTS",
+            'InputInRange("MaxSpreadPoints", MaxSpreadPoints, 1, MAX_SAFE_SPREAD_POINTS)',
+            'InputInRange("SlippagePoints", SlippagePoints, 0, MAX_SAFE_SLIPPAGE_POINTS)',
+            'InputInRange("MaxSignalDriftPoints", MaxSignalDriftPoints, 1, MAX_SAFE_SIGNAL_DRIFT_POINTS)',
         ):
             self.assertIn(token, self.code)
 
@@ -592,36 +610,22 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
             "effective_risk_percent > MaxLossPerTradePercent",
             "MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT",
             "!ValidateFixedLot(reason)",
-            "GatewayMode == GATEWAY_LIVE && !LiveCommissionPolicyConfirmed()",
-            'reason = "LIVE_COMMISSION_POLICY_UNCONFIRMED"',
         ):
             self.assertIn(token, body)
+        self.assertNotIn("EstimatedCommissionPerLot", body)
+        self.assertNotIn("CommissionFreeAccountConfirmed", body)
+        self.assertNotIn("LIVE_COMMISSION_POLICY_UNCONFIRMED", body)
 
-    def test_live_requires_explicit_commission_policy_and_exact_symbol_token(self) -> None:
+    def test_price_only_cost_basis_retains_exact_symbol_and_truthful_legacy_fields(self) -> None:
         effective_commission = re.search(
             r"(?s)double\s+EffectiveEstimatedCommissionPerLot\s*\([^)]*\)\s*\{(.*?)\n\}",
             self.code,
         )
         self.assertIsNotNone(effective_commission)
-        for token in (
-            "MathIsValidNumber(EstimatedCommissionPerLot)",
-            "NormalizeDouble(EstimatedCommissionPerLot, 8)",
-        ):
-            self.assertIn(token, effective_commission.group(1))
-
-        commission_policy = re.search(
-            r"(?s)bool\s+LiveCommissionPolicyConfirmed\s*\([^)]*\)\s*\{(.*?)\n\}",
-            self.code,
-        )
-        self.assertIsNotNone(commission_policy)
-        for token in (
-            "EstimatedCommissionPerLot >= 0.0",
-            "EstimatedCommissionPerLot <= 1000000.0",
-            "EffectiveEstimatedCommissionPerLot() >= 0.00000001",
-            "CommissionFreeAccountConfirmed",
-        ):
-            self.assertIn(token, commission_policy.group(1))
-        self.assertNotIn("EstimatedCommissionPerLot > 0.0", commission_policy.group(1))
+        self.assertEqual(effective_commission.group(1).strip(), "return 0.0;")
+        self.assertNotIn("LiveCommissionPolicyConfirmed", self.code)
+        self.assertIn('return "price_and_slippage_excluding_commission";', self.code)
+        self.assertNotIn("CommissionFreeAccountConfirmed = true", self.code)
 
         exact_symbol = re.search(
             r"(?s)bool\s+LiveSymbolExactAllowlistConfirmed\s*\([^)]*\)\s*\{(.*?)\n\}",
@@ -637,12 +641,13 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         )
         self.assertIsNotNone(canonical)
         canonical_body = canonical.group(1)
+        basis_index = canonical_body.find('"|riskCostBasis="')
         commission_index = canonical_body.find('"|estimatedCommissionPerLot="')
-        confirmation_index = canonical_body.find('"|commissionFreeAccountConfirmed="')
         position_cap_index = canonical_body.find('"|maxManagedOpenPositions="')
-        self.assertGreaterEqual(commission_index, 0)
-        self.assertGreater(confirmation_index, commission_index)
-        self.assertGreater(position_cap_index, confirmation_index)
+        self.assertGreaterEqual(basis_index, 0)
+        self.assertGreater(commission_index, basis_index)
+        self.assertGreater(position_cap_index, commission_index)
+        self.assertNotIn("CommissionFreeAccountConfirmed", canonical_body)
         self.assertIn("DoubleToString(EffectiveEstimatedCommissionPerLot(), 8)", canonical_body)
 
         capabilities = re.search(
@@ -651,12 +656,11 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         )
         self.assertIsNotNone(capabilities)
         for token in (
-            "LiveCommissionPolicyConfirmed()",
             "LiveSymbolExactAllowlistConfirmed()",
-            "LIVE_COMMISSION_POLICY_UNCONFIRMED",
             "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST",
         ):
             self.assertIn(token, capabilities.group(1))
+        self.assertNotIn("commission", capabilities.group(1).lower())
 
         status = re.search(
             r"(?s)string\s+BuildStatusJson\s*\([^)]*\)\s*\{(.*?)\n\}",
@@ -666,6 +670,8 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         self.assertIn(r'\"commissionFreeAccountConfirmed\":', status.group(1))
         self.assertIn("JsonBoolean(CommissionFreeAccountConfirmed)", status.group(1))
         self.assertIn("JsonNumber(EffectiveEstimatedCommissionPerLot(), 8)", status.group(1))
+        self.assertIn(r'\"riskCostBasis\":', status.group(1))
+        self.assertIn("JsonString(RiskCostBasisName())", status.group(1))
 
         runtime = re.search(
             r"(?s)bool\s+ValidateRuntime\s*\([^)]*\)\s*\{(.*?)\n\}\n\n\nbool\s+UpdateRiskTelemetry",
@@ -694,7 +700,7 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         self.assertGreaterEqual(exact_gate_index, 0)
         self.assertGreater(broker_match_index, exact_gate_index)
 
-    def test_risk_sizing_uses_broker_units_floors_volume_and_reserves_fees(self) -> None:
+    def test_risk_sizing_uses_broker_units_floors_volume_and_zero_effective_fee(self) -> None:
         sizing = re.search(
             r"(?s)bool\s+ResolveOrderVolume\s*\([^)]*\)\s*\{(.*?)\n\}\n\n\nbool\s+ValidateClosedBarBinding",
             self.code,
@@ -782,9 +788,11 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         # Raw input is allowed only at the declaration, normalization helper,
         # and finite/range validation boundary. Values with more than 8dp are
         # accepted but all behavior uses the one normalized semantic value.
+        # Diagnostic text naming an Input does not read its numeric value.
+        executable_code = re.sub(r'"(?:\\.|[^"\\])*"', '""', self.code)
         raw_uses = [
             line.strip()
-            for line in self.code.splitlines()
+            for line in executable_code.splitlines()
             if "RiskPercent" in line and "EffectiveRiskPercent" not in line
         ]
         permitted_fragments = (
@@ -956,6 +964,13 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         )
         self.assertIsNotNone(on_init)
         body = on_init.group(1)
+        self.assertIn("!ValidateGatewayInputConfiguration()", body)
+        numeric_guard = re.search(
+            r"(?s)bool\s+InputInRange\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(numeric_guard)
+        self.assertIn("!MathIsValidNumber(value)", numeric_guard.group(1))
         for name in (
             "MaxManagedTotalLots",
             "MaxLossPerTradePercent",
@@ -965,7 +980,7 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
             "MinRewardRiskRatio",
             "MinProjectedMarginLevelPercent",
         ):
-            self.assertIn(f"!MathIsValidNumber({name})", body)
+            self.assertIn(f'InputInRange("{name}", {name},', self.code)
 
     def test_selected_volume_flows_through_caps_checks_request_and_ack(self) -> None:
         for token in (
@@ -1149,8 +1164,8 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
 
     def test_mt5_live_requires_explicit_single_host_fences(self) -> None:
         self.assertNotIn('"DISTRIBUTED_ACCOUNT_LEASE_REQUIRED"', self.code)
-        self.assertIn('#property version   "1.03"', self.code)
-        self.assertIn('string EA_VERSION = "1.03";', self.code)
+        self.assertIn('#property version   "1.07"', self.code)
+        self.assertIn('string EA_VERSION = "1.07";', self.code)
         for token in (
             "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT",
             "LIVE_NOT_ARMED",

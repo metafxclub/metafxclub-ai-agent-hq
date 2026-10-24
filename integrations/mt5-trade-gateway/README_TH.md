@@ -2,7 +2,7 @@
 
 ไฟล์ `MetafxHQTradeGateway.mq5` เป็น Gateway สำหรับ MetaTrader 5 ที่ใช้สัญญาไฟล์กลางชุดเดียวกับ Gateway MT4 เดิม เพื่อให้ Local Runner อ่าน Snapshot ส่งคำสั่งที่ลงลายเซ็น และรับ ACK ได้โดยไม่ต้องมี Backend อีกชุด
 
-## ขอบเขตของรุ่น 1.03
+## ขอบเขตของรุ่น 1.07
 
 - รองรับเฉพาะบัญชี MT5 แบบ **Hedging** เท่านั้น หากเป็น Netting หรือ Exchange EA จะหยุดตั้งแต่ `OnInit` ด้วย `MT5_HEDGING_ACCOUNT_REQUIRED`
 - ค่าเริ่มต้นคือ `GatewayMode = GATEWAY_SHADOW`, `LiveArmed = false` และ `SingleHostLiveAcknowledged = false`
@@ -35,7 +35,7 @@
 
 EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เหมือน MT4 และใช้ namespace `MT4|<login>|<server>` สำหรับ account execution lock โดยตั้งใจ เพื่อประสาน MT4 กับ MT5 ที่ใช้บัญชีเดียวกันภายใต้ Windows user และเครื่องเดียวกัน
 
-รุ่น 1.03 เปิด `GATEWAY_LIVE` ได้เฉพาะรูปแบบ **Single-host Live** โดยถือ account-owner lock แบบค้างตลอดอายุ EA ตาม Login + Server ภายใต้ `FILE_COMMON` หากมี Gateway MT5 รุ่นที่รองรับ lock นี้เป็นเจ้าของบัญชีเดียวกันอยู่แล้ว ตัวที่สองจะหยุดด้วย `LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE` และหากมีการเปลี่ยน Login หรือ Server หลังเริ่มทำงาน คำสั่งจะถูกปฏิเสธด้วย `LIVE_ACCOUNT_BINDING_CHANGED`
+รุ่น 1.07 เปิด `GATEWAY_LIVE` ได้เฉพาะรูปแบบ **Single-host Live** โดยถือ account-owner lock แบบค้างตลอดอายุ EA ตาม Login + Server ภายใต้ `FILE_COMMON` หากมี Gateway MT5 รุ่นที่รองรับ lock นี้เป็นเจ้าของบัญชีเดียวกันอยู่แล้ว ตัวที่สองจะหยุดด้วย `LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE` และหากมีการเปลี่ยน Login หรือ Server หลังเริ่มทำงาน คำสั่งจะถูกปฏิเสธด้วย `LIVE_ACCOUNT_BINDING_CHANGED`
 
 ข้อจำกัดสำคัญ: `FILE_COMMON` **ไม่ใช่ Distributed Lock** และไม่สามารถกัน Terminal ที่อยู่คนละ Windows user, คนละเครื่อง หรือคนละ VPS ได้ ค่า Status จึงยังรายงาน `crossVpsDistributedLock=false` และ `liveSafetyScope=single_windows_user_file_common_only` ตามความจริง ห้ามเปิด Live ของบัญชีเดียวกันซ้ำบน Windows user/เครื่อง/VPS อื่น หากต้องการรันข้ามหลายเครื่องต้องเพิ่ม remote account-scoped fenced lease ที่ Backend ก่อน
 
@@ -83,6 +83,8 @@ EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เ�
 
 เปิด MetaEditor 5 จาก MT5 ที่ต้องการใช้งาน เปิดไฟล์ `MetafxHQTradeGateway.mq5` จากโฟลเดอร์ `MQL5\Experts\Metafxclub\TradeGateway` แล้วกด **Compile** จากนั้นตรวจผลใน Toolbox ว่าไม่มี Error หรือ Warning ก่อนนำ EA ไปวางบนกราฟ
 
-หมายเหตุหลักฐาน: source ปัจจุบัน SHA-256 `42CB8A410DDE98E608307C12FC272513ED30F1E23F5B3267F7DCDF128A69175C` ผ่าน Visible Compile ด้วย MetaEditor64 `5.0.0.6230` ผล `0 errors, 0 warnings` ภายใน 9358 ms บน `AVX2+FMA3` แล้ว หลักฐานอยู่ที่ `artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/` และตรวจ Source hash ซ้ำหลัง Compile ว่าไม่เปลี่ยน Release ยังคงเป็นแบบ Source-only และไม่บรรจุ `.ex5`
+หมายเหตุหลักฐาน: รุ่น 1.07 รวม MetafxHQTradeGateway.mq5 และ MetafxHQTradeGateway.ex5 ที่คอมไพล์แบบ isolated portable CLI ด้วย MetaEditor64 5.0.0.6230 ได้ 0 errors / 0 warnings, X64 Regular, 11603 ms หลักฐานและ hash อยู่ที่ artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness/ ไม่ใช้ภาพ Compile ของรุ่นเก่ามายืนยันไฟล์ใหม่
 
-ผล Compile เป็นเพียง `compile_verified` ยังไม่ใช่หลักฐานว่าได้ส่งคำสั่งจริงบนบัญชี Demo หรือ Live ต้องทดสอบแบบมองเห็นได้บน MT5 Demo อีกครั้งก่อนใช้งานเงินจริง และระบบนี้ไม่ใช่การรับประกันผลกำไร
+ตัวติดตั้ง HQ เก็บไฟล์ใน integrations เท่านั้น ไม่คัดลอกลง Experts ไม่ attach EA และไม่เปิด Algo Trading ให้ ผู้ใช้ต้องตั้งค่าและยืนยันบนบัญชีที่ตั้งใจใช้งาน เริ่ม Shadow → Demo ก่อนพิจารณา Live ตามสิทธิ์ของเจ้าของบัญชี
+
+รุ่นนี้คงติดกราฟแบบ ATTACHED / BLOCKED เมื่อ Input ไม่ผ่านเพื่อแสดงสาเหตุ จึงไม่ควรใช้คำว่า attached แปลว่ารับคำสั่งเทรดได้ หลัง reinitialize/reconnect ต้องรอ Tick จริง ค่า MaxSnapshotAgeSeconds รับ5–900 วินาที, MaxSignalDriftPoints1–10000จุด และ MaxQuoteAgeSeconds1–120วินาที ไม่เพิ่มค่าเหล่านี้เพื่อหลบ guard

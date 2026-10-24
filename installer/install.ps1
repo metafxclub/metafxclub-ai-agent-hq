@@ -979,6 +979,7 @@ function Assert-SafeSource {
         "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
         "integrations\mt4-trade-gateway\README_TH.md",
         "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5",
+        "integrations\mt5-trade-gateway\MetafxHQTradeGateway.ex5",
         "integrations\mt5-trade-gateway\README_TH.md",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.mq4",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.ex4",
@@ -987,13 +988,13 @@ function Assert-SafeSource {
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\SHA256SUMS.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\BUILD_LOG.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
-        "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_PROOF.png",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\COMPILE_PROOF.png",
+        "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_LOG.log",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\README_TH.md",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\AUDIT_TH.md",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\SHA256SUMS.txt",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\BUILD_LOG.txt",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\MANIFEST.json",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\COMPILE_LOG.log",
         "runner\codex_cli_runner.py",
         "runner\codex_app_server_gateway.py",
         "scripts\register-bridge-autostart.ps1",
@@ -1103,243 +1104,131 @@ function Assert-SafeSource {
     Assert-NoEmbeddedHighConfidenceSecrets
 }
 
+function Assert-NativeCompileArtifactIntegrity {
+    param(
+        [string]$CandidateRoot, [string]$ArtifactRelativePath, [string]$Platform,
+        [string]$Version, [string]$SchemaVersion, [string]$CompileMode,
+        [string]$SourceRelativePath, [string]$BinaryRelativePath,
+        [string]$ManifestSourceFile, [string]$ManifestBinaryFile,
+        [string]$ApprovedSourceHash, [string]$ApprovedBinaryHash
+    )
+    $artifactDirectory = Join-Path $CandidateRoot $ArtifactRelativePath
+    $hashedArtifactFiles = @('AUDIT_TH.md', 'BUILD_LOG.txt', 'COMPILE_LOG.log', 'MANIFEST.json', 'README_TH.md')
+    if ($Platform -ceq 'mt4') { $hashedArtifactFiles += @('MetafxHQTradeGateway.mq4', 'MetafxHQTradeGateway.ex4') }
+    $expectedHashes = @{}
+    foreach ($line in Get-Content -LiteralPath (Join-Path $artifactDirectory 'SHA256SUMS.txt') -Encoding UTF8) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line -notmatch '^([A-Fa-f0-9]{64})\s+([^\\/]+)$') { throw 'Native compile checksum format invalid' }
+        $name = [string]$Matches[2]
+        if ($expectedHashes.ContainsKey($name)) { throw 'Native compile duplicate checksum entry' }
+        $expectedHashes[$name] = $Matches[1].ToUpperInvariant()
+    }
+    if ($expectedHashes.Count -ne $hashedArtifactFiles.Count) { throw 'Native compile checksum inventory invalid' }
+    $entries = @(Get-ChildItem -LiteralPath $artifactDirectory -Force)
+    if ($entries.Count -ne ($hashedArtifactFiles.Count + 1)) { throw 'Native compile artifact inventory invalid' }
+    foreach ($entry in $entries) {
+        if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Native compile linked or nested evidence rejected' }
+        if ($entry.Name -cne 'SHA256SUMS.txt' -and $entry.Name -cnotin $hashedArtifactFiles) { throw 'Native compile unexpected evidence file' }
+    }
+    foreach ($name in $hashedArtifactFiles) {
+        if (-not $expectedHashes.ContainsKey($name)) { throw 'Native compile checksum entry missing' }
+        if ((Get-Sha256Hex -LiteralPath (Join-Path $artifactDirectory $name)) -cne $expectedHashes[$name]) { throw 'Native compile evidence hash mismatch' }
+    }
+    $sourcePath = Join-Path $CandidateRoot $SourceRelativePath
+    $binaryPath = Join-Path $CandidateRoot $BinaryRelativePath
+    foreach ($path in @($sourcePath, $binaryPath)) {
+        $item = Get-Item -LiteralPath $path
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Native compile linked source/binary rejected' }
+    }
+    $sourceHash = Get-Sha256Hex -LiteralPath $sourcePath
+    $binaryHash = Get-Sha256Hex -LiteralPath $binaryPath
+    # Version-scoped reviewed hashes cannot be refreshed by editing a manifest alone.
+    if ($sourceHash -cne $ApprovedSourceHash -or $binaryHash -cne $ApprovedBinaryHash) { throw 'Native compile approved source/binary mismatch' }
+    if ($Platform -ceq 'mt4') {
+        $integrationSource = Join-Path $CandidateRoot 'integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4'
+        if ((Get-Sha256Hex -LiteralPath $integrationSource) -cne $sourceHash) { throw 'Native compile integration source mismatch' }
+    }
+    try { $manifest = Get-Content -LiteralPath (Join-Path $artifactDirectory 'MANIFEST.json') -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw 'Native compile manifest JSON invalid' }
+    $evidence = $manifest.compileEvidence
+    if (
+        [string]$manifest.schemaVersion -cne $SchemaVersion -or
+        [string]$manifest.packageVersion -cne $Version -or
+        [string]$manifest.candidateStatus -cne 'compile_verified_local_candidate' -or
+        [string]$manifest.sourceFile -cne $ManifestSourceFile -or
+        [string]$manifest.binaryFile -cne $ManifestBinaryFile -or
+        [string]$manifest.sourceSha256 -cne $sourceHash -or
+        [string]$manifest.binarySha256 -cne $binaryHash -or
+        [long]$manifest.sourceBytes -ne (Get-Item -LiteralPath $sourcePath).Length -or
+        [long]$manifest.binaryBytes -ne (Get-Item -LiteralPath $binaryPath).Length -or
+        [string]$evidence.status -cne 'passed' -or
+        [string]$evidence.mode -cne $CompileMode -or
+        [string]$evidence.compiledSourceSha256 -cne $sourceHash -or
+        $evidence.currentSourceMatchesCompiledSource -isnot [bool] -or
+        $evidence.currentSourceMatchesCompiledSource -ne $true -or
+        ($evidence.errors -isnot [int] -and $evidence.errors -isnot [long]) -or
+        ($evidence.warnings -isnot [int] -and $evidence.warnings -isnot [long]) -or
+        $evidence.errors -ne 0 -or $evidence.warnings -ne 0 -or
+        [string]$evidence.compilerVersion -notmatch '^\d+\.\d+\.\d+\.\d+$' -or
+        [string]$evidence.compilerSha256 -notmatch '^[A-F0-9]{64}$' -or
+        [string]$evidence.compilerSignatureStatus -cne 'Valid' -or
+        [string]$evidence.log -cne 'COMPILE_LOG.log' -or
+        [string]$evidence.logSha256 -cne $expectedHashes['COMPILE_LOG.log'] -or
+        [string]$evidence.nativeLogSha256 -notmatch '^[A-F0-9]{64}$' -or
+        'screenshot' -cin @($evidence.PSObject.Properties.Name) -or 'screenshotSha256' -cin @($evidence.PSObject.Properties.Name)
+    ) { throw 'Native compile manifest does not match exact source/binary proof' }
+    if ($Platform -ceq 'mt4') {
+        if ($manifest.ex4Included -isnot [bool] -or $manifest.ex4Included -ne $true -or
+            $manifest.binaryEligibleForInstall -isnot [bool] -or $manifest.binaryEligibleForInstall -ne $true) {
+            throw 'Native compile MT4 binary is not eligible'
+        }
+    } else {
+        if ([string]$manifest.releasePolicy -cne 'source_and_verified_binary' -or
+            $manifest.compiledBinaryIncluded -isnot [bool] -or $manifest.compiledBinaryIncluded -ne $true -or
+            $manifest.compiledBinaryEligibleForDistribution -isnot [bool] -or $manifest.compiledBinaryEligibleForDistribution -ne $true) {
+            throw 'Native compile MT5 binary is not eligible'
+        }
+    }
+    foreach ($key in @('eaAttachedToChart', 'algoTradingChanged', 'orderOrTradeCommandSent', 'demoExecutionValidated', 'liveExecutionValidated', 'nativeAttachmentValidated')) {
+        if ($manifest.safety.$key -isnot [bool] -or $manifest.safety.$key -ne $false) { throw 'Native compile proof must not claim runtime/live validation' }
+    }
+    $log = Get-Content -LiteralPath (Join-Path $artifactDirectory 'COMPILE_LOG.log') -Raw -Encoding UTF8
+    if ($log -notmatch '(?m)^Result:\s*0 errors,\s*0 warnings,\s*\d+\s+m(?:s|sec) elapsed') { throw 'Native compiler zero-error zero-warning result missing' }
+    $buildLog = Get-Content -LiteralPath (Join-Path $artifactDirectory 'BUILD_LOG.txt') -Raw -Encoding UTF8
+    foreach ($entry in @(
+        @('PackageVersion', $Version), @('CompileResult', 'PASS'), @('CompileErrors', '0'), @('CompileWarnings', '0'),
+        @('SourceSHA256', $sourceHash), @('BinarySHA256', $binaryHash), @('CompileLogSHA256', $expectedHashes['COMPILE_LOG.log'])
+    )) {
+        if ($buildLog -notmatch ('(?m)^' + [regex]::Escape($entry[0]) + ':\s*' + [regex]::Escape($entry[1]) + '\s*$')) { throw 'Native compile build summary mismatch' }
+    }
+    if (($log + $buildLog) -match '(?i)(?:[A-Z]:[\\/]|/Users/|/home/)') { throw 'Native compile public log contains absolute local path' }
+}
+
 function Assert-EaArtifactIntegrity {
     param([string]$CandidateRoot = $sourceRoot)
-
-    $artifactDirectory = Join-Path $CandidateRoot "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
-    $manifestPath = Join-Path $artifactDirectory "SHA256SUMS.txt"
-    $expectedHashes = @{}
-    foreach ($line in Get-Content -LiteralPath $manifestPath -Encoding UTF8) {
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
-        }
-        if ($line -notmatch '^([A-Fa-f0-9]{64})\s+([^\\/]+)$') {
-            throw "Manifest SHA-256 ของ EA มีรูปแบบไม่ถูกต้อง"
-        }
-        $expectedHashes[$Matches[2]] = $Matches[1].ToUpperInvariant()
-    }
-
-    $hashedArtifactFiles = @(
-        "AUDIT_TH.md",
-        "BUILD_LOG.txt",
-        "COMPILE_PROOF.png",
-        "MANIFEST.json",
-        "MetafxHQTradeGateway.ex4",
-        "MetafxHQTradeGateway.mq4",
-        "README_TH.md"
-    )
-    if ($expectedHashes.Count -ne $hashedArtifactFiles.Count) {
-        throw "Manifest SHA-256 ของ EA ต้องครอบคลุมไฟล์หลักฐาน v2.19 ครบถ้วนและไม่มีรายการแทรก"
-    }
-    foreach ($fileName in $hashedArtifactFiles) {
-        if (-not $expectedHashes.ContainsKey($fileName)) {
-            throw "Manifest SHA-256 ของ EA ไม่มีรายการ $fileName"
-        }
-        $artifactPath = Join-Path $artifactDirectory $fileName
-        $actualHash = Get-Sha256Hex -LiteralPath $artifactPath
-        if ($actualHash -cne [string]$expectedHashes[$fileName]) {
-            throw "หยุดติดตั้ง: SHA-256 ของ $fileName ไม่ตรงกับ Manifest"
-        }
-    }
-
-    $artifactSource = Join-Path $artifactDirectory "MetafxHQTradeGateway.mq4"
-    $artifactSourceHash = Get-Sha256Hex -LiteralPath $artifactSource
-
-    $artifactManifestPath = Join-Path $artifactDirectory "MANIFEST.json"
-    try {
-        $artifactManifest = Get-Content -LiteralPath $artifactManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        throw "หยุดติดตั้ง: MANIFEST.json ของ EA ไม่ใช่ JSON ที่สมบูรณ์"
-    }
-    if ([string]$artifactManifest.candidateStatus -ceq "blocked_visible_metaeditor_recompile_required") {
-        if (
-            [string]$artifactManifest.schemaVersion -cne "metafx-hq-mt4-ea-artifact-v1" -or
-            [string]$artifactManifest.packageVersion -cne "2.19" -or
-            [string]$artifactManifest.sourceFile -cne "MetafxHQTradeGateway.mq4" -or
-            [string]$artifactManifest.sourceSha256 -cne $artifactSourceHash -or
-            $artifactManifest.binaryEligibleForInstall -ne $false -or
-            [string]$artifactManifest.compileEvidence.status -cne "stale" -or
-            [string]$artifactManifest.compileEvidence.reason -cne "SOURCE_CHANGED_AFTER_COMPILE" -or
-            [string]$artifactManifest.compileEvidence.compiledSourceSha256 -ceq $artifactSourceHash -or
-            $artifactManifest.compileEvidence.currentSourceMatchesCompiledSource -ne $false
-        ) {
-            throw "หยุดติดตั้ง: สถานะหลักฐาน Compile ที่รอสร้างใหม่ของ EA v2.19 ไม่สมบูรณ์"
-        }
-        throw "หยุดติดตั้ง: Source ของ EA v2.19 เปลี่ยนหลังหลักฐาน Compile ล่าสุด ต้อง Compile Source ปัจจุบันแบบมองเห็นใน MetaEditor และสร้าง EX4/Proof ใหม่ก่อนเผยแพร่"
-    }
-    $binaryPath = Join-Path $artifactDirectory "MetafxHQTradeGateway.ex4"
-    $proofPath = Join-Path $artifactDirectory "COMPILE_PROOF.png"
-    $proofBytes = [IO.File]::ReadAllBytes($proofPath)
-    $pngSignature = if ($proofBytes.Length -ge 8) {
-        (($proofBytes[0..7] | ForEach-Object { $_.ToString("X2") }) -join "")
-    } else {
-        ""
-    }
-    if (
-        [string]$artifactManifest.schemaVersion -cne "metafx-hq-mt4-ea-artifact-v1" -or
-        [string]$artifactManifest.packageVersion -cne "2.19" -or
-        [string]$artifactManifest.candidateStatus -cne "ready_visible_metaeditor_compiled" -or
-        [string]$artifactManifest.sourceFile -cne "MetafxHQTradeGateway.mq4" -or
-        [string]$artifactManifest.sourceSha256 -cne $artifactSourceHash -or
-        [string]$artifactManifest.binaryFile -cne "MetafxHQTradeGateway.ex4" -or
-        [string]$artifactManifest.binarySha256 -cne [string]$expectedHashes["MetafxHQTradeGateway.ex4"] -or
-        [long]$artifactManifest.binaryBytes -ne [long](Get-Item -LiteralPath $binaryPath).Length -or
-        $artifactManifest.ex4Included -ne $true -or
-        $artifactManifest.binaryEligibleForInstall -ne $true -or
-        [string]$artifactManifest.compileEvidence.status -cne "passed" -or
-        [string]$artifactManifest.compileEvidence.mode -cne "visible_metaeditor_front_office" -or
-        [string]$artifactManifest.compileEvidence.compiledSourceSha256 -cne $artifactSourceHash -or
-        $artifactManifest.compileEvidence.currentSourceMatchesCompiledSource -ne $true -or
-        [int]$artifactManifest.compileEvidence.errors -ne 0 -or
-        [int]$artifactManifest.compileEvidence.warnings -ne 0 -or
-        [string]$artifactManifest.compileEvidence.screenshot -cne "COMPILE_PROOF.png" -or
-        [string]$artifactManifest.compileEvidence.screenshotSha256 -cne [string]$expectedHashes["COMPILE_PROOF.png"] -or
-        [string]$artifactManifest.compileEvidence.releaseCompile.status -cne "passed" -or
-        [string]$artifactManifest.compileEvidence.releaseCompile.mode -cne "visible_metaeditor_exact_source" -or
-        [int]$artifactManifest.compileEvidence.releaseCompile.errors -ne 0 -or
-        [int]$artifactManifest.compileEvidence.releaseCompile.warnings -ne 0 -or
-        [string]$artifactManifest.compileEvidence.releaseCompile.sourceSha256 -cne $artifactSourceHash -or
-        [string]$artifactManifest.compileEvidence.releaseCompile.binarySha256 -cne [string]$expectedHashes["MetafxHQTradeGateway.ex4"] -or
-        $pngSignature -cne "89504E470D0A1A0A"
-    ) {
-        throw "หยุดติดตั้ง: MANIFEST/Compile proof ของ EA v2.19 ไม่ตรงกับ Source, Binary หรือผล Compile ที่อนุมัติ"
-    }
-
-    $buildLogPath = Join-Path $artifactDirectory "BUILD_LOG.txt"
-    $buildLog = Get-Content -LiteralPath $buildLogPath -Raw -Encoding UTF8
-    if (
-        $buildLog -notmatch '(?m)^PackageVersion:\s*2\.19\s*$' -or
-        $buildLog -notmatch '(?m)^CompileResult:\s*PASS\s*$' -or
-        $buildLog -notmatch '(?m)^CompileErrors:\s*0\s*$' -or
-        $buildLog -notmatch '(?m)^CompileWarnings:\s*0\s*$' -or
-        $buildLog -notmatch ("(?m)^SourceSHA256:\s*{0}\s*$" -f [regex]::Escape($artifactSourceHash)) -or
-        $buildLog -notmatch ("(?m)^BinarySHA256:\s*{0}\s*$" -f [regex]::Escape([string]$expectedHashes["MetafxHQTradeGateway.ex4"])) -or
-        $buildLog -notmatch ("(?m)^CompileProofSHA256:\s*{0}\s*$" -f [regex]::Escape([string]$expectedHashes["COMPILE_PROOF.png"]))
-    ) {
-        throw "หยุดติดตั้ง: หลักฐาน Compile ของ EA ไม่ตรงกับ Source/Binary/Proof ใน Artifact"
-    }
-    if ($buildLog -match '(?i)(?:[A-Z]:\\|/Users/|/home/)') {
-        throw "หยุดติดตั้ง: BUILD_LOG ของ EA มี Absolute local path"
-    }
+    Assert-NativeCompileArtifactIntegrity -CandidateRoot $CandidateRoot `
+        -ArtifactRelativePath 'artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness' -Platform 'mt4' -Version '2.20' `
+        -SchemaVersion 'metafx-hq-mt4-ea-artifact-v2' -CompileMode 'isolated_metaeditor_cli_exact_source' `
+        -SourceRelativePath 'artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.mq4' `
+        -BinaryRelativePath 'artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.ex4' `
+        -ManifestSourceFile 'MetafxHQTradeGateway.mq4' -ManifestBinaryFile 'MetafxHQTradeGateway.ex4' `
+        -ApprovedSourceHash '18B4B39E6405839CE9391E90057022DBEB2D18C1ABC7FED8F8211AAF3B1E3EFC' `
+        -ApprovedBinaryHash 'F848A267619EC4B2951C18602E6106BD22DC97142D4DE73E0EFABDEBE4E94930'
 }
 
 function Assert-Mt5CompileArtifactIntegrity {
     param([string]$CandidateRoot = $sourceRoot)
-
-    $artifactRelativePath = "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
-    $artifactDirectory = Join-Path $CandidateRoot $artifactRelativePath
-    $checksumPath = Join-Path $artifactDirectory "SHA256SUMS.txt"
-    $expectedHashes = @{}
-    foreach ($line in Get-Content -LiteralPath $checksumPath -Encoding UTF8) {
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
-        }
-        if ($line -notmatch '^([A-Fa-f0-9]{64})\s+([^\\/]+)$') {
-            throw "Manifest SHA-256 ของหลักฐาน Compile MT5 มีรูปแบบไม่ถูกต้อง"
-        }
-        $fileName = [string]$Matches[2]
-        if ($expectedHashes.ContainsKey($fileName)) {
-            throw "Manifest SHA-256 ของหลักฐาน Compile MT5 มีรายการซ้ำ: $fileName"
-        }
-        $expectedHashes[$fileName] = $Matches[1].ToUpperInvariant()
-    }
-
-    $hashedArtifactFiles = @(
-        "AUDIT_TH.md",
-        "BUILD_LOG.txt",
-        "COMPILE_PROOF.png",
-        "MANIFEST.json",
-        "README_TH.md"
-    )
-    if ($expectedHashes.Count -ne $hashedArtifactFiles.Count) {
-        throw "Manifest SHA-256 ของหลักฐาน Compile MT5 ต้องครอบคลุมไฟล์ครบถ้วนและไม่มีรายการแทรก"
-    }
-    foreach ($fileName in $hashedArtifactFiles) {
-        if (-not $expectedHashes.ContainsKey($fileName)) {
-            throw "Manifest SHA-256 ของหลักฐาน Compile MT5 ไม่มีรายการ $fileName"
-        }
-        $artifactPath = Join-Path $artifactDirectory $fileName
-        $actualHash = Get-Sha256Hex -LiteralPath $artifactPath
-        if ($actualHash -cne [string]$expectedHashes[$fileName]) {
-            throw "หยุดติดตั้ง: SHA-256 ของหลักฐาน Compile MT5 $fileName ไม่ตรงกับ Manifest"
-        }
-    }
-
-    $unexpectedBinary = @(
-        Get-ChildItem -LiteralPath $artifactDirectory -Recurse -File -Filter "*.ex5" -ErrorAction SilentlyContinue
-        Get-ChildItem -LiteralPath (Join-Path $CandidateRoot "integrations\mt5-trade-gateway") -Recurse -File -Filter "*.ex5" -ErrorAction SilentlyContinue
-    )
-    if ($unexpectedBinary.Count -gt 0) {
-        throw "หยุดติดตั้ง: Release MT5 ต้องเป็น Source-only และห้ามบรรจุไฟล์ EX5"
-    }
-
-    $sourcePath = Join-Path $CandidateRoot "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5"
-    $sourceHash = Get-Sha256Hex -LiteralPath $sourcePath
-    $sourceBytes = [long](Get-Item -LiteralPath $sourcePath).Length
-    $manifestPath = Join-Path $artifactDirectory "MANIFEST.json"
-    try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        throw "หยุดติดตั้ง: MANIFEST.json ของหลักฐาน Compile MT5 ไม่ใช่ JSON ที่สมบูรณ์"
-    }
-
-    $proofPath = Join-Path $artifactDirectory "COMPILE_PROOF.png"
-    $proofBytes = [IO.File]::ReadAllBytes($proofPath)
-    $pngSignature = if ($proofBytes.Length -ge 8) {
-        (($proofBytes[0..7] | ForEach-Object { $_.ToString("X2") }) -join "")
-    } else {
-        ""
-    }
-    if (
-        [string]$manifest.schemaVersion -cne "metafx-hq-mt5-ea-compile-proof-v1" -or
-        [string]$manifest.packageVersion -cne "1.03" -or
-        [string]$manifest.candidateStatus -cne "compile_verified_source_only" -or
-        [string]$manifest.sourceFile -cne "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5" -or
-        [string]$manifest.sourceSha256 -cne $sourceHash -or
-        [long]$manifest.sourceBytes -ne $sourceBytes -or
-        [string]$manifest.releasePolicy -cne "source_only" -or
-        $manifest.compiledBinaryIncluded -ne $false -or
-        $manifest.compiledBinaryEligibleForDistribution -ne $false -or
-        [string]$manifest.compileEvidence.status -cne "passed" -or
-        [string]$manifest.compileEvidence.mode -cne "visible_metaeditor64_exact_source" -or
-        [int]$manifest.compileEvidence.errors -ne 0 -or
-        [int]$manifest.compileEvidence.warnings -ne 0 -or
-        [string]$manifest.compileEvidence.compiledSourceSha256 -cne $sourceHash -or
-        $manifest.compileEvidence.currentSourceMatchesCompiledSource -ne $true -or
-        [string]$manifest.compileEvidence.screenshot -cne "COMPILE_PROOF.png" -or
-        [string]$manifest.compileEvidence.screenshotSha256 -cne [string]$expectedHashes["COMPILE_PROOF.png"] -or
-        $manifest.safety.eaAttachedToChart -ne $false -or
-        $manifest.safety.algoTradingChanged -ne $false -or
-        $manifest.safety.orderOrTradeCommandSent -ne $false -or
-        $manifest.safety.demoExecutionValidated -ne $false -or
-        $manifest.safety.liveExecutionValidated -ne $false -or
-        $pngSignature -cne "89504E470D0A1A0A"
-    ) {
-        throw "หยุดติดตั้ง: MANIFEST/Compile proof ของ MT5 v1.03 ไม่ตรงกับ Source หรือหลักฐานที่อนุมัติ"
-    }
-
-    $buildLog = Get-Content -LiteralPath (Join-Path $artifactDirectory "BUILD_LOG.txt") -Raw -Encoding UTF8
-    if (
-        $buildLog -notmatch '(?m)^PackageVersion:\s*1\.03\s*$' -or
-        $buildLog -notmatch '(?m)^CandidateStatus:\s*COMPILE_VERIFIED_SOURCE_ONLY\s*$' -or
-        $buildLog -notmatch '(?m)^CompileResult:\s*PASS\s*$' -or
-        $buildLog -notmatch '(?m)^CompileMode:\s*VISIBLE_METAEDITOR64_EXACT_SOURCE\s*$' -or
-        $buildLog -notmatch '(?m)^CompileErrors:\s*0\s*$' -or
-        $buildLog -notmatch '(?m)^CompileWarnings:\s*0\s*$' -or
-        $buildLog -notmatch ("(?m)^SourceSHA256:\s*{0}\s*$" -f [regex]::Escape($sourceHash)) -or
-        $buildLog -notmatch ("(?m)^CompileProofSHA256:\s*{0}\s*$" -f [regex]::Escape([string]$expectedHashes["COMPILE_PROOF.png"])) -or
-        $buildLog -notmatch '(?m)^ReleasePolicy:\s*SOURCE_ONLY\s*$' -or
-        $buildLog -notmatch '(?m)^CompiledBinaryIncluded:\s*false\s*$' -or
-        $buildLog -notmatch '(?m)^CompiledBinaryEligibleForDistribution:\s*false\s*$'
-    ) {
-        throw "หยุดติดตั้ง: หลักฐาน Compile MT5 ไม่ตรงกับ Source/Proof หรือ Source-only policy"
-    }
-    if ($buildLog -match '(?i)(?:[A-Z]:\\|/Users/|/home/)') {
-        throw "หยุดติดตั้ง: BUILD_LOG ของ MT5 มี Absolute local path"
-    }
+    Assert-NativeCompileArtifactIntegrity -CandidateRoot $CandidateRoot `
+        -ArtifactRelativePath 'artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness' -Platform 'mt5' -Version '1.07' `
+        -SchemaVersion 'metafx-hq-mt5-ea-compile-proof-v2' -CompileMode 'isolated_portable_metaeditor64_cli_exact_source' `
+        -SourceRelativePath 'integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5' `
+        -BinaryRelativePath 'integrations\mt5-trade-gateway\MetafxHQTradeGateway.ex5' `
+        -ManifestSourceFile 'integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5' `
+        -ManifestBinaryFile 'integrations/mt5-trade-gateway/MetafxHQTradeGateway.ex5' `
+        -ApprovedSourceHash '0B1730F050C492904D795E944630436D224342911D7FD498B3248A5CFAC19A14' `
+        -ApprovedBinaryHash '66387C83EFA091AF68C45AD3237D9A38418D8834A1DB438CA0FC7556FA3FBEA0'
 }
+
 
 function Assert-NoEmbeddedHighConfidenceSecrets {
     param([string]$CandidateRoot = $sourceRoot)
@@ -1407,11 +1296,11 @@ function Assert-NoEmbeddedHighConfidenceSecrets {
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\BUILD_LOG.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\SHA256SUMS.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json"
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\README_TH.md",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\AUDIT_TH.md",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\BUILD_LOG.txt",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\SHA256SUMS.txt",
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness\MANIFEST.json"
     )
     foreach ($relativePath in $additionalTextFiles) {
         $path = Join-Path $CandidateRoot $relativePath
@@ -1795,7 +1684,7 @@ function Copy-ApplicationFiles {
         Sync-Directory -DirectoryName $directoryName -DestinationRoot $DestinationRoot
     }
     Sync-Directory -DirectoryName "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness" -DestinationRoot $DestinationRoot
-    Sync-Directory -DirectoryName "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness" -DestinationRoot $DestinationRoot
+    Sync-Directory -DirectoryName "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness" -DestinationRoot $DestinationRoot
 
     $rootFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
@@ -1826,7 +1715,7 @@ function Export-VerifiedGitSource {
     $releasePaths = @(
         ".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests",
         "artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness",
-        "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness",
+        "artifacts/mt5-trade-gateway-v1.07-isolated-compile-readiness",
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
         "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat", "2-SETUP-GOOGLE-HQ.bat",
         "AGENTS.md", ".gitattributes", ".gitignore", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
@@ -2274,7 +2163,7 @@ function Publish-StagedApplication {
     }
     foreach ($artifactDirectory in @(
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness",
-        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
+        "artifacts\mt5-trade-gateway-v1.07-isolated-compile-readiness"
     )) {
         $artifactSource = Join-Path $StagingRoot $artifactDirectory
         $artifactDestination = Join-Path $installRoot $artifactDirectory

@@ -3389,6 +3389,8 @@ def mission_payload_digest(mission: dict) -> str:
     }
     if mission.get("managerAnalysisContext") is not None:
         packet["managerAnalysisContext"] = mission["managerAnalysisContext"]
+    if mission.get("councilProviderRetry") is not None:
+        packet["councilProviderRetry"] = mission["councilProviderRetry"]
     scheduled_completion_retry = mission.get("scheduledCompletionRetry")
     if (
         isinstance(scheduled_completion_retry, dict)
@@ -69054,6 +69056,7 @@ def _ai_trade_order_history_read_model(
         if execution_unknown:
             status = "execution_unknown_unverified"
             status_th = "ยังยืนยันการเปิด Order ไม่ได้"
+            reason_th = "มีหลักฐานคำสั่งจาก EA แต่ผลการเปิดยังไม่ยืนยัน ต้องตรวจสถานะเดิมและไม่ส่งซ้ำ"
         elif state == "CLOSED":
             status = "closed"
             status_th = "ปิดแล้ว"
@@ -69129,6 +69132,7 @@ def _ai_trade_order_history_read_model(
         "available": source_available,
         "items": items,
         "summary": summary,
+        "pendingCommands": copy.deepcopy(source.get("pendingCommands") or []),
         "hasMore": source.get("hasMore") is True,
         "reasonCode": (
             None
@@ -69360,6 +69364,11 @@ def _ai_trade_council_analysis_history_read_model(
         for item in (order_history.get("items") or [])
         if isinstance(item, dict) and safe_reference(item.get("missionId"))
     }
+    pending_by_mission = {
+        safe_reference(item.get("missionId")): item
+        for item in (order_history.get("pendingCommands") or [])
+        if isinstance(item, dict) and safe_reference(item.get("missionId"))
+    }
     legacy_orders_by_snapshot: dict[str, dict] = {}
     ambiguous_legacy_snapshots: set[str] = set()
     for item in (order_history.get("items") or []):
@@ -69445,6 +69454,36 @@ def _ai_trade_council_analysis_history_read_model(
             else {}
         )
         parent_snapshot_id = safe_reference(context.get("snapshotId"))
+        dispatch = parent.get("tradeGateway")
+        dispatch = dispatch if isinstance(dispatch, dict) else {}
+        execution = {
+            "status": safe_reference(dispatch.get("status")) or "unavailable",
+            "reasonCode": safe_reference(dispatch.get("reasonCode")),
+            "commandPublished": dispatch.get("commandPublished") is True,
+            "commandId": safe_reference(dispatch.get("commandId")),
+            "ackStatus": safe_reference(dispatch.get("ackStatus")),
+            "orderExecutionConfirmed": dispatch.get("orderExecutionConfirmed") is True,
+        }
+        preflight = dispatch.get("executionPricePreflight")
+        if isinstance(preflight, dict):
+            execution["executionPricePreflight"] = {
+                key: copy.deepcopy(preflight[key])
+                for key in (
+                    "status", "reasonCode", "checkedAt", "analysisReferencePrice",
+                    "currentActionPrice", "priceDriftPoints", "maximumSignalDriftPoints",
+                    "analysisSnapshotAgeSeconds", "maximumSnapshotAgeSeconds",
+                )
+                if key in preflight
+            }
+        pending_command = pending_by_mission.get(parent_id)
+        if pending_command and pending_command.get("commandId") == execution["commandId"]:
+            execution.update({
+                "status": pending_command.get("status"),
+                "reasonCode": pending_command.get("reasonCode"),
+                "ackStatus": pending_command.get("ackStatus"),
+                "outstanding": True,
+                "orderExecutionConfirmed": False,
+            })
         order = orders_by_mission.get(parent_id)
         order_linkage_source = "exact_mission_id" if order else None
         if order is None and parent_snapshot_id:
@@ -69459,10 +69498,13 @@ def _ai_trade_council_analysis_history_read_model(
             if isinstance(context.get("automation"), dict)
             else {}
         )
+        unstarted_skip_reason = (
+            _ai_trade_council_unstarted_skip_reason(parent, children) if terminal else None
+        )
         parent_rows.append({
             "attemptId": parent_id,
             "recordType": "analysis",
-            "coverageStatus": "analyzed" if terminal else "pending",
+            "coverageStatus": "skipped" if unstarted_skip_reason else "analyzed" if terminal else "pending",
             "missionId": parent_id,
             "timestamp": (
                 parent.get("completedAt")
@@ -69499,6 +69541,10 @@ def _ai_trade_council_analysis_history_read_model(
                 automation.get("executionPolicy")
                 or "manual_current_snapshot"
             ),
+            "tradeGateway": execution,
+            "analysisStartPreflight": _ai_trade_council_start_preflight_shape(
+                automation.get("analysisStartPreflight")
+            ),
             "tradeCommandAllowed": (
                 automation.get("tradeCommandAllowed") is True
                 if automation
@@ -69509,6 +69555,7 @@ def _ai_trade_council_analysis_history_read_model(
                     "available": True,
                     "commandId": order.get("commandId"),
                     "ticket": order.get("ticket"),
+                    "ticketText": order.get("ticketText"),
                     "status": order.get("status"),
                     "verified": order.get("verified") is True,
                     "unverified": order.get("unverified") is True,
@@ -69517,7 +69564,7 @@ def _ai_trade_council_analysis_history_read_model(
                 if isinstance(order, dict)
                 else {"available": False}
             ),
-            "skipReasonCode": None,
+            "skipReasonCode": unstarted_skip_reason,
         })
 
     coverage_available = True
@@ -69532,11 +69579,10 @@ def _ai_trade_council_analysis_history_read_model(
         coverage_error_code = "automation_coverage_store_unavailable"
         coverage_records = []
     coverage_rows = []
-    runnable_pending = [
-        record
-        for record in coverage_records
-        if record.get("status") == "pending"
-    ]
+    runnable_pending = (
+        list(automation_store.get("state", {}).get("pendingQueue") or [])
+        if coverage_available else []
+    )
     queue_positions = {
         (record.get("streamKey"), record.get("closedBarTime")): index + 1
         for index, record in enumerate(runnable_pending)
@@ -69573,12 +69619,17 @@ def _ai_trade_council_analysis_history_read_model(
             "consensus": None,
             "executionPolicy": "audit_only_no_stale_dispatch",
             "tradeCommandAllowed": False,
+            "analysisStartPreflight": record.get("analysisStartPreflight"),
             "orderLinkage": {"available": False},
             "queue": (
                 {
                     "position": queue_positions.get(key),
                     "depth": len(runnable_pending),
-                    "reasonCode": record.get("reasonCode"),
+                    "deferred": key not in queue_positions,
+                    "reasonCode": (
+                        "pending_runnable_window_deferred" if key not in queue_positions
+                        else record.get("reasonCode")
+                    ),
                 }
                 if status == "pending"
                 else None
@@ -70225,6 +70276,7 @@ def _ai_trade_council_read_model(
     gateway_snapshot: dict | None = None,
     global_metatrader_snapshot: dict | None = None,
     platform_connections_snapshot: dict | None = None,
+    metatrader_snapshot: dict | None = None,
 ) -> dict:
     """Expose only backend-observed trading facts; missing adapters remain unavailable."""
     selection = (
@@ -70260,7 +70312,11 @@ def _ai_trade_council_read_model(
     )
     terminal_selected = bool(selected_candidate)
 
-    snapshot = metatrader_snapshot_read_model(prop_id)
+    snapshot = (
+        metatrader_snapshot
+        if isinstance(metatrader_snapshot, dict)
+        else metatrader_snapshot_read_model(prop_id)
+    )
     snapshot_adapter = snapshot.get("adapter") if isinstance(snapshot.get("adapter"), dict) else {}
     chart_snapshot = snapshot.get("chartSnapshot") if isinstance(snapshot.get("chartSnapshot"), dict) else {}
     daily_summary = snapshot.get("dailySummary") if isinstance(snapshot.get("dailySummary"), dict) else {}
@@ -70854,28 +70910,38 @@ def _auto_trading_status_read_model(
     gateway_snapshot: dict | None = None,
     global_metatrader_snapshot: dict | None = None,
     platform_connections_snapshot: dict | None = None,
+    council_snapshot: dict | None = None,
 ) -> dict:
     """Monitor the canonical Council runtime without copying its decisions."""
-    unavailable_runtime = _ai_trade_council_read_model(
-        [],
-        [],
-        connection_checklist,
-        prop_id=AI_TRADE_COUNCIL_PROP_ID,
-        gateway_snapshot=gateway_snapshot,
-        global_metatrader_snapshot=global_metatrader_snapshot,
-        platform_connections_snapshot=platform_connections_snapshot,
+    unavailable_runtime = (
+        council_snapshot
+        if isinstance(council_snapshot, dict)
+        else _ai_trade_council_read_model(
+            [],
+            [],
+            connection_checklist,
+            prop_id=AI_TRADE_COUNCIL_PROP_ID,
+            gateway_snapshot=gateway_snapshot,
+            global_metatrader_snapshot=global_metatrader_snapshot,
+            platform_connections_snapshot=platform_connections_snapshot,
+        )
     )
-    runtime_truth = {
+    # The monitor owns its projection; nested status fields must not alias the
+    # Council model reused in this response.
+    runtime_truth = copy.deepcopy({
         key: value
         for key, value in unavailable_runtime["runtimeTruth"].items()
         if key != "ensemble"
-    }
+    })
     runtime_truth["messageTh"] = (
         "จุดนี้แสดงสถานะโปรแกรมและความพร้อมของ Auto Trading แบบอ่านอย่างเดียว "
         "การตรวจพบ MT4/MT5 ไม่ได้หมายความว่าเชื่อมข้อมูลเทรดหรือส่งคำสั่งซื้อขายได้"
     )
-    status = dict(unavailable_runtime["liveAnalysis"])
-    status.pop("consensus", None)
+    status = copy.deepcopy({
+        key: value
+        for key, value in unavailable_runtime["liveAnalysis"].items()
+        if key != "consensus"
+    })
     report_models = [report_read_model_item(item) for item in reports[:20]]
     status_reports = [
         item
@@ -70961,6 +71027,61 @@ def _workflow_linked_memory_items(
         if prop_id in linked_prop_ids or linked_mission_id in mission_ids:
             rows.append(item)
     return rows
+
+
+def _capture_ai_trade_council_read_context(
+    all_missions: list[dict], live_bridge_status: dict, connection_source_profile: dict | None,
+) -> tuple[dict, dict, dict, dict]:
+    """Share the exact bounded selection-generation check across Council readers."""
+    connection_source_prop_id = AI_TRADE_COUNCIL_PROP_ID
+    connection_checklist = {}
+    for _attempt in range(2):
+        gateway_snapshot, global_metatrader_snapshot = (
+            _capture_ai_trade_runtime_snapshots()
+        )
+        # Reuse one request-owned price/feature observation. Recomputing
+        # this at each nested projection can age the captured heartbeat
+        # past its deadline before the response reaches the dashboard.
+        metatrader_snapshot = metatrader_snapshot_read_model(
+            connection_source_prop_id
+        )
+        connection_checklist = (
+            dashboard_connection_checklist(
+                connection_source_prop_id,
+                bridge=live_bridge_status,
+                missions=all_missions,
+                gateway_snapshot=gateway_snapshot,
+                global_metatrader=global_metatrader_snapshot,
+                metatrader_snapshot=metatrader_snapshot,
+            )
+            if connection_source_profile
+            else {}
+        )
+        if (
+            not connection_source_profile
+            or _ai_trade_checklist_matches_global_snapshot(
+                connection_checklist,
+                global_metatrader_snapshot,
+            )
+        ):
+            break
+    else:
+        connection_checklist, global_metatrader_snapshot = (
+            _fail_closed_ai_trade_selection_snapshots(
+                connection_checklist,
+                global_metatrader_snapshot,
+            )
+        )
+        gateway_snapshot = _empty_mt4_trade_gateway_status(
+            status="selection_changed",
+            reason_code="terminal_selection_changed_during_status_read",
+        )
+        metatrader_snapshot = _empty_metatrader_snapshot_read_model(
+            connection_source_prop_id,
+            "selection_changed",
+            "terminal_selection_changed_during_status_read",
+        )
+    return gateway_snapshot, global_metatrader_snapshot, connection_checklist, metatrader_snapshot
 
 
 def prop_report(
@@ -71233,41 +71354,13 @@ def prop_report(
     # Capture Gateway, central selector and checklist as one reconciled
     # generation. A bounded retry handles a user switching MT4/MT5 between
     # any two reads; a second mismatch removes all execution authority.
+    metatrader_snapshot = None
     if connection_source_prop_id == AI_TRADE_COUNCIL_PROP_ID:
-        connection_checklist = {}
-        for _attempt in range(2):
-            gateway_snapshot, global_metatrader_snapshot = (
-                _capture_ai_trade_runtime_snapshots()
+        gateway_snapshot, global_metatrader_snapshot, connection_checklist, metatrader_snapshot = (
+            _capture_ai_trade_council_read_context(
+                all_missions, live_bridge_status, connection_source_profile,
             )
-            connection_checklist = (
-                dashboard_connection_checklist(
-                    connection_source_prop_id,
-                    bridge=live_bridge_status,
-                    missions=all_missions,
-                    gateway_snapshot=gateway_snapshot,
-                )
-                if connection_source_profile
-                else {}
-            )
-            if (
-                not connection_source_profile
-                or _ai_trade_checklist_matches_global_snapshot(
-                    connection_checklist,
-                    global_metatrader_snapshot,
-                )
-            ):
-                break
-        else:
-            connection_checklist, global_metatrader_snapshot = (
-                _fail_closed_ai_trade_selection_snapshots(
-                    connection_checklist,
-                    global_metatrader_snapshot,
-                )
-            )
-            gateway_snapshot = _empty_mt4_trade_gateway_status(
-                status="selection_changed",
-                reason_code="terminal_selection_changed_during_status_read",
-            )
+        )
     else:
         gateway_snapshot = None
         global_metatrader_snapshot = None
@@ -71313,8 +71406,10 @@ def prop_report(
         "updatedAt": utc_now(),
     }
     if prop_id in METATRADER_TARGET_PROP_IDS:
-        response["metatraderReadOnly"] = metatrader_snapshot_read_model(
-            connection_source_prop_id
+        response["metatraderReadOnly"] = (
+            metatrader_snapshot
+            if isinstance(metatrader_snapshot, dict)
+            else metatrader_snapshot_read_model(connection_source_prop_id)
         )
     if prop_id in DASHBOARD_WORKFLOW_PROP_IDS:
         response["workflowDashboard"] = workflow_dashboard_read_model(
@@ -71348,6 +71443,7 @@ def prop_report(
             history_cursor=history_cursor,
             gateway_snapshot=gateway_snapshot,
             global_metatrader_snapshot=global_metatrader_snapshot,
+            metatrader_snapshot=metatrader_snapshot,
         )
         response["autoTradingStatus"] = _auto_trading_status_read_model(
             council_reports,
@@ -71357,6 +71453,7 @@ def prop_report(
             platform_connections_snapshot=(
                 response["aiTradeCouncil"].get("platformConnections")
             ),
+            council_snapshot=response["aiTradeCouncil"],
         )
     elif prop_id == AUTO_TRADING_STATUS_PROP_ID:
         status_reports = [
@@ -71393,12 +71490,25 @@ def prop_report(
 
 
 def ai_trade_council_status_read_model() -> dict:
-    """Reuse the canonical prop report assembly for the standalone status API."""
-    report = prop_report(AI_TRADE_COUNCIL_PROP_ID)
-    council = report.get("aiTradeCouncil") if isinstance(report, dict) else None
-    if not isinstance(council, dict):
-        raise RuntimeError("AI Trade Council read model is unavailable.")
-    return council
+    """Project only Council data, avoiding unrelated equipment archive work."""
+    prop_id = AI_TRADE_COUNCIL_PROP_ID
+    all_missions = load_missions(shared_snapshot=True)
+    council_missions = [
+        mission for mission in all_missions
+        if prop_id == mission.get("targetId") or prop_id == mission.get("linkedPropId")
+    ]
+    council_reports = [
+        report for report in load_runtime_reports(limit=120)
+        if prop_id == report.get("linkedPropId")
+    ]
+    gateway, hub, checklist, snapshot = _capture_ai_trade_council_read_context(
+        all_missions, bridge_status(), find_dashboard_connection_profile(prop_id),
+    )
+    return _ai_trade_council_read_model(
+        council_missions, council_reports, checklist,
+        gateway_snapshot=gateway, global_metatrader_snapshot=hub,
+        metatrader_snapshot=snapshot,
+    )
 
 
 def ai_trade_council_order_history_page_read_model(
@@ -71511,6 +71621,11 @@ def ai_trade_council_order_history_page_read_model(
     model.update({
         "available": page.get("cursorFound") is not False,
         "items": page_items,
+        "pendingCommands": [
+            item for item in (model.get("pendingCommands") or [])
+            if history_scope.get("mode") != "active"
+            or _ai_trade_council_row_in_history_scope(item, history_scope)
+        ],
         "scope": history_scope,
         "summary": scoped_summary,
         "page": page,
@@ -74387,7 +74502,22 @@ def _metatrader_selection_read_model(
     else:
         with METATRADER_TARGETS_LOCK:
             store = _load_metatrader_target_store_unlocked()
-    if isinstance(store, dict):
+    if isinstance(store, dict) and prop_id == AI_TRADE_COUNCIL_PROP_ID:
+        # Council status must use the same header-owned generation as the
+        # Gateway and Hub. Legacy per-prop rows are compatibility projections
+        # with independent revisions, not authority for this comparison.
+        context = _global_metatrader_platform_context_from_store(
+            store,
+            store.get("activePlatform"),
+            require_all_platforms=True,
+        )
+        if context is not None:
+            selected_candidate = _public_metatrader_candidate(context["record"])
+            selection_revision = context["token"]["selectionRevision"]
+            parsed_selected_at = parse_iso(str(context.get("selectedAt") or ""))
+            if parsed_selected_at:
+                selected_at = parsed_selected_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    elif isinstance(store, dict):
         raw_selection = store["selections"].get(prop_id)
         if isinstance(raw_selection, dict):
             selected_id = safe_reference(raw_selection.get("candidateId"))
@@ -76238,18 +76368,44 @@ def _empty_mt4_trade_gateway_init_status(
         "ageSeconds": None,
         "stale": False,
         "supersededByLiveStatus": False,
+        "eaAttached": None,
+        "runtimeReady": None,
+        "inputValidation": None,
     }
 
 
 def _validated_mt4_trade_gateway_init_status_diagnostics(
     payload: dict,
 ) -> dict | None:
-    """Validate optional v2.16 integer diagnostics without exposing a path."""
+    """Validate optional diagnostics without exposing paths or granting readiness."""
     payload_fields = set(payload)
+    input_diagnostic = None
+    if "inputValidation" in payload_fields:
+        raw_input_diagnostic = payload.get("inputValidation")
+        if raw_input_diagnostic is not None:
+            input_diagnostic = _validated_mt4_trade_gateway_input_diagnostic(raw_input_diagnostic)
+            if input_diagnostic is None or (
+                payload.get("stage") != "inputs"
+                or payload.get("reasonCode") != "GATEWAY_INPUT_CONFIGURATION_INVALID"
+                or payload.get("severity") != "error"
+                or payload.get("runtimeReady") is True
+            ):
+                return None
+        payload_fields.remove("inputValidation")
+    resident_fields = {"eaAttached", "runtimeReady"}
+    resident = {field: None for field in resident_fields}
+    if payload_fields & resident_fields:
+        if not resident_fields.issubset(payload_fields):
+            return None
+        if any(not isinstance(payload.get(field), bool) for field in resident_fields):
+            return None
+        resident = {field: payload[field] for field in resident_fields}
+        payload_fields -= resident_fields
     if payload_fields == MT4_TRADE_GATEWAY_INIT_STATUS_LEGACY_FIELDS:
         return {
-            field: None
-            for field in MT4_TRADE_GATEWAY_INIT_STATUS_DIAGNOSTIC_FIELDS
+            **{field: None for field in MT4_TRADE_GATEWAY_INIT_STATUS_DIAGNOSTIC_FIELDS},
+            **resident,
+            "inputValidation": input_diagnostic,
         }
     if payload_fields != MT4_TRADE_GATEWAY_INIT_STATUS_FIELDS:
         return None
@@ -76281,7 +76437,8 @@ def _validated_mt4_trade_gateway_init_status_diagnostics(
         return None
     if int(values["portfolioPolicyLeaseMaxPathLength"]) < 1:
         return None
-    return {field: int(value) for field, value in values.items()}
+    return {**{field: int(value) for field, value in values.items()}, **resident,
+            "inputValidation": input_diagnostic}
 
 
 def _read_mt4_trade_gateway_init_status(selected_candidate: dict) -> dict:
@@ -76528,10 +76685,31 @@ def _mt4_trade_gateway_init_status_message_th(init_status: dict) -> str:
             str(init_status.get("stage") or ""),
             "การเริ่มทำงานของ EA",
         )
+    if effective_code == "GATEWAY_INPUT_CONFIGURATION_INVALID":
+        input_diagnostic = _validated_mt4_trade_gateway_input_diagnostic(init_status.get("inputValidation"))
+        if input_diagnostic is not None:
+            def input_number(number: object) -> str:
+                return "ไม่ใช่ค่าตัวเลขที่มีขอบเขต" if number is None else format(number, ".16g")
+            limits = []
+            if input_diagnostic["minimum"] is not None:
+                limits.append((">= " if input_diagnostic["minimumInclusive"] else "> ") +
+                              input_number(input_diagnostic["minimum"]))
+            if input_diagnostic["maximum"] is not None:
+                limits.append(("<= " if input_diagnostic["maximumInclusive"] else "< ") +
+                              input_number(input_diagnostic["maximum"]))
+            constraint_note = {
+                "at_most_MaxManagedTotalLots": " ตาม MaxManagedTotalLots",
+                "required_for_execution": " (ต้องเปิด RequireHeartbeat นอกโหมด Shadow)",
+            }.get(input_diagnostic["constraint"], "")
+            detail += (f": {input_diagnostic['field']}={input_number(input_diagnostic['value'])}; "
+                       f"ค่าที่อนุญาต {' และ '.join(limits)}{constraint_note} แก้ Inputs แล้วกด OK เพื่อตรวจใหม่")
     age_note = " ข้อมูลนี้เก่าและใช้เพื่อช่วยวินิจฉัยเท่านั้น" if stale else ""
+    code_note = f" ({effective_code})" if effective_code else ""
+    if init_status.get("eaAttached") is True and init_status.get("runtimeReady") is False:
+        return f"EA ยังอยู่บนกราฟ แต่หยุดการทำงานและไม่ส่งคำสั่งเทรด: {detail}{code_note}.{age_note}".strip()
     if severity == "error":
-        return f"EA เริ่มทำงานไม่สำเร็จ: {detail}.{age_note}".strip()
-    return f"EA เริ่มทำงานแล้ว แต่มีคำเตือน: {detail}.{age_note}".strip()
+        return f"EA เริ่มทำงานไม่สำเร็จ: {detail}{code_note}.{age_note}".strip()
+    return f"EA เริ่มทำงานแล้ว แต่มีคำเตือน: {detail}{code_note}.{age_note}".strip()
 
 
 def _mt4_trade_gateway_ea_heartbeat_read_model(
@@ -76628,6 +76806,7 @@ def _empty_mt4_trade_gateway_status(
         "positionSizingMode": None,
         "riskPercent": None,
         "riskCapitalBase": None,
+        "riskCostBasis": None,
         "estimatedCommissionPerLot": None,
         "commissionFreeAccountConfirmed": None,
         "brokerVolumeMin": None,
@@ -76774,6 +76953,7 @@ def _read_mt4_trade_gateway_ea_status(
     status_fields.discard("eaVersion")
     expected_v5_status_fields = (
         {
+            frozenset(MT5_TRADE_GATEWAY_PRICE_RISK_STATUS_FIELDS),
             frozenset(MT5_TRADE_GATEWAY_STATUS_FIELDS),
             frozenset(MT5_TRADE_GATEWAY_PRE_COMMISSION_POLICY_STATUS_FIELDS),
             frozenset(MT5_TRADE_GATEWAY_LEGACY_STATUS_FIELDS),
@@ -76823,6 +77003,12 @@ def _read_mt4_trade_gateway_ea_status(
         )
     ):
         return None, "gateway_status_schema_invalid"
+    risk_cost_basis = payload.get("riskCostBasis")
+    if "riskCostBasis" in payload and (
+        not is_mt5
+        or risk_cost_basis != MT5_TRADE_GATEWAY_PRICE_RISK_COST_BASIS
+    ):
+        return None, "gateway_status_risk_cost_basis_invalid"
     boolean_fields = [
         "liveArmed",
         "autoTradingAllowed",
@@ -77073,6 +77259,8 @@ def _read_mt4_trade_gateway_ea_status(
             )
         ):
             return None, "gateway_status_sizing_policy_invalid"
+        if risk_cost_basis is not None and payload.get("estimatedCommissionPerLot") != 0:
+            return None, "gateway_status_risk_cost_basis_invalid"
     else:
         # Status v5 senders released before percent-risk sizing remain readable.
         # They are represented truthfully as legacy Fixed Lot until the EA is
@@ -77130,6 +77318,7 @@ def _read_mt4_trade_gateway_ea_status(
         "positionSizingMode": position_sizing_mode,
         "riskPercent": risk_percent,
         "riskCapitalBase": risk_capital_base,
+        "riskCostBasis": risk_cost_basis,
         "estimatedCommissionPerLot": estimated_commission_per_lot,
         "commissionFreeAccountConfirmed": commission_free_account_confirmed,
         "brokerVolumeMin": broker_volume_min,
@@ -77222,6 +77411,13 @@ def _mt4_trade_gateway_command_summary(
                 "mode": str(ack.get("mode") or "") or None,
                 "observedAt": ack.get("observedAt"),
                 "ticket": ack.get("ticket"),
+                "ticketText": (
+                    str(ack["ticket"])
+                    if isinstance(ack.get("ticket"), int)
+                    and not isinstance(ack.get("ticket"), bool)
+                    and ack["ticket"] > 0
+                    else None
+                ),
                 **sizing_evidence,
                 "filledPrice": _safe_snapshot_number(
                     ack.get("filledPrice"),
@@ -77230,6 +77426,11 @@ def _mt4_trade_gateway_command_summary(
                 "filledSlippagePoints": _safe_snapshot_number(
                     ack.get("filledSlippagePoints"),
                     minimum=0,
+                ),
+                **(
+                    {"filledSlippageKnown": ack["filledSlippageKnown"]}
+                    if isinstance(ack.get("filledSlippageKnown"), bool)
+                    else {}
                 ),
                 "actualStopLoss": _safe_snapshot_number(
                     ack.get("actualStopLoss"),
@@ -77515,6 +77716,7 @@ def _mt4_trade_gateway_order_history(
             "historyWindow": history_window,
         }
     items: list[dict] = []
+    pending_commands: list[dict] = []
     total_executed = 0
     total_unverified = 0
     for command_record in command_records:
@@ -77539,6 +77741,31 @@ def _mt4_trade_gateway_order_history(
             else {}
         )
         ack_status = str((ack or {}).get("status") or "").upper()
+        if command_record.get("outstanding") is True and isinstance(summary, dict):
+            pending_status = str(summary.get("status") or "waiting_ack")
+            pending_commands.append({
+                "commandId": summary.get("commandId"),
+                "missionId": summary.get("missionId"),
+                "snapshotId": summary.get("snapshotId"),
+                "candidateId": order_channel_id,
+                "channelId": order_channel_id,
+                "streamKey": _ai_trade_council_stream_key(
+                    order_channel_id, summary.get("symbol"), summary.get("timeframe")
+                ),
+                "symbol": summary.get("symbol"),
+                "timeframe": summary.get("timeframe"),
+                "side": summary.get("action"),
+                "status": pending_status,
+                "outstanding": True,
+                "ackStatus": ack_status or None,
+                "reasonCode": (
+                    "expired_waiting_ack" if pending_status == "expired_waiting_ack"
+                    else safe_reference((ack or {}).get("reasonCode")) or "single_outstanding_command"
+                ),
+                "orderExecutionConfirmed": False,
+                "createdAt": summary.get("createdAt"),
+                "updatedAt": summary.get("updatedAt"),
+            })
         if (
             not isinstance(summary, dict)
             or not isinstance(ack, dict)
@@ -77701,6 +77928,7 @@ def _mt4_trade_gateway_order_history(
             "symbol": order_symbol,
             "timeframe": order_timeframe,
             "ticket": int(ack["ticket"]),
+            "ticketText": str(ack["ticket"]),
             "lot": lot,
             # This is the EA's historical sizing observation only.  The
             # Backend never uses these values to create a command.
@@ -77745,6 +77973,17 @@ def _mt4_trade_gateway_order_history(
                 if outcome_identity_verified
                 else None
             ),
+            **{
+                field: _safe_snapshot_number(
+                    outcome[field], minimum=0.00000001 if field == "closePrice" else -1.0e15
+                ) if (
+                    outcome_identity_verified and execution_state == "CLOSED"
+                    and ack_status == "EXECUTED"
+                    and isinstance(outcome.get(field), (int, float))
+                    and not isinstance(outcome.get(field), bool)
+                ) else None
+                for field in ("closePrice", "grossProfit", "commission", "swap", "fee")
+            },
             "mode": str(ack.get("mode") or "") or None,
             "ackReasonCode": str(ack.get("reasonCode") or "") or None,
             "ackStatus": ack_status,
@@ -77823,6 +78062,7 @@ def _mt4_trade_gateway_order_history(
         "totalExecuted": total_executed,
         "totalUnverified": total_unverified,
         "totalVisible": total_executed + total_unverified,
+        "pendingCommands": pending_commands,
         "hasMore": bool(
             total_executed + total_unverified > len(items)
             or history_window.get("olderAvailable") is True
@@ -77839,9 +78079,18 @@ def _mt4_trade_gateway_order_history(
 
 def _mt4_trade_gateway_ack_event_read_model(item: dict) -> dict:
     ack = item.get("ack") if isinstance(item.get("ack"), dict) else {}
+    command_id = safe_reference(item.get("commandId"))
+    if not command_id:
+        # Rejected receipts have no trusted payload yet. Only the exact
+        # command-scoped basename can identify their diagnostic; never expose
+        # an arbitrary local path or infer execution from the filename.
+        receipt_name = str(item.get("fileName") or "")
+        match = re.fullmatch(r"(cmd-[0-9a-f]{24})\.json", receipt_name)
+        if match:
+            command_id = match.group(1)
     return {
         "kind": str(item.get("kind") or ""),
-        "commandId": safe_reference(item.get("commandId")),
+        "commandId": command_id,
         "status": str(item.get("status") or ""),
         "code": redact_text(str(item.get("code") or ""), 96) or None,
         "reasonCode": redact_text(
@@ -77893,6 +78142,13 @@ def mt4_trade_gateway_status_read_model() -> dict:
                     status="selection_changed",
                     reason_code="terminal_selection_changed_during_status_read",
                 )
+            elif (
+                result.get("status") != "selection_changed"
+                and result.get("selectedCandidateId") == public_candidate.get("candidateId")
+            ):
+                # Bind unavailable/initialization diagnostics to this verified
+                # selection too. This is identity evidence, not trading authority.
+                result["selectionRevision"] = selection_revision
         result["observabilityStatus"] = (
             "degraded" if observability_warnings else "complete"
         )
@@ -78201,12 +78457,22 @@ def mt4_trade_gateway_status_read_model() -> dict:
         )
     )
     estimated_commission_per_lot = ea_status.get("estimatedCommissionPerLot")
+    # Only a strict, MT5-bound status can declare the new EA-owned price-risk
+    # policy. Version labels or a zero reserve alone never opt legacy EAs in.
+    price_risk_policy_ready = bool(
+        public_candidate.get("platform") == "mt5"
+        and ea_status.get("_wirePlatform") == "mt5"
+        and ea_status.get("riskCostBasis") == MT5_TRADE_GATEWAY_PRICE_RISK_COST_BASIS
+        and isinstance(estimated_commission_per_lot, (int, float))
+        and not isinstance(estimated_commission_per_lot, bool)
+        and estimated_commission_per_lot == 0
+    )
     commission_policy_ready = bool(
         isinstance(estimated_commission_per_lot, (int, float))
         and not isinstance(estimated_commission_per_lot, bool)
         and math.isfinite(float(estimated_commission_per_lot))
         and float(estimated_commission_per_lot) >= 0.00000001
-    ) or ea_status.get("commissionFreeAccountConfirmed") is True
+    ) or ea_status.get("commissionFreeAccountConfirmed") is True or price_risk_policy_ready
     exact_symbol_allowlist_ready = bool(
         str(ea_status.get("symbol") or "").strip()
         and str(ea_status.get("symbol") or "").strip().upper()
@@ -80372,6 +80638,7 @@ def _ai_trade_council_automation_default_store() -> dict:
             "timeframe": None,
             "lastObservedSnapshotId": None,
             "lastObservedAt": None,
+            "lastSchedulerTickAt": None,
             "lastObservedClosedBarTime": None,
             "lastAnalyzedClosedBarTime": None,
             "lastAnalyzedSnapshotId": None,
@@ -80388,6 +80655,8 @@ def _ai_trade_council_automation_default_store() -> dict:
             "previousTimeframe": None,
             "streamChangedAt": None,
             "streamChangeReason": None,
+            "streamCursors": {},
+            "analysisStartPreflight": None,
             "pendingQueue": [],
             "coverageRecords": [],
         },
@@ -80460,6 +80729,16 @@ def _ai_trade_council_coverage_record_shape(value: object) -> dict | None:
             else "audit_only_no_stale_dispatch"
         ),
         "completedAt": completed_at if parse_iso(completed_at) else None,
+        "analysisStartPreflight": _ai_trade_council_start_preflight_shape(
+            value.get("analysisStartPreflight")
+        ),
+        "triggerPolicy": (
+            "new_closed_bar_only_no_backfill"
+            if value.get("triggerPolicy") == "new_closed_bar_only_no_backfill" else None
+        ),
+        "triggerStartupId": str(value.get("triggerStartupId") or "")[:80] or None,
+        "triggerExpiresAt": value.get("triggerExpiresAt") if parse_iso(value.get("triggerExpiresAt")) else None,
+        "quotaAdmittedAt": value.get("quotaAdmittedAt") if parse_iso(value.get("quotaAdmittedAt")) else None,
     }
 
 
@@ -80475,41 +80754,9 @@ def _ai_trade_council_coverage_records(value: object) -> list[dict]:
         key=lambda item: (int(item["closedBarTime"]), str(item["recordId"])),
     )
 
-    # Every row exposed as pending must also be runnable by the FIFO worker.
-    # Older builds kept the newest 512 queue rows while retaining older rows
-    # as pending coverage, which could strand those older rows forever. Keep
-    # the oldest pending rows (the FIFO head) and terminalize excess arrivals
-    # explicitly. A capacity skip is audit-only and can never dispatch a stale
-    # trade command.
-    pending = [item for item in ordered if item.get("status") == "pending"]
-    if len(pending) > AI_TRADE_COUNCIL_AUTOMATION_MAX_PENDING_RECORDS:
-        retained_keys = {
-            (item["streamKey"], item["closedBarTime"])
-            for item in pending[:AI_TRADE_COUNCIL_AUTOMATION_MAX_PENDING_RECORDS]
-        }
-        capacity_completed_at = utc_now()
-        ordered = [
-            (
-                item
-                if item.get("status") != "pending"
-                or (item["streamKey"], item["closedBarTime"]) in retained_keys
-                else {
-                    **item,
-                    "status": "skipped",
-                    "reasonCode": "pending_queue_capacity_exceeded",
-                    "executionPolicy": "audit_only_no_stale_dispatch",
-                    "completedAt": (
-                        item.get("completedAt")
-                        or item.get("detectedAt")
-                        or capacity_completed_at
-                    ),
-                }
-            )
-            for item in ordered
-        ]
-
-    # Retention must never evict a runnable pending row. Fill the remaining
-    # bounded coverage window with the newest terminal evidence.
+    # The runnable window is bounded separately. Never discard a captured job
+    # because the worker's window is full; deferred rows are promoted whenever
+    # it is rebuilt. Terminal-history retention cannot evict unfinished work.
     if len(ordered) > AI_TRADE_COUNCIL_AUTOMATION_MAX_COVERAGE_RECORDS:
         pending = [item for item in ordered if item.get("status") == "pending"]
         terminal = [item for item in ordered if item.get("status") != "pending"]
@@ -80669,6 +80916,23 @@ def _ai_trade_council_automation_store_shape(value: object) -> dict:
         snapshot_id = str(state.get(field) or "")
         state[field] = snapshot_id if re.fullmatch(r"[0-9a-f]{64}", snapshot_id) else None
     state["lastMissionId"] = safe_reference(state.get("lastMissionId"))
+    cursors = state.get("streamCursors")
+    state["streamCursors"] = {
+        key: cursor
+        for key, raw_cursor in (cursors.items() if isinstance(cursors, dict) else [])
+        if re.fullmatch(r"[0-9a-f]{64}", str(key))
+        and (cursor := _automation_optional_count(raw_cursor)) is not None
+    }
+    # Persist each stream's observation independently of the currently viewed
+    # chart. A transition or restart is not a new analysis attempt.
+    if state.get("streamKey") and state.get("lastObservedClosedBarTime") is not None:
+        state["streamCursors"][state["streamKey"]] = state["lastObservedClosedBarTime"]
+    state["analysisStartPreflight"] = _ai_trade_council_start_preflight_shape(
+        state.get("analysisStartPreflight")
+    )
+    state["lastSchedulerTickAt"] = (
+        state.get("lastSchedulerTickAt") if parse_iso(state.get("lastSchedulerTickAt")) else None
+    )
     pending_detected_at = str(state.get("pendingDetectedAt") or "")
     state["pendingDetectedAt"] = (
         pending_detected_at
@@ -80718,12 +80982,11 @@ def _ai_trade_council_automation_store_shape(value: object) -> dict:
         for item in coverage_records
         if item.get("status") == "pending"
     }
-    state["pendingQueue"] = sorted(
-        pending_by_key.values(),
-        key=lambda item: int(item["closedBarTime"]),
-    )
+    state["pendingQueue"] = _ai_trade_council_priority_pending(
+        list(pending_by_key.values()), state,
+    )[:AI_TRADE_COUNCIL_AUTOMATION_MAX_PENDING_RECORDS]
     # Keep the v1 scalar cursor as a compatibility alias for old clients and
-    # tests, while v2 remains authoritative and FIFO ordered.
+    # tests, while v2 keeps the selected current bar ahead of audit FIFO work.
     if state["pendingQueue"]:
         head = state["pendingQueue"][0]
         if (
@@ -80803,51 +81066,8 @@ def _rollover_ai_trade_council_automation_day(
     state = store["state"]
     if state.get("dailyRunDate") == current_day:
         return store, False
-    previous_day = state.get("dailyRunDate")
-    completed_at = utc_now()
-    expired_pending = []
-    for record in state.get("coverageRecords") or []:
-        if not isinstance(record, dict) or record.get("status") != "pending":
-            continue
-        detected = parse_iso(str(record.get("detectedAt") or ""))
-        if (
-            detected is None
-            or detected.astimezone(THAILAND_TIMEZONE).date().isoformat()
-            != current_day
-        ):
-            record.update({
-                "status": "skipped",
-                "reasonCode": "pending_expired_at_bangkok_day_boundary",
-                "executionPolicy": "audit_only_no_stale_dispatch",
-                "completedAt": completed_at,
-            })
-            expired_pending.append(record)
-    if expired_pending:
-        state["coverageRecords"] = _ai_trade_council_coverage_records(
-            state.get("coverageRecords")
-        )
-        state["pendingQueue"] = [
-            record
-            for record in state["coverageRecords"]
-            if record.get("status") == "pending"
-        ]
-        if not state["pendingQueue"]:
-            state.update({
-                "status": "skipped",
-                "reason": "pending_expired_at_bangkok_day_boundary",
-                "pendingClosedBarTime": None,
-                "pendingSnapshotId": None,
-                "pendingDetectedAt": None,
-            })
-        append_audit({
-            "type": "ai_trade_council.automation_pending_expired",
-            "reason": "pending_expired_at_bangkok_day_boundary",
-            "previousBangkokDay": previous_day,
-            "currentBangkokDay": current_day,
-            "expiredCount": len(expired_pending),
-            "tradeCommandAllowed": False,
-            "terminalActions": False,
-        })
+    # Calendar accounting must not cancel a still-valid immutable capture.
+    # Current-bar age and stream identity are checked before analysis/dispatch.
     state["dailyRunDate"] = current_day
     state["dailyRunCount"] = 0
     return store, True
@@ -80939,6 +81159,7 @@ def ai_trade_council_automation_read_model() -> dict:
             "status": state.get("status"),
             "reason": state.get("reason"),
             "reasonCode": state.get("reason"),
+            "analysisStartPreflight": state.get("analysisStartPreflight"),
             "symbol": state.get("symbol"),
             "timeframe": state.get("timeframe"),
             "lastObservedClosedBarTime": state.get("lastObservedClosedBarTime"),
@@ -80946,6 +81167,8 @@ def ai_trade_council_automation_read_model() -> dict:
             "lastQueuedClosedBarTime": state.get("lastQueuedClosedBarTime"),
             "coverageCursorClosedBarTime": state.get("coverageCursorClosedBarTime"),
             "pendingCount": len(pending_queue),
+            "pendingTotalCount": coverage_summary["pending"],
+            "deferredPendingCount": max(0, coverage_summary["pending"] - len(pending_queue)),
             "pending": (
                 {
                     "recordId": pending_head.get("recordId"),
@@ -80984,12 +81207,14 @@ def ai_trade_council_automation_read_model() -> dict:
             },
         },
         "backlogPolicy": {
-            "queueOrder": "oldest_closed_bar_first",
-            "durability": "exact_snapshot_artifact",
-            "staleAnalysis": "allowed_read_only",
+            "policy": "new_closed_bar_only_no_backfill",
+            "queueOrder": "new_closed_bar_only",
+            "durability": "exact_snapshot_artifact_for_current_trigger",
+            "staleAnalysis": "skipped_without_ai",
             "staleTradeCommand": "blocked",
-            "capacityPolicy": "terminal_skip_pending_queue_capacity_exceeded",
-            "maximumRunnablePending": AI_TRADE_COUNCIL_AUTOMATION_MAX_PENDING_RECORDS,
+            "capacityPolicy": "no_backfill",
+            "maximumRunnablePending": 1,
+            "quotaResume": "wait_for_next_closed_bar",
         },
         "updatedAt": store.get("updatedAt"),
     }
@@ -81425,6 +81650,8 @@ def _update_ai_trade_council_automation_state(
 def _ai_trade_council_coverage_upsert(
     store: dict,
     record: dict,
+    *,
+    allow_unstarted_skip: bool = False,
 ) -> dict:
     normalized = _ai_trade_council_coverage_record_shape(record)
     if normalized is None:
@@ -81432,6 +81659,38 @@ def _ai_trade_council_coverage_upsert(
     state = store["state"]
     records = _ai_trade_council_coverage_records(state.get("coverageRecords"))
     key = (normalized["streamKey"], normalized["closedBarTime"])
+    existing = next(
+        (item for item in records
+         if (item["streamKey"], item["closedBarTime"]) == key),
+        None,
+    )
+    # Preserve terminal evidence and queued mission identity across baseline,
+    # repeated observations, restart recovery and concurrent terminal updates.
+    if isinstance(existing, dict) and (
+        (existing.get("status") == "analyzed"
+         and normalized.get("status") != "analyzed")
+        or (existing.get("status") == "queued"
+            and normalized.get("status") in {"pending", "skipped"}
+            and not (
+                allow_unstarted_skip
+                and normalized.get("status") == "skipped"
+                and normalized.get("missionId") == existing.get("missionId")
+                and bool(normalized.get("missionId"))
+                and str(normalized.get("reasonCode") or "").startswith((
+                    "council_new_bar_", "council_legacy_automatic_"
+                ))
+            ))
+        or (existing.get("status") == "skipped"
+            and normalized.get("status") in {"pending", "queued"})
+    ):
+        return existing
+    if isinstance(existing, dict) and existing.get("status") == "pending" and normalized.get("status") == "pending":
+        if (existing.get("snapshotArtifactDigest")
+                and existing.get("snapshotArtifactDigest") != normalized.get("snapshotArtifactDigest")):
+            return existing
+        if existing.get("executionPolicy") == "audit_only_no_stale_dispatch":
+            normalized["executionPolicy"] = "audit_only_no_stale_dispatch"
+            normalized["analysisStartPreflight"] = existing.get("analysisStartPreflight")
     records = [
         item for item in records
         if (item["streamKey"], item["closedBarTime"]) != key
@@ -81446,26 +81705,10 @@ def _ai_trade_council_coverage_upsert(
         ),
         None,
     )
-    if (
-        normalized.get("status") == "pending"
-        and isinstance(stored, dict)
-        and stored.get("status") == "skipped"
-        and stored.get("reasonCode") == "pending_queue_capacity_exceeded"
-    ):
-        append_audit({
-            "type": "ai_trade_council.automation_skipped",
-            "reason": "pending_queue_capacity_exceeded",
-            "recordId": stored.get("recordId"),
-            "closedBarTime": stored.get("closedBarTime"),
-            "queueMaximum": AI_TRADE_COUNCIL_AUTOMATION_MAX_PENDING_RECORDS,
-            "executionPolicy": "audit_only_no_stale_dispatch",
-            "tradeCommandAllowed": False,
-            "terminalActions": False,
-        })
-    state["pendingQueue"] = [
+    state["pendingQueue"] = _ai_trade_council_priority_pending([
         item for item in state["coverageRecords"]
         if item.get("status") == "pending"
-    ]
+    ], state)[:AI_TRADE_COUNCIL_AUTOMATION_MAX_PENDING_RECORDS]
     active_stream_key = str(state.get("streamKey") or normalized["streamKey"])
     active_stream_records = [
         item
@@ -81482,12 +81725,16 @@ def _ai_trade_council_coverage_upsert(
 
 def _save_ai_trade_council_coverage_records(
     records: list[dict],
+    *,
+    allow_unstarted_skip: bool = False,
     **state_values: object,
 ) -> dict:
     with AI_TRADE_COUNCIL_AUTOMATION_LOCK:
         store = load_ai_trade_council_automation_store()
         for record in records:
-            _ai_trade_council_coverage_upsert(store, record)
+            _ai_trade_council_coverage_upsert(
+                store, record, allow_unstarted_skip=allow_unstarted_skip,
+            )
         store["state"].update(state_values)
         return _save_ai_trade_council_automation_store(store)
 
@@ -81863,6 +82110,7 @@ def load_ai_trade_council_prompt_contract() -> dict:
         or shared_policy.get("liveOrderSubmissionAllowed") is not False
         or shared_policy.get("runnerVoteTransport") != "schema_bound_final_json_v1"
         or shared_policy.get("localSnapshotReadPolicy") != "backend_validated_embedded_read_only"
+        or shared_policy.get("providerRetryPolicy") != AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY
         or shared_policy.get("reportTargetPropId") != AI_TRADE_COUNCIL_PROP_ID
         or not isinstance(output_schema, dict)
         or output_schema.get("type") != "object"
@@ -82853,6 +83101,7 @@ def dashboard_connection_checklist(
     gateway_snapshot: dict | None = None,
     research_sheet: dict | None = None,
     global_metatrader: dict | None = None,
+    metatrader_snapshot: dict | None = None,
 ) -> dict:
     profile = find_dashboard_connection_profile(prop_id)
     if not profile:
@@ -82974,7 +83223,11 @@ def dashboard_connection_checklist(
             })
             break
     if prop_id == AI_TRADE_COUNCIL_PROP_ID:
-        snapshot_model = metatrader_snapshot_read_model(prop_id)
+        snapshot_model = (
+            metatrader_snapshot
+            if isinstance(metatrader_snapshot, dict)
+            else metatrader_snapshot_read_model(prop_id)
+        )
         selected_platform = str(
             snapshot_model.get("selectedPlatform") or ""
         ).strip().upper()
@@ -84914,6 +85167,13 @@ def _run_ai_trade_council_analysis_unlocked(
                 automation_context.get("tradeCommandAllowed") is True
                 and automation_context.get("executionPolicy") == "current_exact_snapshot"
             ),
+            "analysisStartPreflight": _ai_trade_council_start_preflight_shape(
+                automation_context.get("analysisStartPreflight")
+            ),
+            "triggerPolicy": automation_context.get("triggerPolicy"),
+            "triggerStartupId": automation_context.get("triggerStartupId"),
+            "triggerExpiresAt": automation_context.get("triggerExpiresAt"),
+            "quotaAdmittedAt": automation_context.get("quotaAdmittedAt"),
         }
 
     prompt_contract = load_ai_trade_council_prompt_contract()
@@ -85294,9 +85554,11 @@ def _run_ai_trade_council_analysis_unlocked(
                 "budget": {
                     "timeoutSeconds": row["timeoutSeconds"],
                     "outputLimitChars": row["outputLimitChars"],
+                    "maxRuns": AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY["maximumRuns"],
                 },
                 "analysisContext": {
                     "kind": "ai_trade_council_vote",
+                    "providerRetryPolicy": copy.deepcopy(AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY),
                     "snapshotId": snapshot_id,
                     "snapshotArtifact": snapshot_artifact,
                     "snapshotArtifactDigest": snapshot_artifact_digest,
@@ -85716,13 +85978,15 @@ def evaluate_ai_trade_council_outcomes(
 
 
 def ai_trade_council_automation_tick() -> dict:
-    """Persist every observed closed bar and process the FIFO fail-closed."""
+    """Admit only a newly observed closed bar; skipped triggers never catch up."""
     if not AI_TRADE_COUNCIL_AUTOMATION_RUN_LOCK.acquire(blocking=False):
         return {
             "ok": False,
             "kind": "ai_trade_council_automation_busy",
             "automation": ai_trade_council_automation_read_model(),
         }
+    pending = None
+    current_fields = {}
     try:
         if not isinstance(
             _active_global_metatrader_context(require_all_platforms=True),
@@ -85731,6 +85995,7 @@ def ai_trade_council_automation_tick() -> dict:
             _update_ai_trade_council_automation_state(
                 status="waiting_terminal_locks",
                 reason="global_metatrader_locks_incomplete",
+                startupId=None,
             )
             return {
                 "ok": False,
@@ -85759,6 +86024,7 @@ def ai_trade_council_automation_tick() -> dict:
             _update_ai_trade_council_automation_state(
                 status="disabled",
                 reason="automation_disabled",
+                startupId=None,
             )
             return {
                 "ok": True,
@@ -85772,6 +86038,7 @@ def ai_trade_council_automation_tick() -> dict:
             _, changed = _update_ai_trade_council_automation_state(
                 status="waiting_snapshot",
                 reason=identity_reason,
+                startupId=None,
             )
             if changed:
                 append_audit({
@@ -85794,6 +86061,7 @@ def ai_trade_council_automation_tick() -> dict:
             "timeframe": identity["timeframe"],
             "lastObservedSnapshotId": identity["snapshotId"],
             "lastObservedAt": identity.get("observedAt"),
+            "lastSchedulerTickAt": utc_now(),
         }
         closed_bar_time = int(identity["lastClosedBarTime"])
         previous_bar_time = state.get("lastObservedClosedBarTime")
@@ -85812,11 +86080,13 @@ def ai_trade_council_automation_tick() -> dict:
             baseline_reason = "first_observation_baseline"
         elif closed_bar_time < int(previous_bar_time):
             baseline_reason = "bar_time_regression_baseline"
+        elif state.get("lastSchedulerTickAt") and (
+            datetime.now(timezone.utc) - parse_iso(state["lastSchedulerTickAt"]).astimezone(timezone.utc)
+        ).total_seconds() > 60:
+            baseline_reason = "new_bar_only_missed_trigger"
 
         if baseline_reason:
-            skipped_records = []
             transition_fields: dict[str, object] = {}
-            terminalized_pending_records: list[dict] = []
             if baseline_reason == "stream_change_baseline":
                 transition_at = utc_now()
                 transition_fields = {
@@ -85827,89 +86097,68 @@ def ai_trade_council_automation_tick() -> dict:
                     "streamChangedAt": transition_at,
                     "streamChangeReason": baseline_reason,
                 }
-                # Pending work belongs to an immutable chart stream. Once the
-                # selected EA moves to another Symbol/TF/channel, those rows
-                # remain useful audit evidence but can no longer be allowed to
-                # lead the runnable FIFO or publish a command on the new chart.
-                terminalized_pending_records = [
-                    {
-                        **record,
-                        "status": "skipped",
-                        "reasonCode": "stream_changed_before_analysis",
-                        "executionPolicy": "audit_only_no_stale_dispatch",
-                        "completedAt": transition_at,
-                    }
-                    for record in (state.get("pendingQueue") or [])
-                    if isinstance(record, dict)
-                    and record.get("status") == "pending"
-                    and record.get("streamKey") != identity["streamKey"]
-                ]
-            step_seconds = AI_TRADE_COUNCIL_TIMEFRAME_SECONDS.get(
-                identity["timeframe"]
+            # A process/stream transition is never a new-bar trigger. Preserve
+            # already-created parent evidence, retire unstarted captures, and
+            # baseline the present closed bar without retroactive AI work.
+            skip_reason = (
+                "new_bar_only_restart_baseline" if baseline_reason == "restart_baseline"
+                else "new_bar_only_stream_change_baseline" if baseline_reason == "stream_change_baseline"
+                else "new_bar_only_missed_trigger"
             )
-            if (
-                baseline_reason == "restart_baseline"
-                and state.get("streamKey") == identity["streamKey"]
-                and isinstance(previous_bar_time, int)
-                and isinstance(step_seconds, int)
-                and closed_bar_time > previous_bar_time
-            ):
-                skipped_times = range(
-                    previous_bar_time + step_seconds,
-                    closed_bar_time + 1,
-                    step_seconds,
-                )
-            else:
-                skipped_times = (closed_bar_time,)
-            completed_at = utc_now()
-            for skipped_time in skipped_times:
-                skipped_records.append({
-                    **current_fields,
-                    "closedBarTime": skipped_time,
-                    "snapshotId": (
-                        identity["snapshotId"]
-                        if skipped_time == closed_bar_time
-                        else None
-                    ),
-                    "status": "skipped",
-                    "reasonCode": baseline_reason,
-                    "executionPolicy": "audit_only_no_stale_dispatch",
-                    "detectedAt": completed_at,
-                    "completedAt": completed_at,
-                })
+            retire_records = []
+            for old in list(state.get("coverageRecords") or []):
+                if old.get("status") != "pending":
+                    continue
+                if _ai_trade_council_recover_created_round(old) is None:
+                    retire_records.append(old)
+            _ai_trade_council_skip_new_bars(retire_records, skip_reason)
+            skipped_count = len(retire_records)
+            records = []
+            old_cursor = (state.get("streamCursors") or {}).get(identity["streamKey"])
+            if state.get("streamKey") == identity["streamKey"]:
+                old_cursor = previous_bar_time
+            if isinstance(old_cursor, int) and old_cursor < closed_bar_time:
+                for bar in (snapshot.get("chartSnapshot") or {}).get("bars") or []:
+                    timestamp = _automation_optional_count(bar.get("time")) if isinstance(bar, dict) else None
+                    if timestamp is not None and old_cursor < timestamp <= closed_bar_time:
+                        records.append({
+                            **current_fields, "closedBarTime": timestamp, "status": "skipped",
+                            "reasonCode": skip_reason, "executionPolicy": "audit_only_no_stale_dispatch",
+                            "detectedAt": utc_now(), "completedAt": utc_now(),
+                        })
             _save_ai_trade_council_coverage_records(
-                [*terminalized_pending_records, *skipped_records],
-                **current_fields,
-                **transition_fields,
-                status="baseline",
-                reason=baseline_reason,
+                records, **current_fields, **transition_fields,
+                status="baseline", reason=baseline_reason,
                 lastObservedClosedBarTime=closed_bar_time,
-                pendingClosedBarTime=None,
-                pendingSnapshotId=None,
-                pendingDetectedAt=None,
+                pendingClosedBarTime=None, pendingSnapshotId=None, pendingDetectedAt=None,
             )
             append_audit({
-                "type": "ai_trade_council.automation_baseline",
-                "reason": baseline_reason,
-                "streamKey": identity["streamKey"],
-                "candidateId": identity["candidateId"],
-                "symbol": identity["symbol"],
-                "timeframe": identity["timeframe"],
-                "closedBarTime": closed_bar_time,
-                "snapshotId": identity["snapshotId"],
-                "catchUp": False,
-                "skippedCount": len(skipped_records),
-                "terminalizedPreviousPendingCount": len(
-                    terminalized_pending_records
-                ),
-                "terminalActions": False,
+                "type": "ai_trade_council.automation_baseline", "reason": baseline_reason,
+                "streamKey": identity["streamKey"], "closedBarTime": closed_bar_time,
+                "snapshotId": identity["snapshotId"], "catchUp": False,
+                "skippedCount": skipped_count + len(records), "terminalActions": False,
+                "analysisPolicy": "new_closed_bar_only_no_backfill", "aiRunAllowed": False,
             })
             return {
-                "ok": True,
-                "kind": "ai_trade_council_automation_baseline",
-                "reason": baseline_reason,
+                "ok": True, "kind": "ai_trade_council_automation_baseline", "reason": baseline_reason,
                 "automation": ai_trade_council_automation_read_model(),
             }
+
+        # Only a capture admitted by this running process at a new-bar event
+        # may survive for its short settle interval. All legacy/stale work is
+        # terminal history, including rows outside the old runnable FIFO cap.
+        retire_records = []
+        for old in list(state.get("coverageRecords") or []):
+            if old.get("status") != "pending":
+                continue
+            if (old.get("triggerPolicy") != "new_closed_bar_only_no_backfill"
+                    or old.get("triggerStartupId") != SERVER_STARTED_AT
+                    or old.get("executionPolicy") != "current_exact_snapshot"
+                    or not _ai_trade_council_pending_matches_current_closed_bar(old, identity)):
+                if _ai_trade_council_recover_created_round(old) is None:
+                    retire_records.append(old)
+        _ai_trade_council_skip_new_bars(retire_records, "new_bar_only_backlog_cancelled")
+        state = load_ai_trade_council_automation_store()["state"]
 
         if identity["timeframe"] not in AI_TRADE_COUNCIL_AUTOMATION_SUPPORTED_TIMEFRAMES:
             _, changed = _update_ai_trade_council_automation_state(
@@ -85937,17 +86186,34 @@ def ai_trade_council_automation_tick() -> dict:
             }
 
         if closed_bar_time > int(previous_bar_time):
+            known_record = next((
+                row for row in state.get("coverageRecords") or []
+                if row.get("streamKey") == identity["streamKey"]
+                and row.get("closedBarTime") == closed_bar_time
+            ), None)
+            if known_record is not None:
+                # Broker-time regression/re-observation must never replace a
+                # captured bar or turn an audit-only attempt back into a trade.
+                _save_ai_trade_council_coverage_records(
+                    [], **current_fields,
+                    status="existing", reason="closed_bar_reobserved",
+                    lastObservedClosedBarTime=closed_bar_time,
+                )
+                return {
+                    "ok": True,
+                    "kind": "ai_trade_council_automation_reobserved",
+                    "automation": ai_trade_council_automation_read_model(),
+                }
             detected_at = utc_now()
-            step_seconds = AI_TRADE_COUNCIL_TIMEFRAME_SECONDS.get(
-                identity["timeframe"]
-            )
             records = []
-            if isinstance(step_seconds, int):
-                for missed_time in range(
-                    int(previous_bar_time) + step_seconds,
-                    closed_bar_time,
-                    step_seconds,
-                ):
+            actual_times = sorted({
+                timestamp
+                for bar in (snapshot.get("chartSnapshot") or {}).get("bars") or []
+                if isinstance(bar, dict)
+                and (timestamp := _automation_optional_count(bar.get("time"))) is not None
+            })
+            for missed_time in actual_times:
+                if int(previous_bar_time) < missed_time < closed_bar_time:
                     records.append({
                         **current_fields,
                         "closedBarTime": missed_time,
@@ -85957,18 +86223,43 @@ def ai_trade_council_automation_tick() -> dict:
                         "detectedAt": detected_at,
                         "completedAt": detected_at,
                     })
+            # A bounded chart window cannot prove what happened before its
+            # oldest bar. Record uncertainty as one event, never fictitious bars.
+            if actual_times and actual_times[0] > int(previous_bar_time):
+                append_audit({
+                    "type": "ai_trade_council.coverage_gap_unknown",
+                    "reason": "gap_history_unavailable",
+                    "streamKey": identity["streamKey"],
+                    "afterClosedBarTime": previous_bar_time,
+                    "beforeClosedBarTime": actual_times[0],
+                    "terminalActions": False,
+                })
+            # Evaluate quota at the new-bar event, never for the first time
+            # later in the candle. A denied event is consumed immediately.
+            trigger_preflight = {}
             try:
-                capture_artifact = _write_ai_trade_council_snapshot_artifact(snapshot)
-                capture_digest = _ai_trade_council_snapshot_artifact_digest(
-                    _ai_trade_council_snapshot_artifact_core(snapshot)
-                )
-                current_record_status = "pending"
-                current_reason = "new_closed_bar_detected"
-            except (DataIntegrityError, OSError, RequestError, ValueError):
-                capture_artifact = None
-                capture_digest = None
-                current_record_status = "skipped"
-                current_reason = "snapshot_artifact_capture_failed"
+                trigger_preflight = _ai_trade_council_analysis_start_preflight(snapshot, identity)
+                trigger_gate = _ai_trade_council_new_bar_gate(config)
+            except (RequestError, DataIntegrityError, OSError, ValueError) as error:
+                trigger_gate = str(getattr(error, "code", "") or "new_bar_only_trigger_not_admitted")
+            if config.get("dailyRoundLimitMode") == "limited" and state.get("dailyRunCount", 0) >= config.get("maxDailyRounds", 24):
+                trigger_gate = "daily_cap_reached"
+            if trigger_preflight and trigger_preflight.get("status") != "ready":
+                trigger_gate = str(trigger_preflight.get("reasonCode") or "analysis_snapshot_unavailable")
+            capture_artifact = None
+            capture_digest = None
+            current_record_status = "skipped"
+            current_reason = trigger_gate or "snapshot_artifact_capture_failed"
+            if trigger_gate is None:
+                try:
+                    capture_artifact = _write_ai_trade_council_snapshot_artifact(snapshot)
+                    capture_digest = _ai_trade_council_snapshot_artifact_digest(
+                        _ai_trade_council_snapshot_artifact_core(snapshot)
+                    )
+                    current_record_status = "pending"
+                    current_reason = "new_closed_bar_detected"
+                except (DataIntegrityError, OSError, RequestError, ValueError):
+                    pass
             records.append({
                 **current_fields,
                 "closedBarTime": closed_bar_time,
@@ -85977,8 +86268,13 @@ def ai_trade_council_automation_tick() -> dict:
                 "snapshotArtifactDigest": capture_digest,
                 "status": current_record_status,
                 "reasonCode": current_reason,
-                "executionPolicy": "current_exact_snapshot",
+                "executionPolicy": "current_exact_snapshot" if current_record_status == "pending" else "audit_only_no_stale_dispatch",
                 "detectedAt": detected_at,
+                "triggerPolicy": "new_closed_bar_only_no_backfill",
+                "triggerStartupId": SERVER_STARTED_AT,
+                "triggerExpiresAt": (parse_iso(detected_at) + timedelta(seconds=60)).isoformat(),
+                "quotaAdmittedAt": detected_at if current_record_status == "pending" else None,
+                "analysisStartPreflight": trigger_preflight,
                 "completedAt": (
                     detected_at if current_record_status == "skipped" else None
                 ),
@@ -85995,30 +86291,6 @@ def ai_trade_council_automation_tick() -> dict:
                 pendingSnapshotId=identity["snapshotId"],
                 pendingDetectedAt=detected_at,
             )
-            stored_current_record = next(
-                (
-                    row
-                    for row in saved_store["state"].get("coverageRecords") or []
-                    if row.get("streamKey") == identity["streamKey"]
-                    and row.get("closedBarTime") == closed_bar_time
-                ),
-                None,
-            )
-            capacity_skipped = bool(
-                current_record_status == "pending"
-                and isinstance(stored_current_record, dict)
-                and stored_current_record.get("status") == "skipped"
-                and stored_current_record.get("reasonCode")
-                == "pending_queue_capacity_exceeded"
-            )
-            if capacity_skipped:
-                current_reason = "pending_queue_capacity_exceeded"
-                _update_ai_trade_council_automation_state(
-                    **current_fields,
-                    status="backlog_capacity",
-                    reason=current_reason,
-                    lastObservedClosedBarTime=closed_bar_time,
-                )
             append_audit({
                 "type": "ai_trade_council.closed_bar_detected",
                 "streamKey": identity["streamKey"],
@@ -86030,22 +86302,19 @@ def ai_trade_council_automation_tick() -> dict:
                 "settleSeconds": AI_TRADE_COUNCIL_AUTOMATION_SETTLE_SECONDS,
                 "gapSkippedCount": max(0, len(records) - 1),
                 "snapshotCaptured": current_record_status == "pending",
-                "coverageStatus": (
-                    "skipped" if capacity_skipped else current_record_status
-                ),
+                "coverageStatus": current_record_status,
+                "deferredPendingCount": max(0, sum(
+                    1 for row in saved_store["state"].get("coverageRecords") or []
+                    if row.get("status") == "pending"
+                ) - len(saved_store["state"].get("pendingQueue") or [])),
                 "reason": current_reason,
                 "terminalActions": False,
             })
-            if capacity_skipped:
-                return {
-                    "ok": False,
-                    "kind": "ai_trade_council_automation_skipped",
-                    "reason": current_reason,
-                    "automation": ai_trade_council_automation_read_model(),
-                }
             return {
                 "ok": True,
-                "kind": "ai_trade_council_automation_settling",
+                "kind": ("ai_trade_council_automation_settling" if current_record_status == "pending"
+                         else "ai_trade_council_automation_skipped"),
+                "reason": current_reason,
                 "automation": ai_trade_council_automation_read_model(),
             }
 
@@ -86057,7 +86326,7 @@ def ai_trade_council_automation_tick() -> dict:
             _update_ai_trade_council_automation_state(
                 **current_fields,
                 status="idle",
-                reason="waiting_for_new_closed_bar",
+                reason="new_bar_only_wait_next_bar",
                 pendingClosedBarTime=None,
                 pendingSnapshotId=None,
                 pendingDetectedAt=None,
@@ -86068,23 +86337,27 @@ def ai_trade_council_automation_tick() -> dict:
                 "automation": ai_trade_council_automation_read_model(),
             }
 
+        pending_queue = _ai_trade_council_priority_pending(pending_queue, state)
         pending = pending_queue[0]
         pending_bar_time = int(pending["closedBarTime"])
-        detected_at = parse_iso(pending.get("detectedAt"))
-        if detected_at is None:
-            _update_ai_trade_council_automation_state(
-                **current_fields,
-                status="settling",
-                reason="settle_timer_restarted",
-                pendingClosedBarTime=pending_bar_time,
-                pendingSnapshotId=pending.get("snapshotId"),
-                pendingDetectedAt=utc_now(),
-            )
+        existing_parent = _ai_trade_council_recover_created_round(pending, **current_fields)
+        if existing_parent is not None:
             return {
-                "ok": True,
-                "kind": "ai_trade_council_automation_settling",
+                "ok": True, "kind": "ai_trade_council_existing",
+                "parent": mission_read_model_item(existing_parent),
                 "automation": ai_trade_council_automation_read_model(),
             }
+        detected_at = parse_iso(pending.get("detectedAt"))
+        expires = parse_iso(pending.get("triggerExpiresAt"))
+        admitted = parse_iso(pending.get("quotaAdmittedAt"))
+        now = datetime.now(timezone.utc)
+        if (detected_at is None or expires is None or admitted is None
+                or admitted.astimezone(timezone.utc) > now
+                or expires.astimezone(timezone.utc) <= now):
+            reason = "new_bar_only_trigger_window_expired"
+            _ai_trade_council_skip_new_bar(pending, reason, **current_fields)
+            return {"ok": True, "kind": "ai_trade_council_automation_skipped", "reason": reason,
+                    "automation": ai_trade_council_automation_read_model()}
         elapsed = max(
             0.0,
             (
@@ -86175,84 +86448,52 @@ def ai_trade_council_automation_tick() -> dict:
                 "reason": "durable_snapshot_unavailable",
                 "automation": ai_trade_council_automation_read_model(),
             }
+        start_preflight = _ai_trade_council_analysis_start_preflight(analysis_snapshot, identity)
+        pending["analysisStartPreflight"] = start_preflight
+        if not is_current_exact or start_preflight.get("status") != "ready":
+            reason = (str(start_preflight.get("reasonCode") or "analysis_snapshot_unavailable")
+                      if is_current_exact else "new_bar_only_missed_trigger")
+            _ai_trade_council_skip_new_bar(pending, reason, **current_fields,
+                                         analysisStartPreflight=start_preflight)
+            return {"ok": True, "kind": "ai_trade_council_automation_skipped", "reason": reason,
+                    "automation": ai_trade_council_automation_read_model()}
+        trade_command_allowed = True
         daily_limit_enabled = config.get("dailyRoundLimitMode") == "limited"
         if (
             daily_limit_enabled
             and state.get("dailyRunCount", 0) >= config.get("maxDailyRounds", 24)
         ):
-            _, changed = _update_ai_trade_council_automation_state(
-                status="daily_cap_reached",
-                reason="daily_cap_reached",
-                pendingClosedBarTime=pending_bar_time,
-                pendingSnapshotId=pending.get("snapshotId"),
-                pendingDetectedAt=pending.get("detectedAt"),
-            )
-            if changed:
-                append_audit({
-                    "type": "ai_trade_council.automation_skipped",
-                    "reason": "daily_cap_reached",
-                    "closedBarTime": pending_bar_time,
-                    "maxDailyRounds": config.get("maxDailyRounds"),
-                    "terminalActions": False,
-                })
+            _ai_trade_council_skip_new_bar(pending, "daily_cap_reached", **current_fields)
             return {
                 "ok": False,
                 "kind": "ai_trade_council_automation_daily_cap",
                 "automation": ai_trade_council_automation_read_model(),
             }
 
-        active_parent = _active_ai_trade_council_parent()
-        gate_reason = None
-        if active_parent:
-            gate_reason = "council_round_already_active"
-        elif load_operator_mode_record().get("mode") != "auto_guarded":
-            gate_reason = "full_access_required"
-        else:
-            bridge = bridge_status()
-            codex_status = str((bridge.get("codex") or {}).get("status") or "")
-            if codex_status not in {"ready", "ready_guarded"}:
-                gate_reason = "codex_runner_not_ready"
-        quota_gate = None
-        if gate_reason is None:
-            quota_gate = _collaboration_quota_gate(config, refresh=True)
-            if quota_gate.get("allowed") is not True:
-                gate_reason = str(quota_gate.get("reason") or "quota_blocked")
+        gate_reason = _ai_trade_council_new_bar_gate(config)
         if gate_reason is not None:
-            _, changed = _update_ai_trade_council_automation_state(
-                **current_fields,
-                status="waiting_gate",
-                reason=gate_reason,
-                pendingClosedBarTime=pending_bar_time,
-                pendingSnapshotId=pending.get("snapshotId"),
-                pendingDetectedAt=pending.get("detectedAt"),
-            )
-            if changed:
-                append_audit({
-                    "type": "ai_trade_council.automation_paused",
-                    "reason": gate_reason,
-                    "activeMissionId": (
-                        active_parent.get("id")
-                        if isinstance(active_parent, dict)
-                        else None
-                    ),
-                    "remainingPercent": (
-                        quota_gate.get("remainingPercent")
-                        if isinstance(quota_gate, dict)
-                        else None
-                    ),
-                    "closedBarTime": pending_bar_time,
-                    "terminalActions": False,
-                })
+            _ai_trade_council_skip_new_bar(pending, gate_reason, **current_fields)
             return {
-                "ok": False,
-                "kind": "ai_trade_council_automation_waiting_gate",
-                "reason": gate_reason,
+                "ok": False, "kind": "ai_trade_council_automation_skipped", "reason": gate_reason,
                 "automation": ai_trade_council_automation_read_model(),
             }
 
+        # Quota/status reads can take time. Re-read the current chart and expiry
+        # after them so a settle/selection/bar race cannot spend on old work.
+        final_identity, _ = _ai_trade_council_closed_bar_identity(
+            metatrader_snapshot_read_model(AI_TRADE_COUNCIL_PROP_ID)
+        )
+        if (not isinstance(final_identity, dict)
+                or not _ai_trade_council_pending_matches_current_closed_bar(pending, final_identity)
+                or datetime.now(timezone.utc) >= expires.astimezone(timezone.utc)):
+            reason = "new_bar_only_trigger_window_expired"
+            _ai_trade_council_skip_new_bar(pending, reason, **current_fields)
+            return {"ok": True, "kind": "ai_trade_council_automation_skipped", "reason": reason,
+                    "automation": ai_trade_council_automation_read_model()}
+
         execution_policy = (
             "current_exact_snapshot"
-            if is_current_exact
+            if trade_command_allowed
             else "audit_only_no_stale_dispatch"
         )
         response = run_ai_trade_council_analysis(
@@ -86276,7 +86517,12 @@ def ai_trade_council_automation_tick() -> dict:
                 ),
                 "dayKey": _automation_day_key(),
                 "executionPolicy": execution_policy,
-                "tradeCommandAllowed": is_current_exact,
+                "tradeCommandAllowed": trade_command_allowed,
+                "analysisStartPreflight": start_preflight,
+                "triggerPolicy": pending.get("triggerPolicy"),
+                "triggerStartupId": pending.get("triggerStartupId"),
+                "triggerExpiresAt": pending.get("triggerExpiresAt"),
+                "quotaAdmittedAt": pending.get("quotaAdmittedAt"),
             },
             _snapshot_model=analysis_snapshot,
         )
@@ -86316,6 +86562,7 @@ def ai_trade_council_automation_tick() -> dict:
             lastQueuedSnapshotId=pending["snapshotId"],
             lastMissionId=mission_id,
             dailyRunCount=latest_count + (1 if queued_new else 0),
+            analysisStartPreflight=start_preflight,
             pendingClosedBarTime=None,
             pendingSnapshotId=None,
             pendingDetectedAt=None,
@@ -86330,7 +86577,7 @@ def ai_trade_council_automation_tick() -> dict:
             "closedBarTime": pending_bar_time,
             "snapshotId": pending["snapshotId"],
             "executionPolicy": execution_policy,
-            "tradeCommandAllowed": is_current_exact,
+            "tradeCommandAllowed": trade_command_allowed,
             "newMission": queued_new,
             "sourceBarCount": response.get("sourceBarCount"),
             "requestedAnalysisBarCount": response.get(
@@ -86347,25 +86594,18 @@ def ai_trade_council_automation_tick() -> dict:
             **response,
             "automation": ai_trade_council_automation_read_model(),
         }
-    except RequestError as error:
-        reason = f"request_error_{error.status}"
-        _, changed = _update_ai_trade_council_automation_state(
-            status="waiting_gate",
-            reason=reason,
-        )
-        if changed:
-            append_audit({
-                "type": "ai_trade_council.automation_paused",
-                "reason": reason,
-                "httpStatus": error.status,
-                "terminalActions": False,
-            })
-        return {
-            "ok": False,
-            "kind": "ai_trade_council_automation_waiting_gate",
-            "reason": reason,
-            "automation": ai_trade_council_automation_read_model(),
-        }
+    except (RequestError, DataIntegrityError, OSError, ValueError) as error:
+        reason = str(getattr(error, "code", "") or "new_bar_only_trigger_not_admitted")
+        if isinstance(pending, dict):
+            # A creation request may have committed a parent before failing.
+            # Recover its identity; otherwise consume the failed trigger.
+            if _ai_trade_council_recover_created_round(pending, **current_fields) is None:
+                _ai_trade_council_skip_new_bar(pending, reason, **current_fields)
+        else:
+            _update_ai_trade_council_automation_state(status="waiting_gate", reason=reason,
+                                                     startupId=None)
+        return {"ok": False, "kind": "ai_trade_council_automation_skipped", "reason": reason,
+                "automation": ai_trade_council_automation_read_model()}
     finally:
         AI_TRADE_COUNCIL_AUTOMATION_RUN_LOCK.release()
 
@@ -86876,7 +87116,17 @@ def replace_mission(updated: dict) -> None:
 
 
 def find_mission(mission_id: str) -> dict | None:
-    return next((mission for mission in load_missions() if mission.get("id") == mission_id), None)
+    # Preserve caller-owned mutable results without copying the whole Mission
+    # archive for every exact lineage lookup. The shared snapshot is immutable
+    # and still revalidated against the atomically replaced store signature.
+    mission = next(
+        (
+            row for row in load_missions(shared_snapshot=True)
+            if row.get("id") == mission_id
+        ),
+        None,
+    )
+    return copy.deepcopy(mission) if mission is not None else None
 
 
 def _current_day_scheduled_workflow_recovery_matches(
@@ -93708,6 +93958,7 @@ def _ai_trade_council_gateway_result(
         "positionSizingMode": observed_gateway.get("positionSizingMode"),
         "riskPercent": observed_gateway.get("riskPercent"),
         "riskCapitalBase": observed_gateway.get("riskCapitalBase"),
+        "riskCostBasis": observed_gateway.get("riskCostBasis"),
         "estimatedCommissionPerLot": observed_gateway.get("estimatedCommissionPerLot"),
         "brokerVolumeMin": observed_gateway.get("brokerVolumeMin"),
         "brokerVolumeMax": observed_gateway.get("brokerVolumeMax"),
@@ -93820,7 +94071,12 @@ def dispatch_ai_trade_council_trade_plan(
         if isinstance(context.get("automation"), dict)
         else None
     )
-    if automation is not None and automation.get("tradeCommandAllowed") is not True:
+    if automation is None:
+        return _ai_trade_council_gateway_result(
+            status="no_trade",
+            reason_code="manual_analysis_only",
+        )
+    if automation.get("tradeCommandAllowed") is not True:
         return _ai_trade_council_gateway_result(
             status="no_trade",
             reason_code="audit_only_backlog_never_dispatches",
@@ -94741,6 +94997,9 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
             else {}
         )
         is_council_parent = parent_context.get("kind") == "ai_trade_council_parent"
+        unstarted_skip_reason = _ai_trade_council_unstarted_skip_reason(parent, children)
+        if is_council_parent and not unstarted_skip_reason:
+            parent.pop("councilSkipReasonCode", None)
         council_consensus = (
             ai_trade_council_consensus(parent, children)
             if is_council_parent
@@ -94804,6 +95063,14 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                 "ผลวิเคราะห์ของสภา AI Trade ไม่ครบหรือไม่ตรงกับ Snapshot เดียวกัน "
                 "ระบบจึงไม่ออกมติและไม่ดำเนินการกับ Terminal"
             )
+            if unstarted_skip_reason:
+                parent.update({
+                    "phase": "council_bar_skipped",
+                    "errorCode": unstarted_skip_reason,
+                    "councilSkipReasonCode": unstarted_skip_reason,
+                    "result": "ข้ามรอบของแท่งนี้ก่อนเริ่มวิเคราะห์ทั้ง 3 Agent ระบบรอแท่งใหม่ถัดไป ไม่วิเคราะห์ย้อนหลังและไม่ส่งคำสั่งเทรดจากรอบนี้",
+                })
+                delegation["state"] = "council_bar_skipped"
             parent["councilDecision"] = council_consensus
         else:
             parent["result"] = (
@@ -94898,7 +95165,9 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                 if clean_completion
                 else [
                     (
-                        "เก็บ Snapshot ใหม่แล้วเริ่มการวิเคราะห์อีกครั้ง"
+                        "รอแท่งใหม่ถัดไปและโควตาพร้อม โดยไม่วิเคราะห์รอบนี้ย้อนหลัง"
+                        if unstarted_skip_reason
+                        else "เก็บ Snapshot ใหม่แล้วเริ่มการวิเคราะห์อีกครั้ง"
                         if is_council_parent
                         else "ตรวจงานที่ติดขัด ไม่สำเร็จ หรือถูกเก็บโดยยังไม่สำเร็จที่โต๊ะวางแผน Mission"
                     )
@@ -94951,9 +95220,10 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                     "snapshotArtifact": parent_context.get("snapshotArtifact"),
                     "snapshotArtifactDigest": parent_context.get("snapshotArtifactDigest"),
                     "detectedAt": existing.get("detectedAt") or parent.get("createdAt"),
-                    "status": "analyzed",
-                    "reasonCode": "council_round_terminal",
+                    "status": "skipped" if parent.get("councilSkipReasonCode") else "analyzed",
+                    "reasonCode": parent.get("councilSkipReasonCode") or "council_round_terminal",
                     "missionId": parent_mission_id,
+                    "analysisStartPreflight": automation.get("analysisStartPreflight") or existing.get("analysisStartPreflight"),
                     "executionPolicy": automation.get("executionPolicy"),
                     "completedAt": parent.get("completedAt") or utc_now(),
                 }
@@ -94961,7 +95231,7 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                 # Always finalize its own immutable coverage row, but never
                 # let an old stream overwrite the active stream's scalar
                 # cursors or last-mission pointer.
-                scalar_updates = _ai_trade_council_terminal_cursor_updates(
+                scalar_updates = {} if parent.get("councilSkipReasonCode") else _ai_trade_council_terminal_cursor_updates(
                     store,
                     stream_key=stream_key,
                     closed_bar_time=closed_bar_time,
@@ -94970,6 +95240,7 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                 )
                 _save_ai_trade_council_coverage_records(
                     [completed_record],
+                    allow_unstarted_skip=bool(parent.get("councilSkipReasonCode")),
                     **scalar_updates,
                 )
             except (DataIntegrityError, OSError):
@@ -95468,6 +95739,14 @@ def create_mission(
         ),
         allow_budget_override=allow_budget_override,
     )
+    # Only the private Council constructor may allocate one transport retry.
+    # Existing Missions and all other work retain their original maxRuns=1.
+    if (
+        allow_analysis_context and allow_budget_override and council_context_valid
+        and analysis_context.get("providerRetryPolicy") == AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY
+        and (payload.get("budget") or {}).get("maxRuns") == 2
+    ):
+        budget["maxRuns"] = 2
     report_type = str(payload.get("reportType") or report_type_for_prop(target_id))
     trusted_optimization_staging = (
         copy.deepcopy(_trusted_optimization_publication_staging)
@@ -97732,6 +98011,28 @@ def auto_execution_authorization_error(mission: dict, *, require_operator_mode: 
     """Validate the immutable, digest-bound marker required for automatic execution."""
     execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
     approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
+    council_context = mission.get("analysisContext") if isinstance(mission.get("analysisContext"), dict) else {}
+    if council_context.get("providerRetryPolicy") is not None:
+        budget = mission.get("budget") if isinstance(mission.get("budget"), dict) else {}
+        attempts = mission.get("attemptCount", 0)
+        retry = mission.get("councilProviderRetry")
+        history = retry.get("history") if isinstance(retry, dict) else []
+        if (
+            not _is_ai_trade_council_vote_mission(mission)
+            or council_context.get("providerRetryPolicy") != AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY
+            or type(budget.get("maxRuns")) is not int or budget["maxRuns"] != 2
+            or type(attempts) is not int or attempts < 0 or attempts > 2
+            or not isinstance(history, list) or len(history) > 1
+            or (retry is not None and (
+                not isinstance(retry, dict)
+                or retry.get("schemaVersion") != "council-provider-retry-v1"
+                or retry.get("attemptCount") != len(history) or len(history) != 1
+                or parse_iso(str(retry.get("nextAttemptAt") or "")) is None
+            ))
+        ):
+            return "council_retry_budget_invalid"
+        if mission.get("status") == "queued" and attempts >= budget["maxRuns"]:
+            return "council_retry_budget_exhausted"
     if mission.get("autoEligible") is not True or mission.get("executionMode") != "auto_guarded":
         return "auto_authorization_marker_missing"
     if execution.get("schema") != "auto-guarded-execution-v1":
@@ -97874,7 +98175,11 @@ def defer_auto_mission(mission_id: str, reason: str, retry_after_seconds: int) -
             mission["runnerStatus"] = redact_text(str(reason), 80)
             mission["updatedAt"] = utc_now()
             execution["dispatchState"] = "deferred"
-            execution["nextAttemptAt"] = next_attempt
+            provider_not_before = _council_provider_retry_not_before(mission)
+            execution["nextAttemptAt"] = (
+                max(parse_iso(next_attempt), provider_not_before).isoformat()
+                if provider_not_before is not None else next_attempt
+            )
             execution["lastDeferredReason"] = redact_text(str(reason), 120)
             execution["deferralCount"] = int(execution.get("deferralCount") or 0) + 1
             mission["execution"] = execution
@@ -97954,7 +98259,10 @@ def defer_claimed_auto_mission(
             execution.update({
                 "dispatchState": "deferred",
                 "heartbeatAt": now_text,
-                "nextAttemptAt": next_attempt,
+                "nextAttemptAt": (
+                    max(parse_iso(next_attempt), _council_provider_retry_not_before(mission)).isoformat()
+                    if _council_provider_retry_not_before(mission) is not None else next_attempt
+                ),
                 "lastDeferredReason": redact_text(str(reason), 120),
                 "deferralCount": int(execution.get("deferralCount") or 0) + 1,
                 "processStarted": False,
@@ -98063,6 +98371,10 @@ def _find_next_auto_mission_unlocked(
 ) -> dict | None:
     if load_operator_mode_record().get("mode") != "auto_guarded":
         return None
+    if council_only is not False and manager_parallel_only is not True:
+        # An old future-dated retry must not keep its parent active and prevent
+        # the next natural bar from being admitted after an upgrade/restart.
+        _retire_council_automatic_backlog()
     now = datetime.now(timezone.utc)
     candidates = []
     invalid: tuple[str, str] | None = None
@@ -98078,6 +98390,8 @@ def _find_next_auto_mission_unlocked(
             if not explicitly_auto:
                 continue
             is_council_vote = _is_ai_trade_council_vote_mission(mission)
+            if is_council_vote and str(mission.get("id") or "") in AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS:
+                continue
             if council_only is True and not is_council_vote:
                 continue
             if council_only is False and is_council_vote:
@@ -98112,7 +98426,7 @@ def _find_next_auto_mission_unlocked(
             if execution.get("dispatchState") not in {"queued", "deferred"}:
                 invalid = (str(mission.get("id") or ""), "auto_dispatch_state_invalid")
                 break
-            next_attempt = parse_iso(execution.get("nextAttemptAt"))
+            next_attempt = _auto_mission_next_attempt_at(mission)
             if next_attempt and now < next_attempt:
                 continue
             candidates.append(mission)
@@ -98210,7 +98524,7 @@ def _claim_auto_mission_unlocked(
             if execution.get("dispatchState") not in {"queued", "deferred"}:
                 invalid = (mission_id, "auto_dispatch_state_invalid")
                 break
-            next_attempt = parse_iso(execution.get("nextAttemptAt"))
+            next_attempt = _auto_mission_next_attempt_at(mission)
             if next_attempt and datetime.now(timezone.utc) < next_attempt:
                 break
             manager_parallel_claim = bool(
@@ -98764,6 +99078,9 @@ def _finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: d
             "realToolExecuted": bool(runner.get("processStarted")),
         })
         return None
+    retry = _defer_council_provider_rate_limit(mission_id, lease_id, runner, result)
+    if retry is not None:
+        return retry
     budget = current.get("budget") if isinstance(current.get("budget"), dict) else {}
     output_limit = clamp_int(
         budget.get("outputLimitChars"),
@@ -99044,11 +99361,15 @@ def _finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: d
             f"หลักฐานที่ขาด: {', '.join(output_contract.get('missingEvidenceKinds') or []) or '-'})",
             output_limit,
         )
-    elif analysis_context.get("kind") == "ai_trade_council_vote" and council_vote is None and final_message:
+    elif analysis_context.get("kind") == "ai_trade_council_vote" and work_status == "rate_limited":
+        summary = "บริการ AI จำกัดคำขอ (429 / Rate Limit) จึงยังวิเคราะห์ไม่ครบ 3 Agent รอบนี้ไม่มีมติสำหรับส่งคำสั่งเทรด"
+    elif analysis_context.get("kind") == "ai_trade_council_vote" and work_status == "invalid_council_output":
         summary = (
             "ผลวิเคราะห์ไม่ผ่าน Output Schema หรือไม่ตรงกับ Snapshot และบทบาทที่กำหนด "
             "ระบบจึงไม่รวมผลนี้ในการลงมติ"
         )
+    elif analysis_context.get("kind") == "ai_trade_council_vote" and not succeeded:
+        summary = redact_text(str(result.get("message") or "Agent วิเคราะห์ไม่สำเร็จ ระบบจึงไม่รวมผลในการลงมติ"), output_limit)
     elif council_vote is not None:
         summary = json.dumps(council_vote, ensure_ascii=False, sort_keys=True)
     else:
@@ -100310,11 +100631,17 @@ def _expire_ai_trade_council_vote_mission(
                 return None
             if expected_lease_id is not None and expected_status != "running":
                 return None
+            new_bar_skipped = reason_code.startswith((
+                "council_new_bar_", "council_legacy_automatic_"
+            ))
             mission["status"] = "blocked"
-            mission["phase"] = "council_round_expired"
+            mission["phase"] = "council_bar_skipped" if new_bar_skipped else "council_round_expired"
             mission["workStatus"] = "blocked"
             mission["errorCode"] = reason_code
             mission["result"] = (
+                "ข้ามรอบอัตโนมัติของแท่งนี้ เพราะไม่ผ่านเงื่อนไขเริ่มงานบนแท่งใหม่ "
+                "ระบบจะรอแท่งถัดไป ไม่วิเคราะห์ย้อนหลังและไม่ส่งคำสั่งจากงานนี้"
+                if new_bar_skipped else
                 "รอบวิเคราะห์สภา AI หมดเวลาก่อนเริ่มหรือก่อนจบ Agent จึงยกเลิกผลรอบนี้ "
                 "และไม่ส่งคำสั่งไปยัง EA ที่เลือก"
             )
@@ -100329,7 +100656,8 @@ def _expire_ai_trade_council_vote_mission(
                 "nextAttemptAt": None,
                 "processStarted": bool(execution.get("processStarted", False)),
                 "automaticRetry": False,
-                "roundExpired": True,
+                "roundExpired": not new_bar_skipped,
+                **({"newBarSkipped": True} if new_bar_skipped else {}),
             }
             expired = mission
             parent_id = safe_reference(mission.get("parentMissionId"))
@@ -100362,6 +100690,14 @@ def _defer_auto_mission_with_round_deadline(
     retry_after_seconds: int,
 ) -> dict | None:
     """Never leave a Council card blue when its next attempt cannot finish."""
+    if _council_automatic_vote(mission):
+        # Quota/runner capacity becoming available mid-bar is not a new-bar
+        # trigger. Retire the attempt instead of retaining a paid backlog.
+        return _expire_ai_trade_council_vote_mission(
+            str(mission.get("id") or ""),
+            "council_new_bar_gate_skipped_" + str(reason),
+            expected_status="queued",
+        )
     remaining = _ai_trade_council_round_remaining_seconds(mission)
     retry_after_seconds = max(1, min(3600, int(retry_after_seconds)))
     budget = mission.get("budget") if isinstance(mission.get("budget"), dict) else {}
@@ -100927,6 +101263,12 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
     agent_id = str(mission.get("owner") or "manager")
     tool_id = str(mission.get("toolId") or "")
     config = mission_worker_config()
+    new_bar_error = _council_new_bar_start_error(mission)
+    if new_bar_error:
+        _expire_ai_trade_council_vote_mission(
+            mission_id, new_bar_error, expected_status="queued",
+        )
+        return
     round_remaining = _ai_trade_council_round_remaining_seconds(mission)
     is_council_candidate = _is_ai_trade_council_vote_mission(mission)
     is_manager_parallel = _manager_parallel_read_only_candidate(mission)
@@ -101573,6 +101915,23 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             )
             return
         if is_council_candidate:
+            new_bar_error = _council_new_bar_start_error(claimed)
+            if new_bar_error is None and _council_automatic_vote(claimed):
+                # Preserve the included-quota policy; no credit exception is
+                # introduced by this Council-only release.
+                start_quota_gate = _collaboration_quota_gate(
+                    {}, refresh=False, quota=codex_rate_limits(),
+                )
+                if start_quota_gate.get("allowed") is not True:
+                    new_bar_error = "council_new_bar_gate_skipped_" + str(
+                        start_quota_gate.get("reason") or "quota_unavailable"
+                    )
+            if new_bar_error:
+                _expire_ai_trade_council_vote_mission(
+                    mission_id, new_bar_error, expected_status="running",
+                    expected_lease_id=lease_id,
+                )
+                return
             claimed_remaining = _ai_trade_council_round_remaining_seconds(claimed)
             claimed_budget = (
                 claimed.get("budget")
@@ -101790,6 +102149,13 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                 worker_prompt += str(
                     ea_factory_source_review_transport.get("promptBlock") or ""
                 )
+            new_bar_error = _council_new_bar_start_error(claimed)
+            if new_bar_error:
+                _expire_ai_trade_council_vote_mission(
+                    mission_id, new_bar_error, expected_status="running",
+                    expected_lease_id=lease_id,
+                )
+                return
             runner = ({"ok": False, "exitCode": "cancelled", "processStarted": False,
                        "output": json.dumps({"ok": False, "status": "bridge_shutdown_cancelled",
                                              "message": "Bridge shutdown cancelled this Mission before process start."})}
@@ -101949,9 +102315,13 @@ def ai_trade_council_worker_loop(worker_id: str) -> None:
                 MISSION_WORKER_WAKE.wait(config["idlePollSeconds"])
                 MISSION_WORKER_WAKE.clear()
                 continue
-            mission = find_next_auto_mission(council_only=True)
+            mission = _reserve_next_ai_trade_council_mission(worker_id)
             if mission:
-                process_auto_mission(worker_id, mission)
+                try:
+                    if not MISSION_WORKER_STOP.is_set():
+                        process_auto_mission(worker_id, mission)
+                finally:
+                    _release_ai_trade_council_dispatch_reservation(str(mission["id"]), worker_id)
                 continue
             MISSION_WORKER_WAKE.wait(config["idlePollSeconds"])
             MISSION_WORKER_WAKE.clear()
@@ -107953,6 +108323,458 @@ class BridgeHTTPServer(ThreadingHTTPServer):
     # cheap. Accept the bounded local burst promptly; per-request work remains
     # guarded/cached by the read models above.
     request_queue_size = 64
+
+
+AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS: dict[str, str] = {}
+
+MT4_TRADE_GATEWAY_INPUT_DIAGNOSTIC_NAMES = frozenset({
+    "PollIntervalSeconds", "SnapshotIntervalSeconds", "SnapshotBars",
+    "MaxCommandBytes", "MaxCommandTtlSeconds", "MaxHeartbeatTtlSeconds",
+    "MaxClockSkewSeconds", "MaxSpreadPoints", "SlippagePoints", "MagicNumber",
+    "MaxSnapshotAgeSeconds", "MaxSignalDriftPoints", "MaxQuoteAgeSeconds",
+    "MaxManagedOpenPositions", "MaxManagedTotalLots", "FixedLot",
+    "MaxTradesPerBrokerDay", "MaxLossPerTradePercent", "MaxDailyLossPercent",
+    "MaxManagedWeeklyLossPercent", "MaxConsecutiveManagedLosses",
+    "ConsecutiveLossCooldownMinutes", "MaxAccountEquityDrawdownPercent",
+    "MinRewardRiskRatio", "MinProjectedMarginLevelPercent", "RequireHeartbeat",
+})
+
+MT5_TRADE_GATEWAY_PRICE_RISK_COST_BASIS = "price_and_slippage_excluding_commission"
+
+MT5_TRADE_GATEWAY_PRICE_RISK_STATUS_FIELDS = (
+    MT5_TRADE_GATEWAY_STATUS_FIELDS | {"riskCostBasis"}
+)
+
+def _validated_mt4_trade_gateway_input_diagnostic(value: object) -> dict | None:
+    """Allow only bounded-shape numeric input evidence, never arbitrary EA text."""
+    fields = {"field", "value", "minimum", "maximum", "minimumInclusive",
+              "maximumInclusive", "constraint"}
+    if not isinstance(value, dict) or set(value) != fields:
+        return None
+    field = value.get("field")
+    if not isinstance(field, str) or field not in MT4_TRADE_GATEWAY_INPUT_DIAGNOSTIC_NAMES:
+        return None
+    for key in ("value", "minimum", "maximum"):
+        number = value[key]
+        if number is not None and (
+            isinstance(number, bool) or not isinstance(number, (int, float))
+            or not -sys.float_info.max <= number <= sys.float_info.max
+            or not math.isfinite(number)
+        ):
+            return None
+    if any(not isinstance(value[key], bool) for key in ("minimumInclusive", "maximumInclusive")):
+        return None
+    minimum, maximum = value["minimum"], value["maximum"]
+    if minimum is None and maximum is None:
+        return None
+    if minimum is not None and maximum is not None and (
+        minimum > maximum or (minimum == maximum and not (
+            value["minimumInclusive"] and value["maximumInclusive"]
+        ))
+    ):
+        return None
+    expected_constraint = {
+        "FixedLot": "at_most_MaxManagedTotalLots",
+        "RequireHeartbeat": "required_for_execution",
+    }.get(field, "range")
+    if value["constraint"] != expected_constraint:
+        return None
+    if field == "FixedLot" and (minimum is not None or maximum is None):
+        return None
+    if field == "RequireHeartbeat" and (
+        value["value"] not in (0, 1) or minimum != 1 or maximum != 1
+    ):
+        return None
+    return {key: value[key] for key in fields}
+
+def _ai_trade_council_start_preflight_shape(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "status": str(value.get("status") or "audit_only")[:24],
+        "reasonCode": redact_text(str(value.get("reasonCode") or ""), 120),
+        "analysisSnapshotAgeSeconds": _safe_snapshot_number(
+            value.get("analysisSnapshotAgeSeconds")
+        ),
+        "maximumSnapshotAgeSeconds": _automation_optional_count(
+            value.get("maximumSnapshotAgeSeconds")
+        ),
+        "remainingSnapshotSeconds": _safe_snapshot_number(
+            value.get("remainingSnapshotSeconds")
+        ),
+        "checkedAt": value.get("checkedAt") if parse_iso(value.get("checkedAt")) else None,
+    }
+
+def _ai_trade_council_analysis_start_preflight(
+    snapshot: dict,
+    identity: dict,
+) -> dict:
+    """Classify live eligibility without publishing, reconciling or retimestamping."""
+    chart = snapshot.get("chartSnapshot") or {}
+    observed = parse_iso(str(chart.get("observedAt") or ""))
+    context = _active_global_metatrader_context()
+    record = context.get("record") if isinstance(context, dict) else None
+    maximum = None
+    if isinstance(record, dict) and record.get("candidateId") == identity.get("candidateId"):
+        ea, _ = _read_mt4_trade_gateway_ea_status(record)
+        maximum = _automation_optional_count(
+            (ea or {}).get("maxSnapshotAgeSeconds"), maximum=86_400,
+        )
+    age = (
+        (datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
+        if observed is not None else None
+    )
+    status, reason = "ready", "analysis_snapshot_ready_before_start"
+    if age is None or age < 0:
+        status, reason = "audit_only", "analysis_snapshot_time_invalid_before_start"
+    elif not maximum:
+        status, reason = "waiting", "execution_age_limit_unavailable_before_start"
+    elif age > maximum:
+        status, reason = "audit_only", "analysis_snapshot_expired_before_start"
+    return _ai_trade_council_start_preflight_shape({
+        "status": status,
+        "reasonCode": reason,
+        "analysisSnapshotAgeSeconds": round(age, 3) if age is not None else None,
+        "maximumSnapshotAgeSeconds": maximum,
+        "remainingSnapshotSeconds": round(maximum - age, 3) if maximum and age is not None else None,
+        "checkedAt": utc_now(),
+    })
+
+def _ai_trade_council_priority_pending(records: list[dict], state: dict) -> list[dict]:
+    """Current observed bar first; audit captures retain oldest-first fairness."""
+    return sorted(records, key=lambda row: (
+        0 if (row.get("streamKey") == state.get("streamKey")
+              and row.get("closedBarTime") == state.get("lastObservedClosedBarTime")
+              and row.get("executionPolicy") != "audit_only_no_stale_dispatch") else 1,
+        int(row["closedBarTime"]),
+    ))
+
+AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY = {
+    "schemaVersion": "council-provider-retry-v1",
+    "maximumRuns": 2,
+    "minimumBackoffSeconds": 30,
+    "retryOnly": "provider_http_429",
+    "sameMissionAndSnapshot": True,
+    "preserveRoundDeadline": True,
+}
+
+def _ai_trade_council_new_bar_gate(config: dict) -> str | None:
+    """Admit a new trigger now; a failed gate never creates deferred AI work."""
+    if _active_ai_trade_council_parent():
+        return "council_round_already_active"
+    if load_operator_mode_record().get("mode") != "auto_guarded":
+        return "full_access_required"
+    if str((bridge_status().get("codex") or {}).get("status") or "") not in {"ready", "ready_guarded"}:
+        return "codex_runner_not_ready"
+    quota = _collaboration_quota_gate(config, refresh=True)
+    if quota.get("allowed") is not True:
+        return str(quota.get("reason") or "quota_blocked")
+    return None
+
+def _ai_trade_council_skip_new_bar(record: dict, reason: str, **state_values: object) -> dict:
+    """Consume this observed bar without AI spend; never revive it mid-bar."""
+    record.update({
+        "status": "skipped", "reasonCode": reason,
+        "executionPolicy": "audit_only_no_stale_dispatch", "completedAt": utc_now(),
+    })
+    store = _save_ai_trade_council_coverage_records(
+        [record], **{**state_values, "status": "skipped", "reason": reason},
+    )
+    append_audit({
+        "type": "ai_trade_council.automation_skipped", "reason": reason,
+        "recordId": record.get("recordId"), "streamKey": record.get("streamKey"),
+        "closedBarTime": record.get("closedBarTime"), "snapshotId": record.get("snapshotId"),
+        "analysisPolicy": "new_closed_bar_only_no_backfill", "aiRunAllowed": False,
+        "automaticRetry": False, "tradeCommandAllowed": False, "terminalActions": False,
+    })
+    return store
+
+def _ai_trade_council_skip_new_bars(records: list[dict], reason: str) -> None:
+    """Retire an upgrade/restart backlog in one durable state transaction."""
+    if not records:
+        return
+    completed_at = utc_now()
+    for record in records:
+        record.update({"status": "skipped", "reasonCode": reason,
+                       "executionPolicy": "audit_only_no_stale_dispatch", "completedAt": completed_at})
+    _save_ai_trade_council_coverage_records(records, status="skipped", reason=reason)
+    append_audit({
+        "type": "ai_trade_council.automation_backlog_skipped", "reason": reason,
+        "recordIds": [record.get("recordId") for record in records], "skippedCount": len(records),
+        "analysisPolicy": "new_closed_bar_only_no_backfill", "aiRunAllowed": False,
+        "automaticRetry": False, "tradeCommandAllowed": False, "terminalActions": False,
+    })
+
+def _ai_trade_council_recover_created_round(record: dict, **state_values: object) -> dict | None:
+    """Reconcile a prior creation commit without creating/replaying any work."""
+    parent = _find_ai_trade_council_parent_by_closed_bar(record["streamKey"], int(record["closedBarTime"]))
+    if not isinstance(parent, dict):
+        return None
+    automation = (parent.get("analysisContext") or {}).get("automation") or {}
+    terminal = parent.get("status") in {"completed", "failed", "blocked", "archived"}
+    skip_reason = (
+        _ai_trade_council_unstarted_skip_reason(
+            parent, [mission for mission in load_missions() if mission.get("parentMissionId") == parent.get("id")],
+        ) if terminal else None
+    )
+    with AI_TRADE_COUNCIL_AUTOMATION_LOCK:
+        store, _ = _rollover_ai_trade_council_automation_day(load_ai_trade_council_automation_store())
+        state = store["state"]
+        was_pending = any(row.get("streamKey") == record["streamKey"]
+                          and row.get("closedBarTime") == record["closedBarTime"]
+                          and row.get("status") == "pending" for row in state.get("coverageRecords") or [])
+        _ai_trade_council_coverage_upsert(store, {
+            **record, "status": "skipped" if skip_reason else "analyzed" if terminal else "queued", "missionId": parent.get("id"),
+            "reasonCode": skip_reason or "existing_closed_bar_round_recovered",
+            "executionPolicy": automation.get("executionPolicy", "audit_only_no_stale_dispatch"),
+            "completedAt": parent.get("completedAt") or utc_now(),
+        })
+        state.update({
+            **state_values, "status": "existing", "reason": "existing_closed_bar_round_recovered",
+            "lastMissionId": parent.get("id"),
+            "dailyRunCount": int(state.get("dailyRunCount") or 0) + int(
+                was_pending and automation.get("source") == "backend_scheduler"
+                and automation.get("dayKey") == state.get("dailyRunDate")
+            ),
+        })
+        _save_ai_trade_council_automation_store(store)
+    return parent
+
+def _ai_trade_council_unstarted_skip_reason(parent: dict, children: list[dict]) -> str | None:
+    """Only a complete, wholly unstarted automatic round counts as skipped."""
+    context = parent.get("analysisContext") or {}
+    if (
+        context.get("kind") != "ai_trade_council_parent"
+        or not isinstance(context.get("automation"), dict)
+        or not context["automation"]
+        or len(children) != 3
+        or {str((child.get("analysisContext") or {}).get("roleId")) for child in children}
+        != {"technical", "price_action", "news"}
+    ):
+        return None
+    reasons = set()
+    for child in children:
+        execution = child.get("execution") or {}
+        reason = str(child.get("errorCode") or "")
+        if (
+            not _council_automatic_vote(child)
+            or child.get("status") != "blocked"
+            or execution.get("newBarSkipped") is not True
+            or execution.get("processStarted") is not False
+            or isinstance(child.get("councilVote"), dict)
+            or not reason.startswith(("council_new_bar_", "council_legacy_automatic_"))
+        ):
+            return None
+        reasons.add(reason)
+    return next(iter(reasons)) if len(reasons) == 1 else "council_new_bar_all_votes_skipped"
+
+def _council_provider_retry_not_before(mission: dict) -> datetime | None:
+    retry = mission.get("councilProviderRetry")
+    return parse_iso(str(retry.get("nextAttemptAt") or "")) if isinstance(retry, dict) else None
+
+def _auto_mission_next_attempt_at(mission: dict) -> datetime | None:
+    execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
+    deadlines = [parse_iso(str(execution.get("nextAttemptAt") or "")), _council_provider_retry_not_before(mission)]
+    return max((deadline for deadline in deadlines if deadline is not None), default=None)
+
+def _reserve_next_ai_trade_council_mission(worker_id: str) -> dict | None:
+    # Reserve distinct votes before readiness checks. This consumes no quota,
+    # authorization or execution lease; process_auto_mission keeps every gate.
+    with AI_TRADE_COUNCIL_QUEUE_LOCK:
+        if MISSION_WORKER_STOP.is_set() or len(AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS) >= 3:
+            return None
+        mission = _find_next_auto_mission_unlocked(council_only=True)
+        if mission is None:
+            return None
+        AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS[str(mission["id"])] = worker_id
+        return mission
+
+def _release_ai_trade_council_dispatch_reservation(mission_id: str, worker_id: str) -> None:
+    with AI_TRADE_COUNCIL_QUEUE_LOCK:
+        if AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS.get(mission_id) == worker_id:
+            AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS.pop(mission_id, None)
+    MISSION_WORKER_WAKE.set()
+
+def _defer_council_provider_rate_limit(mission_id: str, lease_id: str, runner: dict, result: dict) -> dict | None:
+    """Spend at most the explicitly issued second run on the same frozen vote."""
+    failure = result.get("providerFailure")
+    if not (
+        result.get("ok") is False and result.get("processOk") is False
+        and result.get("status") == "rate_limited"
+        and result.get("processStarted", runner.get("processStarted")) is True
+        and isinstance(failure, dict)
+        and failure.get("schemaVersion") == "codex-provider-http-failure-v1"
+        and type(failure.get("httpStatus")) is int and failure["httpStatus"] == 429
+        and failure.get("retryable") is True
+    ):
+        return None
+    provider_delay = failure.get("retryAfterSeconds")
+    if provider_delay is not None and (type(provider_delay) is not int or provider_delay < 0):
+        return None
+    delay = max(AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY["minimumBackoffSeconds"], provider_delay or 0)
+    requeued = None
+    with PARENT_MISSION_REFRESH_LOCK:
+        with MISSIONS_LOCK:
+            missions = load_missions()
+            for mission in missions:
+                execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
+                context = mission.get("analysisContext") if isinstance(mission.get("analysisContext"), dict) else {}
+                budget = mission.get("budget") if isinstance(mission.get("budget"), dict) else {}
+                if mission.get("id") != mission_id:
+                    continue
+                if (
+                    MISSION_WORKER_STOP.is_set()
+                    or _council_automatic_vote(mission)
+                    or mission.get("status") != "running" or execution.get("leaseId") != lease_id
+                    or execution.get("authorizationConsumedLeaseId") != lease_id
+                    or not execution.get("authorizationConsumedAt")
+                    or (mission.get("approval") or {}).get("required") is not False
+                    or context.get("providerRetryPolicy") != AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY
+                    or budget.get("maxRuns") != 2 or mission.get("attemptCount") != 1
+                    or mission.get("councilProviderRetry") is not None
+                    or auto_execution_authorization_error(mission, require_operator_mode=True)
+                    or _council_vote_parent_state_error(mission, missions)
+                ):
+                    break
+                remaining = _ai_trade_council_round_remaining_seconds(mission)
+                reserve = clamp_int(budget.get("timeoutSeconds"), 120, 15, 600) + 35
+                if remaining is None or remaining <= delay + reserve:
+                    break
+                failed_at = utc_now()
+                next_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+                artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+                mission["councilProviderRetry"] = {
+                    "schemaVersion": "council-provider-retry-v1", "attemptCount": 1,
+                    "maximumRuns": 2, "nextAttemptAt": next_at,
+                    "snapshotArtifactDigest": context.get("snapshotArtifactDigest"),
+                    "roundDeadlineAt": context.get("roundDeadlineAt"),
+                    "history": [{
+                        "attemptCount": mission["attemptCount"], "leaseId": lease_id,
+                        "authorizationId": execution.get("authorizationId"),
+                        "authorizationPayloadDigest": execution.get("authorizationPayloadDigest"),
+                        "failedAt": failed_at, "status": "provider_http_429",
+                        "retryAfterSeconds": delay, "processStarted": True,
+                        "artifactPath": safe_codex_artifact_reference(artifacts.get("final")),
+                    }],
+                }
+                mission.update({
+                    "status": "queued", "phase": "council_provider_rate_limit_backoff",
+                    "workStatus": "queued", "runnerStatus": "rate_limited", "errorCode": "provider_http_429",
+                    "result": f"บริการ AI จำกัดคำขอชั่วคราว (429) รออย่างน้อย {delay} วินาที แล้วลอง Agent เดิมอีกครั้งบน Snapshot เดิม",
+                    "completedAt": None, "updatedAt": failed_at, "autoQueuedAt": failed_at,
+                })
+                for key in ("workerId", "leaseId", "startedAt", "timeoutAt", "completedAt", "authorizationId",
+                            "authorizationConsumedAt", "authorizationConsumedLeaseId"):
+                    execution.pop(key, None)
+                execution.update({
+                    "dispatchState": "deferred", "nextAttemptAt": next_at, "heartbeatAt": failed_at,
+                    "lastDeferredReason": "provider_http_429", "automaticRetry": True,
+                    "processStarted": False, "processTreeTerminated": False,
+                })
+                mission["execution"] = execution
+                _issue_backend_auto_safe_authorization(mission, issued_at=failed_at)
+                requeued = copy.deepcopy(mission)
+                save_missions(missions)
+                break
+        if requeued:
+            refresh_parent_mission(requeued.get("parentMissionId"))
+    if requeued:
+        append_audit({
+            "type": "ai_trade_council.provider_retry_deferred", "missionId": mission_id,
+            "parentMissionId": requeued.get("parentMissionId"), "ownerAgentId": requeued.get("owner"),
+            "snapshotArtifactDigest": (requeued.get("analysisContext") or {}).get("snapshotArtifactDigest"),
+            "previousLeaseId": lease_id, "attemptCount": requeued.get("attemptCount"),
+            "maximumRuns": 2, "nextAttemptAt": requeued["execution"]["nextAttemptAt"],
+            "sameMission": True, "sameSnapshot": True, "terminalActions": False,
+            "automaticRetry": True, "realToolExecuted": True,
+        })
+        MISSION_WORKER_WAKE.set()
+    return requeued
+
+def _council_automatic_vote(mission: dict) -> bool:
+    context = mission.get("analysisContext")
+    return bool(
+        isinstance(context, dict)
+        and context.get("kind") == "ai_trade_council_vote"
+        and isinstance(context.get("automation"), dict)
+        and context["automation"]
+    )
+
+def _council_new_bar_start_error(mission: dict) -> str | None:
+    """Admit only an automatic vote captured for this startup's natural bar.
+
+    This is a prelaunch check, not a running-process watchdog. Manual rounds do
+    not carry an automation packet and retain their existing deadline policy.
+    Legacy automatic queued work is intentionally retired on upgrade.
+    """
+    if not _council_automatic_vote(mission):
+        return None
+    context = mission["analysisContext"]
+    automation = context["automation"]
+    if automation.get("triggerPolicy") != "new_closed_bar_only_no_backfill":
+        return "council_legacy_automatic_backlog_skipped"
+    if automation.get("triggerStartupId") != SERVER_STARTED_AT:
+        return "council_new_bar_previous_startup_skipped"
+    if (
+        automation.get("executionPolicy") != "current_exact_snapshot"
+        or automation.get("tradeCommandAllowed") is not True
+    ):
+        return "council_new_bar_historical_snapshot_skipped"
+    admitted_at = parse_iso(str(automation.get("quotaAdmittedAt") or ""))
+    expires_at = parse_iso(str(automation.get("triggerExpiresAt") or ""))
+    now = datetime.now(timezone.utc)
+    if (
+        admitted_at is None or expires_at is None
+        or admitted_at > now or expires_at <= admitted_at
+        or (expires_at - admitted_at).total_seconds() > 60
+    ):
+        return "council_new_bar_admission_invalid"
+    if now >= expires_at:
+        return "council_new_bar_start_window_expired"
+    try:
+        current, _reason = _ai_trade_council_closed_bar_identity(
+            metatrader_snapshot_read_model(AI_TRADE_COUNCIL_PROP_ID)
+        )
+    except (RequestError, DataIntegrityError, OSError, ValueError, TypeError):
+        return "council_new_bar_current_snapshot_unavailable"
+    if current is None:
+        return "council_new_bar_current_snapshot_unavailable"
+    if not _ai_trade_council_pending_matches_current_closed_bar(
+        context.get("closedBarIdentity"), current
+    ):
+        return "council_new_bar_no_longer_current"
+    try:
+        start_preflight = _ai_trade_council_analysis_start_preflight(
+            {"chartSnapshot": {"observedAt": context.get("snapshotObservedAt")}},
+            current,
+        )
+    except (RequestError, DataIntegrityError, OSError, ValueError, TypeError):
+        return "council_new_bar_execution_age_limit_unavailable"
+    if start_preflight.get("status") != "ready":
+        return "council_new_bar_" + str(
+            start_preflight.get("reasonCode") or "snapshot_preflight_unavailable"
+        )
+    return None
+
+def _retire_council_automatic_backlog() -> int:
+    with MISSIONS_LOCK:
+        queued = [copy.deepcopy(mission) for mission in load_missions() if (
+            mission.get("status") == "queued"
+            and mission.get("autoEligible") is True
+            and mission.get("executionMode") == "auto_guarded"
+            and _council_automatic_vote(mission)
+        )]
+    retired = 0
+    for mission in queued:
+        execution = mission.get("execution") or {}
+        reason = _council_new_bar_start_error(mission)
+        if reason is None and execution.get("dispatchState") == "deferred":
+            reason = "council_new_bar_deferred_attempt_skipped"
+        if reason and _expire_ai_trade_council_vote_mission(
+            str(mission.get("id") or ""), reason, expected_status="queued",
+        ) is not None:
+            retired += 1
+    return retired
 
 
 class BridgeHandler(SimpleHTTPRequestHandler):

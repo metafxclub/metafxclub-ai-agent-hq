@@ -2,6 +2,8 @@ from pathlib import Path
 import re
 import unittest
 
+from test_frontend_polling_stability import function_block
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,9 +32,14 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn("const BOOT_CONTRACT_FETCH_TIMEOUT_MS = 20000;", self.main)
         self.assertIn("const UI_SESSION_FETCH_TIMEOUT_MS = 5000;", self.main)
         self.assertIn("const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;", self.main)
+        self.assertIn("const AI_TRADE_COUNCIL_REPORT_FETCH_TIMEOUT_MS = 60000;", self.main)
         self.assertIn("const NAVIGATION_MASK_LOAD_TIMEOUT_MS = 20000;", self.main)
         self.assertIn("{ timeoutMs: UI_SESSION_FETCH_TIMEOUT_MS }", self.main)
-        self.assertIn("{ timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS, signal }", self.main)
+        report_loader = function_block(self.main, "loadPropReport")
+        self.assertIn('const timeoutMs = key === "left_analytics_console"', report_loader)
+        self.assertIn("? AI_TRADE_COUNCIL_REPORT_FETCH_TIMEOUT_MS", report_loader)
+        self.assertIn(": PROP_REPORT_FETCH_TIMEOUT_MS;", report_loader)
+        self.assertIn("{ timeoutMs, signal }", report_loader)
         self.assertIn("}, NAVIGATION_MASK_LOAD_TIMEOUT_MS);", self.main)
         self.assertEqual(
             self.main.count("{ timeoutMs: BOOT_CONTRACT_FETCH_TIMEOUT_MS }"),

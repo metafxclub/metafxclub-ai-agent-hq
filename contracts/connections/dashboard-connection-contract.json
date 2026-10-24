@@ -404,7 +404,7 @@
         "allowedModes": ["manual", "auto_on_new_closed_bar"],
         "triggerPolicy": "new_closed_bar",
         "activationPolicy": "wait_next_closed_bar",
-        "backlogPolicy": "durable_fifo_exact_snapshot_audit_only_when_stale",
+        "backlogPolicy": "new_closed_bar_only_no_backfill",
         "councilExecution": "parallel_with_round_deadline",
         "snapshotPollSeconds": 5,
         "autoSupportedTimeframes": ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],

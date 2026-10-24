@@ -1,5 +1,5 @@
 #property strict
-#property version   "2.19"
+#property version   "2.20"
 #property description "Metafxclub AI Agent HQ Unified MT4 Gateway"
 #property description "Snapshot publisher plus guarded FILE_COMMON command adapter"
 
@@ -85,7 +85,14 @@ string ACK_SCHEMA = "metafx-hq-mt4-ack-v3";
 string STATUS_SCHEMA = "metafx-hq-mt4-status-v5";
 string SNAPSHOT_SCHEMA = "metafx-hq-mt4-snapshot-v1";
 string EA_PROFILE = "special";
-string EA_VERSION = "2.19";
+string EA_VERSION = "2.20";
+bool g_runtime_initialized = false;
+bool g_init_blocked = false;
+string g_init_failure_stage = "";
+string g_init_failure_reason = "";
+int g_init_failure_return_code = INIT_FAILED;
+uint g_last_init_retry_millis = 0;
+bool g_diagnostic_timer_ready = false;
 const int ATOMIC_WRITE_MAX_ATTEMPTS = 3;
 const int ATOMIC_WRITE_BACKOFF_MILLIS = 25;
 const int LEGACY_BACKFILL_MAX_ACKS = 256;
@@ -2610,7 +2617,7 @@ bool SignedCommandVerificationAvailable()
 string BuildCapabilitiesJson()
 {
    string signing_reason = "";
-   bool signed_ready = RefreshSigningReadiness(signing_reason);
+   bool signed_ready = GatewayInitializationReady() && RefreshSigningReadiness(signing_reason);
    bool demo_account = IsNonRealAccount();
    bool demo_ready = GatewayMode == GATEWAY_DEMO &&
       demo_account && signed_ready;
@@ -2624,7 +2631,9 @@ string BuildCapabilitiesJson()
       live_commission_policy_confirmed &&
       live_symbol_exact_allowlist_confirmed && LiveArmed;
    string live_block_reason = "";
-   if(demo_account)
+   if(!GatewayInitializationReady())
+      live_block_reason = InitializationBlockReason();
+   else if(demo_account)
       live_block_reason = "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT";
    else if(GatewayMode != GATEWAY_LIVE)
       live_block_reason = "LIVE_MODE_NOT_SELECTED";
@@ -2646,7 +2655,7 @@ string BuildCapabilitiesJson()
    payload += "\"accountMode\":" + JsonString(AccountModeName()) + ",";
    payload += "\"commandSchemaVersion\":" + JsonString(COMMAND_SCHEMA) + ",";
    payload += "\"ackSchemaVersion\":" + JsonString(ACK_SCHEMA) + ",";
-   payload += "\"shadowValidationAvailable\":true,";
+   payload += "\"shadowValidationAvailable\":" + JsonBoolean(GatewayInitializationReady()) + ",";
    payload += "\"signedEnvelopeSchemaVersion\":" + JsonString(SIGNED_ENVELOPE_SCHEMA) + ",";
    payload += "\"signatureAlgorithm\":" + JsonString(SIGNATURE_ALGORITHM) + ",";
    payload += "\"demoExecutionAvailable\":" + JsonBoolean(demo_ready) + ",";
@@ -2670,6 +2679,8 @@ string BuildCapabilitiesJson()
 
 bool WriteCapabilitiesSnapshot()
 {
+   if(g_init_blocked || g_channel_lock_handle == INVALID_HANDLE)
+      return false;
    return WriteCommonTextAtomic(CapabilitiesPath(), BuildCapabilitiesJson());
 }
 
@@ -2728,7 +2739,7 @@ void ResetAckExecutionEvidence()
 string BuildStatusJson()
 {
    UpdateRiskTelemetry(false);
-   bool signed_ready = SignedCommandVerificationAvailable();
+   bool signed_ready = GatewayInitializationReady() && SignedCommandVerificationAvailable();
    bool demo_account = IsNonRealAccount();
    string normalized_managed_magics = "";
    string normalized_allowed_symbols = "";
@@ -2744,7 +2755,7 @@ string BuildStatusJson()
          normalized_allowed_timeframes
       );
    bool portfolio_policy_ready =
-      status_config_valid &&
+      GatewayInitializationReady() && status_config_valid &&
       g_portfolio_policy_lease_handle != INVALID_HANDLE &&
       IsSha256Hex(g_portfolio_policy_digest);
    double broker_volume_minimum = MarketInfo(Symbol(), MODE_MINLOT);
@@ -2826,6 +2837,8 @@ string BuildStatusJson()
 
 bool WriteStatusSnapshot()
 {
+   if(g_init_blocked || g_channel_lock_handle == INVALID_HANDLE)
+      return false;
    return WriteCommonTextAtomic(StatusPath(), BuildStatusJson());
 }
 
@@ -2862,6 +2875,9 @@ double RiskCapitalAmount()
 
 void InvalidatePublishedRuntimeState()
 {
+   // A failed duplicate instance must never delete the owner's files.
+   if(g_channel_lock_handle == INVALID_HANDLE)
+      return;
    // A chart symbol/timeframe change deinitializes the EA before the new chart
    // initializes. Remove the old READY/status/snapshot immediately so the
    // backend cannot briefly bind a fresh command to the previous chart.
@@ -3544,6 +3560,8 @@ string BuildSnapshotJson()
 
 bool WriteSnapshot()
 {
+   if(g_init_blocked || g_channel_lock_handle == INVALID_HANDLE)
+      return false;
    string temporary_path = "MetafxHQ\\" + SnapshotChannel + "\\snapshot.tmp";
    string final_path = SnapshotPath();
    return WriteCommonTextAtomicWithTemporary(
@@ -5379,6 +5397,11 @@ bool IsRolloverEntryWindow()
 
 bool EvaluateExecutionGuard(string &reason)
 {
+   if(!GatewayInitializationReady())
+   {
+      reason = InitializationBlockReason();
+      return false;
+   }
    if(!ValidateConfiguredModes(reason))
       return false;
    if(FileIsExist(KillMarkerPath(), FILE_COMMON))
@@ -5671,6 +5694,11 @@ bool ValidateRuntime(
    string &reason
 )
 {
+   if(!GatewayInitializationReady())
+   {
+      reason = InitializationBlockReason();
+      return false;
+   }
    if(!ValidateConfiguredModes(reason))
       return false;
    if(command.schema_version != COMMAND_SCHEMA)
@@ -6919,6 +6947,8 @@ void ExecuteCommand(
    const double expected_lots
 )
 {
+   if(!GatewayInitializationReady())
+      return;
    string reason = "";
    if(!ReverifyCommandEnvelope(signed_raw, command, reason))
    {
@@ -7209,6 +7239,8 @@ void ExecuteCommand(
 
 void ProcessCommandFile()
 {
+   if(!GatewayInitializationReady())
+      return;
    ResetAckExecutionEvidence();
    ResetAckSizingEvidence();
    string raw = "";
@@ -7322,6 +7354,11 @@ bool SessionCloseIsDue()
 
 bool LifecycleCloseGuard(string &reason)
 {
+   if(!GatewayInitializationReady())
+   {
+      reason = InitializationBlockReason();
+      return false;
+   }
    if(!ValidateConfiguredModes(reason))
       return false;
    if(PositionLifecycleMode == LIFECYCLE_SLTP_ONLY)
@@ -7511,6 +7548,9 @@ bool RecordInitDiagnostic(
    if(!IsSafeChannel(SnapshotChannel))
       return false;
    EnsureFolders();
+   bool temporary_ownership = g_channel_lock_handle == INVALID_HANDLE;
+   if(temporary_ownership && !AcquireChannelLock())
+      return false;
    string payload = "{";
    payload += "\"schemaVersion\":\"metafx-hq-mt4-init-status-v1\",";
    payload += "\"eaVersion\":" + JsonString(EA_VERSION) + ",";
@@ -7519,6 +7559,8 @@ bool RecordInitDiagnostic(
    payload += "\"gatewayMode\":" + JsonString(ModeName()) + ",";
    payload += "\"accountMode\":" + JsonString(AccountModeName()) + ",";
    payload += "\"liveArmed\":" + JsonBoolean(LiveArmed) + ",";
+   payload += "\"eaAttached\":" + JsonBoolean(stage != "deinit") + ",";
+   payload += "\"runtimeReady\":" + JsonBoolean(stage != "deinit" && GatewayInitializationReady()) + ",";
    payload += "\"severity\":" + JsonString(severity) + ",";
    payload += "\"stage\":" + JsonString(stage) + ",";
    payload += "\"reasonCode\":" + JsonString(reason_code) + ",";
@@ -7536,6 +7578,8 @@ bool RecordInitDiagnostic(
    payload += "}";
    bool status_ok = WriteCommonTextAtomic(InitStatusPath(), payload);
    bool audit_ok = AppendAudit(payload);
+   if(temporary_ownership)
+      ReleaseChannelLock();
    return status_ok && audit_ok;
 }
 
@@ -7547,6 +7591,14 @@ int InitFailure(
    const string message
 )
 {
+   g_runtime_initialized = false;
+   g_init_blocked = true;
+   g_init_failure_stage = stage;
+   g_init_failure_reason = reason_code;
+   g_init_failure_return_code = return_code;
+   g_cached_execution_guard_ready = false;
+   g_cached_execution_guard_reason = reason_code;
+   g_risk_cache_at = 0;
    Print(message);
    RecordInitDiagnostic("error", stage, reason_code, return_code);
    return return_code;
@@ -7616,7 +7668,7 @@ void UpdateChartStatus()
 }
 
 
-int OnInit()
+int InitializeGateway()
 {
    g_init_warning_code = "";
    g_legacy_loss_latch_migration_ready = false;
@@ -7855,6 +7907,7 @@ int OnInit()
          "ACCOUNT_EXECUTION_LOCK_IDENTITY_INVALID",
          "MetafxHQ: Unable to derive the broker-account execution lock."
       );
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
@@ -7866,6 +7919,7 @@ int OnInit()
          "ACCOUNT_EXECUTION_LOCK_UNAVAILABLE",
          "MetafxHQ: Unable to lock the broker account for portfolio-policy validation."
       );
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
@@ -7893,6 +7947,7 @@ int OnInit()
          portfolio_policy_reason
       );
       ReleasePortfolioPolicyLease();
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
@@ -7906,6 +7961,7 @@ int OnInit()
          legacy_loss_latch_migration_reason
       );
       ReleasePortfolioPolicyLease();
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
@@ -7918,6 +7974,7 @@ int OnInit()
          "MetafxHQ: Legacy one-order-per-bar state could not be migrated safely."
       );
       ReleasePortfolioPolicyLease();
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
@@ -7935,6 +7992,7 @@ int OnInit()
          "MetafxHQ: Unable to start the one-second gateway timer."
       );
       ReleasePortfolioPolicyLease();
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
@@ -7950,6 +8008,7 @@ int OnInit()
       EventKillTimer();
       InvalidatePublishedRuntimeState();
       ReleasePortfolioPolicyLease();
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
@@ -7965,6 +8024,7 @@ int OnInit()
       EventKillTimer();
       InvalidatePublishedRuntimeState();
       ReleasePortfolioPolicyLease();
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
@@ -7982,10 +8042,10 @@ int OnInit()
       EventKillTimer();
       InvalidatePublishedRuntimeState();
       ReleasePortfolioPolicyLease();
+      InvalidatePublishedRuntimeState();
       ReleaseChannelLock();
       return INIT_FAILED;
    }
-   RecordInitDiagnostic("info", "ready", "INIT_SUCCEEDED", INIT_SUCCEEDED);
    return INIT_SUCCEEDED;
 }
 
@@ -7993,18 +8053,18 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   string event_json = BuildSystemAckJson(
-      "FAIL_SAFE",
-      "GATEWAY_STOPPED_" + IntegerToString(reason)
-   );
-   AppendAudit(event_json);
-   RecordInitDiagnostic(
-      "info",
-      "deinit",
-      "GATEWAY_STOPPED_" + IntegerToString(reason),
-      reason
-   );
-   InvalidatePublishedRuntimeState();
+   // Preserve the original failed-init diagnostic and the other owner's files.
+   if(g_channel_lock_handle != INVALID_HANDLE)
+   {
+      if(g_runtime_initialized)
+      {
+         AppendAudit(BuildSystemAckJson("FAIL_SAFE", "GATEWAY_STOPPED_" + IntegerToString(reason)));
+         RecordInitDiagnostic("info", "deinit", "GATEWAY_STOPPED_" + IntegerToString(reason), reason);
+      }
+      InvalidatePublishedRuntimeState();
+   }
+   g_runtime_initialized = false;
+   g_diagnostic_timer_ready = false;
    ReleaseAccountExecutionLock();
    ReleasePortfolioPolicyLease();
    ReleaseChannelLock();
@@ -8015,11 +8075,20 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    g_last_tick_millis = GetTickCount();
+   if(!GatewayInitializationReady())
+      UpdateBlockedChartStatus();
 }
 
 
 void OnTimer()
 {
+   if(!IsConnected())
+      g_last_tick_millis = 0;
+   if(!GatewayInitializationReady())
+   {
+      ServiceBlockedInitialization();
+      return;
+   }
    ApplyOptionalPositionLifecycle();
    ProcessCommandFile();
    RefreshManagedOutcomeFiles(false);
@@ -8029,4 +8098,107 @@ void OnTimer()
       Print("MetafxHQ: Unable to update status.json.");
    PublishSnapshotIfDue(false);
    UpdateChartStatus();
+}
+
+
+bool GatewayInitializationReady()
+{
+   return g_runtime_initialized && !g_init_blocked &&
+      g_channel_lock_handle != INVALID_HANDLE;
+}
+
+string InitializationBlockReason()
+{
+   if(g_init_blocked && StringLen(g_init_failure_reason) > 0)
+      return g_init_failure_reason;
+   return "GATEWAY_INITIALIZATION_INCOMPLETE";
+}
+
+bool InitializationFailureIsTransient()
+{
+   // Retry readiness/IO only. Bad configuration, duplicate channels, crypto,
+   // untrusted keys and policy conflicts require an explicit Inputs reapply.
+   return g_init_failure_reason == "BROKER_VOLUME_LIMITS_UNAVAILABLE" ||
+      g_init_failure_reason == "BROKER_RISK_METADATA_INVALID" ||
+      g_init_failure_reason == "ACCOUNT_EXECUTION_LOCK_IDENTITY_INVALID" ||
+      g_init_failure_reason == "ACCOUNT_EXECUTION_LOCK_UNAVAILABLE" ||
+      g_init_failure_reason == "PORTFOLIO_POLICY_LEASE_UNAVAILABLE" ||
+      g_init_failure_reason == "ACTIVE_SIGNING_KEY_POINTER_MISSING" ||
+      g_init_failure_reason == "SIGNING_KEY_FILE_MISSING" ||
+      g_init_failure_reason == "SIGNING_KEY_READ_FAILED" ||
+      g_init_failure_reason == "INITIAL_SNAPSHOT_WRITE_FAILED" ||
+      g_init_failure_reason == "INITIAL_CAPABILITIES_WRITE_FAILED" ||
+      g_init_failure_reason == "INITIAL_STATUS_WRITE_FAILED";
+}
+
+void UpdateBlockedChartStatus()
+{
+   Comment("MetafxHQ MT4 Gateway v", EA_VERSION, " - ATTACHED / BLOCKED\n",
+      "Trading BLOCKED; no commands processed\n",
+      "Stage: ", g_init_failure_stage, "\nReason: ", InitializationBlockReason(), "\n",
+      InitializationFailureIsTransient()
+         ? "Waiting for readiness; checks again every 10 seconds\n"
+         : "Review the reason and Inputs, then press OK to initialize again\n",
+      "Diagnostic timer: ", g_diagnostic_timer_ready ? "running" : "unavailable; reapply Inputs");
+}
+
+bool AttemptGatewayInitialization()
+{
+   EventKillTimer();
+   g_diagnostic_timer_ready = false;
+   g_runtime_initialized = false;
+   g_init_blocked = false;
+   g_init_failure_stage = "";
+   g_init_failure_reason = "";
+   g_last_tick_millis = 0;
+   g_risk_cache_at = 0;
+   g_cached_execution_guard_ready = false;
+   g_last_init_retry_millis = GetTickCount();
+   int result = InitializeGateway();
+   if(result == INIT_SUCCEEDED)
+   {
+      // Only complete initialization opens either order path. Initial files
+      // were explicitly non-authorizing while this latch was false.
+      g_runtime_initialized = true;
+      g_init_blocked = false;
+      g_diagnostic_timer_ready = true;
+      UpdateRiskTelemetry(true);
+      RecordInitDiagnostic("info", "ready", "INIT_SUCCEEDED", INIT_SUCCEEDED);
+      UpdateChartStatus();
+      return true;
+   }
+   g_runtime_initialized = false;
+   g_init_blocked = true;
+   if(StringLen(g_init_failure_reason) == 0)
+   {
+      g_init_failure_stage = "initialization";
+      g_init_failure_reason = "GATEWAY_INITIALIZATION_INCOMPLETE";
+      g_init_failure_return_code = result;
+   }
+   EventKillTimer();
+   InvalidatePublishedRuntimeState();
+   ReleaseAccountExecutionLock();
+   ReleasePortfolioPolicyLease();
+   ReleaseChannelLock();
+   g_diagnostic_timer_ready = EventSetTimer(1);
+   UpdateBlockedChartStatus();
+   return false;
+}
+
+void ServiceBlockedInitialization()
+{
+   UpdateBlockedChartStatus();
+   uint elapsed = GetTickCount() - g_last_init_retry_millis;
+   if(!InitializationFailureIsTransient() || elapsed < 10000)
+      return;
+   // This is an initialization retry, never an order retry or backlog replay.
+   AttemptGatewayInitialization();
+}
+
+int OnInit()
+{
+   AttemptGatewayInitialization();
+   // Even invalid Inputs remain visibly attached; every execution path stays
+   // closed unless AttemptGatewayInitialization completed all existing guards.
+   return INIT_SUCCEEDED;
 }

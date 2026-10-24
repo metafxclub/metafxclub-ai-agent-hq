@@ -75,6 +75,9 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
             }
         )
         self.bridge.metatrader_snapshot_read_model = lambda _prop_id: self._snapshot()
+        self.bridge._read_mt4_trade_gateway_ea_status = lambda record: (
+            {"maxSnapshotAgeSeconds": 300}, "ready"
+        )
 
         def fake_council(request, *, automation_context=None, _snapshot_model=None):
             self.calls.append({
@@ -129,6 +132,7 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
             "chartSnapshot": {
                 "available": True,
                 "snapshotId": self.snapshot_id,
+                "observedAt": datetime.now(timezone.utc).isoformat(),
                 "symbol": self.symbol,
                 "timeframe": self.timeframe,
                 "bars": [{"time": self.closed_bar_time}],
@@ -292,156 +296,72 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
                     )
                 )
 
-    def test_restart_establishes_baseline_without_catching_up(self) -> None:
-        self._save_observed_store(
-            daily_run_count=87,
-            startup_id="previous-process",
-        )
+    def test_restart_baselines_known_stream_without_catchup(self):
+        self._save_observed_store(daily_run_count=87, startup_id="previous-process")
         self._advance_bar()
-
         result = self.bridge.ai_trade_council_automation_tick()
-
         self.assertEqual(result["kind"], "ai_trade_council_automation_baseline")
-        self.assertEqual(result["reason"], "restart_baseline")
-        self.assertEqual(self.calls, [])
-        state = result["automation"]["state"]
+        state = self.bridge.load_ai_trade_council_automation_store()["state"]
         self.assertEqual(state["lastObservedClosedBarTime"], self.closed_bar_time)
-        self.assertIsNone(
-            self.bridge.load_ai_trade_council_automation_store()["state"][
-                "pendingClosedBarTime"
-            ]
-        )
+        self.assertEqual(state["pendingQueue"], [])
+        self.assertEqual(state["coverageRecords"][0]["status"], "skipped")
+        self.bridge.ai_trade_council_automation_tick()
+        self.assertEqual(self.calls, [])
+        self._advance_bar()
+        self.bridge.ai_trade_council_automation_tick()
+        self.assertEqual(self._finish_settle()["kind"], "ai_trade_council_queued")
 
-    def test_quota_gate_fails_closed_and_retains_pending_bar_for_retry(self) -> None:
+    def test_quota_loss_during_settle_consumes_bar_without_retry(self):
         self._save_observed_store(daily_run_count=999)
         self._advance_bar()
-        self.assertEqual(
-            self.bridge.ai_trade_council_automation_tick()["kind"],
-            "ai_trade_council_automation_settling",
-        )
-        pending = self.bridge.load_ai_trade_council_automation_store()
-        pending["state"]["pendingDetectedAt"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=20)
-        ).isoformat()
-        self.bridge._save_ai_trade_council_automation_store(pending)
-        self.bridge._collaboration_quota_gate = (
-            lambda config, refresh: {
-                "allowed": False,
-                "reason": "quota_reserve_reached",
-                "remainingPercent": 10,
-            }
-        )
-
-        blocked = self.bridge.ai_trade_council_automation_tick()
-
-        self.assertEqual(
-            blocked["kind"],
-            "ai_trade_council_automation_waiting_gate",
-        )
+        self.bridge.ai_trade_council_automation_tick()
+        self.bridge._collaboration_quota_gate = lambda *a, **kw: {"allowed": False, "reason": "quota_reserve_reached"}
+        blocked = self._finish_settle()
+        self.assertEqual(blocked["kind"], "ai_trade_council_automation_skipped")
         self.assertEqual(blocked["reason"], "quota_reserve_reached")
+        self.assertEqual(self.bridge.load_ai_trade_council_automation_store()["state"]["pendingQueue"], [])
+        self.bridge._collaboration_quota_gate = lambda *a, **kw: {"allowed": True}
+        self.bridge.ai_trade_council_automation_tick()
         self.assertEqual(self.calls, [])
-        state = self.bridge.load_ai_trade_council_automation_store()["state"]
-        self.assertEqual(state["pendingClosedBarTime"], self.closed_bar_time)
-
-        self.bridge._collaboration_quota_gate = (
-            lambda config, refresh: {
-                "allowed": True,
-                "reason": "ready",
-                "remainingPercent": 80,
-            }
-        )
-        queued = self.bridge.ai_trade_council_automation_tick()
-        self.assertEqual(queued["kind"], "ai_trade_council_queued")
+        self._advance_bar()
+        self.bridge.ai_trade_council_automation_tick()
+        self._finish_settle()
         self.assertEqual(len(self.calls), 1)
 
-    def test_explicit_limited_mode_still_blocks_at_the_configured_cap(self) -> None:
+    def test_explicit_limited_mode_consumes_trigger_at_configured_cap(self):
         self._save_observed_store(daily_run_count=24)
         store = self.bridge.load_ai_trade_council_automation_store()
-        store["config"].update({
-            "dailyRoundLimitMode": "limited",
-            "maxDailyRounds": 24,
-        })
+        store["config"].update({"dailyRoundLimitMode": "limited", "maxDailyRounds": 24})
         self.bridge._save_ai_trade_council_automation_store(store)
         self._advance_bar()
-
-        detected = self.bridge.ai_trade_council_automation_tick()
-        self.assertEqual(
-            detected["kind"],
-            "ai_trade_council_automation_settling",
-        )
-        blocked = self._finish_settle()
-
-        self.assertEqual(
-            blocked["kind"],
-            "ai_trade_council_automation_daily_cap",
-        )
+        blocked = self.bridge.ai_trade_council_automation_tick()
+        self.assertEqual(blocked["reason"], "daily_cap_reached")
         self.assertEqual(self.calls, [])
-        automation = blocked["automation"]
-        self.assertTrue(automation["config"]["dailyRoundLimitEnabled"])
-        self.assertEqual(automation["config"]["effectiveMaxDailyRounds"], 24)
+        self.assertTrue(blocked["automation"]["config"]["dailyRoundLimitEnabled"])
+        self.assertEqual(blocked["automation"]["config"]["effectiveMaxDailyRounds"], 24)
+        self.assertEqual(self.bridge.load_ai_trade_council_automation_store()["state"]["pendingQueue"], [])
 
-    def test_active_round_retains_fifo_and_backlog_is_audit_only(self) -> None:
+    def test_busy_round_skips_trigger_then_waits_for_next_new_bar(self):
         self._save_observed_store()
+        self.bridge._active_ai_trade_council_parent = lambda: {"id": "mission-active"}
         self._advance_bar()
-        first_pending_bar = self.closed_bar_time
-        self.assertEqual(
-            self.bridge.ai_trade_council_automation_tick()["kind"],
-            "ai_trade_council_automation_settling",
-        )
-        pending = self.bridge.load_ai_trade_council_automation_store()
-        pending["state"]["pendingDetectedAt"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=20)
-        ).isoformat()
-        self.bridge._save_ai_trade_council_automation_store(pending)
-        self.bridge._active_ai_trade_council_parent = lambda: {
-            "id": "mission-still-running",
-        }
-
-        waiting = self.bridge.ai_trade_council_automation_tick()
-        self.assertEqual(
-            waiting["kind"],
-            "ai_trade_council_automation_waiting_gate",
-        )
-        self.assertEqual(waiting["reason"], "council_round_already_active")
-        self.assertEqual(self.calls, [])
-
-        # A second candle is retained. The oldest exact captured Snapshot is
-        # analyzed first, but it can no longer publish a trade command.
-        self._advance_bar()
-        latest_pending_bar = self.closed_bar_time
-        self.assertNotEqual(latest_pending_bar, first_pending_bar)
-        self.assertEqual(
-            self.bridge.ai_trade_council_automation_tick()["kind"],
-            "ai_trade_council_automation_settling",
-        )
-        pending = self.bridge.load_ai_trade_council_automation_store()
-        self.assertEqual(
-            pending["state"]["pendingClosedBarTime"],
-            first_pending_bar,
-        )
-        pending["state"]["pendingDetectedAt"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=20)
-        ).isoformat()
-        self.bridge._save_ai_trade_council_automation_store(pending)
-
+        skipped = self.bridge.ai_trade_council_automation_tick()
+        self.assertEqual(skipped["reason"], "council_round_already_active")
         self.bridge._active_ai_trade_council_parent = lambda: None
-        queued = self.bridge.ai_trade_council_automation_tick()
-
-        self.assertEqual(queued["kind"], "ai_trade_council_queued")
+        self.bridge.ai_trade_council_automation_tick()
+        self.assertEqual(self.calls, [])
+        self._advance_bar()
+        self.bridge.ai_trade_council_automation_tick()
+        self._finish_settle()
+        self.bridge.ai_trade_council_automation_tick()
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(
-            self.calls[0]["automationContext"]["closedBarTime"],
-            first_pending_bar,
-        )
-        self.assertEqual(
-            self.calls[0]["automationContext"]["executionPolicy"],
-            "audit_only_no_stale_dispatch",
-        )
-        self.assertFalse(
-            self.calls[0]["automationContext"]["tradeCommandAllowed"]
-        )
-        state = self.bridge.load_ai_trade_council_automation_store()["state"]
-        self.assertEqual(state["pendingQueue"][0]["closedBarTime"], latest_pending_bar)
+        context = self.calls[0]["automationContext"]
+        self.assertEqual(context["closedBarTime"], self.closed_bar_time)
+        self.assertEqual(context["triggerPolicy"], "new_closed_bar_only_no_backfill")
+        self.assertEqual(context["triggerStartupId"], self.bridge.SERVER_STARTED_AT)
+        self.assertTrue(context["quotaAdmittedAt"])
+        self.assertTrue(context["triggerExpiresAt"])
+        self.assertTrue(context["tradeCommandAllowed"])
 
     def test_legacy_store_migrates_to_unlimited_but_legacy_api_can_opt_into_limit(self) -> None:
         legacy_store = self.bridge._ai_trade_council_automation_default_store()
@@ -458,7 +378,7 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
         self.assertTrue(config["dailyRoundLimitEnabled"])
         self.assertEqual(config["effectiveMaxDailyRounds"], 12)
 
-    def test_contracts_describe_unlimited_fifo_coverage_compatibility(self) -> None:
+    def test_contracts_describe_new_bar_only_without_backfill(self) -> None:
         contracts = PROJECT_ROOT / "contracts"
         orchestration = json.loads(
             (contracts / "orchestration" / "orchestration-contract.json").read_text(
@@ -493,7 +413,7 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
         ]
         post_contract = bridge["endpoints"]["POST /api/ai-trade-council/automation"]
 
-        fifo_policy = "durable_fifo_exact_snapshot_audit_only_when_stale"
+        fifo_policy = "new_closed_bar_only_no_backfill"
         self.assertEqual(automation["backlogPolicy"], fifo_policy)
         self.assertEqual(report_config["backlogPolicy"], fifo_policy)
         self.assertEqual(connection_config["backlogPolicy"], fifo_policy)
@@ -503,8 +423,8 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
         self.assertEqual(cost_guard["aiTradeCouncilAutoLegacyMaxDailyRounds"], 24)
         self.assertIn("dailyRoundLimitMode", post_contract)
         self.assertIn("effectiveMaxDailyRounds null", post_contract)
-        self.assertIn("durable FIFO", post_contract)
-        self.assertIn("stale snapshot is analysis-only", post_contract)
+        self.assertIn("new_closed_bar_only_no_backfill", post_contract)
+        self.assertNotIn("stale snapshot is analysis-only", post_contract)
 
 
 if __name__ == "__main__":
