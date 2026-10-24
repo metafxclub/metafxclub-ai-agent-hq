@@ -92,13 +92,20 @@ class SentimentLifecycleTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         two = json.loads(second.stdout)
         self.assertEqual((one['workerPid'],one['supervisorPid']), (two['workerPid'],two['supervisorPid']))
+        # A venv pythonw.exe is a launcher that runs the server in its own child
+        # interpreter, so the worker may be two owned processes: the
+        # supervisor's Popen child and the server that wrote service.json.
+        child_pid = json.loads((self.state / 'supervisor.json').read_text())['childPid']
+        server_pid = json.loads((self.state / 'service.json').read_text())['pid']
+        self.assertEqual(server_pid, one['workerPid'])
+        worker_pids = {pid for pid in (child_pid, server_pid) if pid}
         stopped = self.invoke('Stop')
         self.assertEqual(stopped.returncode, 0, stopped.stderr)
-        self.assertEqual(json.loads(stopped.stdout)['stoppedCount'], 2)
+        self.assertEqual(json.loads(stopped.stdout)['stoppedCount'], 1 + len(worker_pids))
         time.sleep(1)
         state = self.invoke('Status')
         self.assertEqual(json.loads(state.stdout)['status'], 'stopped')
-        for pid in (one['workerPid'], one['supervisorPid']):
+        for pid in (*worker_pids, one['supervisorPid']):
             check = subprocess.run(['powershell.exe','-NoProfile','-Command',f'if(Get-Process -Id {pid} -ErrorAction SilentlyContinue){{exit 5}}'],capture_output=True)
             self.assertEqual(check.returncode, 0, 'owned child or supervisor still alive')
         self.assert_private_state()
@@ -178,7 +185,8 @@ class SentimentSupervisorTests(unittest.TestCase):
 
     def test_installed_cli_forwards_paths_without_shell(self):
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder)
+            # arguments() resolves paths; Windows CI temp folders use 8.3 names.
+            root=Path(folder).resolve()
             options=self.module.arguments(['--port','45231','--state-dir',str(root/'state'),'--static-dir',str(root/'web'),'--public-mirror',str(root/'web/market.json')])
             command=self.module.child_command(options,'pythonw.exe')
             self.assertEqual(command[:5],['pythonw.exe','-m','live_backend.server','--port','45231'])
