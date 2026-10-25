@@ -80754,9 +80754,10 @@ def _ai_trade_council_coverage_records(value: object) -> list[dict]:
         key=lambda item: (int(item["closedBarTime"]), str(item["recordId"])),
     )
 
-    # The runnable window is bounded separately. Never discard a captured job
-    # because the worker's window is full; deferred rows are promoted whenever
-    # it is rebuilt. Terminal-history retention cannot evict unfinished work.
+    # Preserve pending evidence until the scheduler explicitly skips, expires
+    # or accounts for it. Normalization does not authorize historical replay;
+    # the new-bar scheduler retires legacy backlog before admitting fresh work.
+    # Only terminal history is eligible for retention pruning here.
     if len(ordered) > AI_TRADE_COUNCIL_AUTOMATION_MAX_COVERAGE_RECORDS:
         pending = [item for item in ordered if item.get("status") == "pending"]
         terminal = [item for item in ordered if item.get("status") != "pending"]
@@ -86111,8 +86112,7 @@ def ai_trade_council_automation_tick() -> dict:
                     continue
                 if _ai_trade_council_recover_created_round(old) is None:
                     retire_records.append(old)
-            _ai_trade_council_skip_new_bars(retire_records, skip_reason)
-            skipped_count = len(retire_records)
+            skipped_count = _ai_trade_council_skip_new_bars(retire_records, skip_reason)
             records = []
             old_cursor = (state.get("streamCursors") or {}).get(identity["streamKey"])
             if state.get("streamKey") == identity["streamKey"]:
@@ -108489,21 +108489,69 @@ def _ai_trade_council_skip_new_bar(record: dict, reason: str, **state_values: ob
     })
     return store
 
-def _ai_trade_council_skip_new_bars(records: list[dict], reason: str) -> None:
+def _ai_trade_council_skip_new_bars(records: list[dict], reason: str) -> int:
     """Retire an upgrade/restart backlog in one durable state transaction."""
     if not records:
-        return
-    completed_at = utc_now()
+        return 0
+    captured = {}
     for record in records:
-        record.update({"status": "skipped", "reasonCode": reason,
-                       "executionPolicy": "audit_only_no_stale_dispatch", "completedAt": completed_at})
-    _save_ai_trade_council_coverage_records(records, status="skipped", reason=reason)
+        normalized = _ai_trade_council_coverage_record_shape(record)
+        if normalized is None:
+            raise DataIntegrityError("Invalid AI Trade Council coverage record.")
+        captured[(normalized["streamKey"], normalized["closedBarTime"])] = normalized
+    retired = []
+    with AI_TRADE_COUNCIL_AUTOMATION_LOCK:
+        store = load_ai_trade_council_automation_store()
+        state = store["state"]
+        merged = {
+            (row["streamKey"], row["closedBarTime"]): row
+            for row in state.get("coverageRecords") or []
+        }
+        completed_at = utc_now()
+        for key, expected in captured.items():
+            current = merged.get(key)
+            # Another tick may already have queued/analyzed this bar or
+            # refreshed its pending capture. Retire only the exact pending
+            # record observed by this caller, never overwrite newer evidence.
+            if not isinstance(current, dict) or current.get("status") != "pending" or current != expected:
+                continue
+            retired_record = {
+                **current, "status": "skipped", "reasonCode": reason,
+                "executionPolicy": "audit_only_no_stale_dispatch", "completedAt": completed_at,
+            }
+            merged[key] = retired_record
+            retired.append(retired_record)
+        if not retired:
+            return 0
+        state["coverageRecords"] = list(merged.values())
+        # Rebuild the compatibility window before final retention pruning so
+        # an old pending alias cannot resurrect a newly retired history row.
+        state["pendingQueue"] = [row for row in merged.values() if row.get("status") == "pending"]
+        state.update({"status": "skipped", "reason": reason})
+        _save_ai_trade_council_automation_store(store)
+    # Audit collections are capped at 100 entries. Persist bounded detail
+    # records first, then the summary so its presence confirms all chunks
+    # were appended. A failed state save must never claim a retirement.
+    record_ids = [record["recordId"] for record in retired]
+    batch_id = "retirement-" + secrets.token_hex(16)
+    chunk_count = (len(record_ids) + 99) // 100
+    for offset in range(0, len(record_ids), 100):
+        append_audit({
+            "type": "ai_trade_council.automation_backlog_skipped_detail",
+            "reason": reason, "retirementBatchId": batch_id,
+            "chunkIndex": offset // 100, "chunkCount": chunk_count,
+            "recordIds": record_ids[offset:offset + 100],
+            "aiRunAllowed": False, "tradeCommandAllowed": False,
+            "terminalActions": False,
+        })
     append_audit({
         "type": "ai_trade_council.automation_backlog_skipped", "reason": reason,
-        "recordIds": [record.get("recordId") for record in records], "skippedCount": len(records),
+        "retirementBatchId": batch_id, "chunkCount": chunk_count,
+        "skippedCount": len(retired),
         "analysisPolicy": "new_closed_bar_only_no_backfill", "aiRunAllowed": False,
         "automaticRetry": False, "tradeCommandAllowed": False, "terminalActions": False,
     })
+    return len(retired)
 
 def _ai_trade_council_recover_created_round(record: dict, **state_values: object) -> dict | None:
     """Reconcile a prior creation commit without creating/replaying any work."""

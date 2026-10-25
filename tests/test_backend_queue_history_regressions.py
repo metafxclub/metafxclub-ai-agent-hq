@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import test_ai_trade_council_per_bar_automation as automation_fixtures
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,58 +47,187 @@ class BackendQueueHistoryRegressionTests(unittest.TestCase):
             "executionPolicy": "audit_only_no_stale_dispatch",
         }
 
-    def test_513_pending_rows_never_leave_visible_unrunnable_work(self) -> None:
-        rows = self.bridge._ai_trade_council_coverage_records(
-            [self._coverage(index) for index in range(513)]
-        )
+    def _assert_retirement_audit(self, events: list[dict], expected_ids: list[str]) -> None:
+        summaries = [row for row in events if row.get("type") == "ai_trade_council.automation_backlog_skipped"]
+        chunks = [row for row in events if row.get("type") == "ai_trade_council.automation_backlog_skipped_detail"]
+        self.assertEqual(len(summaries), 1)
+        summary = summaries[0]
+        self.assertEqual(summary["skippedCount"], len(expected_ids))
+        self.assertEqual(summary["chunkCount"], (len(expected_ids) + 99) // 100)
+        self.assertEqual(len(chunks), summary["chunkCount"])
+        self.assertEqual([row["chunkIndex"] for row in chunks], list(range(len(chunks))))
+        self.assertTrue(all(0 < len(row["recordIds"]) <= 100 for row in chunks))
+        self.assertTrue(all(row["retirementBatchId"] == summary["retirementBatchId"] and
+                            row["chunkCount"] == len(chunks) for row in chunks))
+        ids = [record_id for row in chunks for record_id in row["recordIds"]]
+        self.assertEqual(ids, expected_ids)
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertGreater(events.index(summary), max(events.index(row) for row in chunks))
+        self.assertTrue(all(row["aiRunAllowed"] is False and row["tradeCommandAllowed"] is False
+                            and row["terminalActions"] is False for row in [summary, *chunks]))
 
-        pending = [row for row in rows if row["status"] == "pending"]
-        skipped = [row for row in rows if row["status"] == "skipped"]
-        queue = self.bridge._ai_trade_council_pending_records(rows)
+    def _assert_legacy_backlog_is_retired_before_one_new_bar(self, count: int) -> None:
+        fixture = automation_fixtures.AiTradeCouncilPerBarAutomationTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        bridge = fixture.bridge
+        bridge.load_missions = lambda: []
+        fixture._save_observed_store()
+        store = bridge.load_ai_trade_council_automation_store()
+        source = [{
+            **self._coverage(index),
+            "streamKey": store["state"]["streamKey"],
+            "candidateId": fixture.candidate_id,
+            "closedBarTime": fixture.closed_bar_time - (count - index) * 300,
+            "snapshotId": f"{index + 1:064x}",
+        } for index in range(count)]
+        store["state"]["coverageRecords"] = source
+        saved = bridge._save_ai_trade_council_automation_store(store)
+        # No unfinished evidence is lost merely because it exceeds the old
+        # runnable/history window. The scheduler, not this reader, retires it.
+        self.assertEqual(len(saved["state"]["coverageRecords"]), count)
+        self.assertTrue(all(row["status"] == "pending" for row in saved["state"]["coverageRecords"]))
 
-        self.assertEqual(len(rows), 513)
-        self.assertEqual(len(pending), 512)
-        self.assertEqual(queue, pending)
-        self.assertEqual(len(skipped), 1)
-        self.assertEqual(
-            skipped[0]["reasonCode"],
-            "pending_queue_capacity_exceeded",
-        )
-        self.assertEqual(
-            skipped[0]["executionPolicy"],
-            "audit_only_no_stale_dispatch",
-        )
-        self.assertEqual(
-            [row["closedBarTime"] for row in pending],
-            sorted(row["closedBarTime"] for row in pending),
-        )
+        bridge.ai_trade_council_automation_tick()
+        state = bridge.load_ai_trade_council_automation_store()["state"]
+        retained = min(count, bridge.AI_TRADE_COUNCIL_AUTOMATION_MAX_COVERAGE_RECORDS)
+        self.assertEqual(len(state["coverageRecords"]), retained)
+        self.assertEqual(state["pendingQueue"], [])
+        self.assertEqual(bridge._ai_trade_council_pending_records(state["coverageRecords"]), [])
+        self.assertTrue(all(row["status"] == "skipped" and
+                            row["reasonCode"] == "new_bar_only_backlog_cancelled" and
+                            row["executionPolicy"] == "audit_only_no_stale_dispatch"
+                            for row in state["coverageRecords"]))
+        self.assertEqual([row["closedBarTime"] for row in state["coverageRecords"]],
+                         [row["closedBarTime"] for row in source[-retained:]])
+        # Exercise the real sanitizer and durable JSONL writer. A mock would
+        # miss the generic 100-item collection cap losing large-batch IDs.
+        audit_rows = [json.loads(line) for line in bridge.AUDIT_PATH.read_text(encoding="utf-8").splitlines()]
+        self._assert_retirement_audit(audit_rows, [row["recordId"] for row in source])
+        self.assertEqual(fixture.calls, [])
+        bridge.ai_trade_council_automation_tick()
+        self.assertEqual(fixture.calls, [])
 
-    def test_2049_pending_rows_preserve_fifo_head_and_terminalize_overflow(self) -> None:
-        source = [self._coverage(index) for index in range(2_049)]
-        rows = self.bridge._ai_trade_council_coverage_records(source)
+        fixture._advance_bar()
+        bridge.ai_trade_council_automation_tick()
+        fixture._finish_settle()
+        bridge.ai_trade_council_automation_tick()
+        self.assertEqual(len(fixture.calls), 1)
+        context = fixture.calls[0]["automationContext"]
+        self.assertEqual(context["closedBarTime"], fixture.closed_bar_time)
+        self.assertEqual(context["triggerPolicy"], "new_closed_bar_only_no_backfill")
+        self.assertTrue(context["tradeCommandAllowed"])
 
-        pending = [row for row in rows if row["status"] == "pending"]
-        skipped = [row for row in rows if row["status"] == "skipped"]
+    def test_513_legacy_pending_rows_are_skipped_before_one_new_bar(self) -> None:
+        self._assert_legacy_backlog_is_retired_before_one_new_bar(513)
 
-        self.assertEqual(len(rows), 2_048)
-        self.assertEqual(len(pending), 512)
-        self.assertEqual(len(skipped), 1_536)
-        self.assertEqual(
-            [row["closedBarTime"] for row in pending],
-            [row["closedBarTime"] for row in source[:512]],
-        )
-        self.assertTrue(
-            all(
-                row["reasonCode"] == "pending_queue_capacity_exceeded"
-                for row in skipped
-            )
-        )
-        self.assertEqual(
-            self.bridge._ai_trade_council_pending_records(rows),
-            pending,
-        )
+    def test_2049_legacy_pending_rows_are_audited_before_history_retention(self) -> None:
+        self._assert_legacy_backlog_is_retired_before_one_new_bar(2_049)
 
-    def test_automation_read_model_exposes_gate_and_fifo_head(self) -> None:
+    def _batch_retirement_fixture(self, count: int = 4):
+        fixture = automation_fixtures.AiTradeCouncilPerBarAutomationTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        bridge = fixture.bridge
+        fixture._save_observed_store()
+        store = bridge.load_ai_trade_council_automation_store()
+        store["state"]["coverageRecords"] = [{
+            **self._coverage(index),
+            "streamKey": store["state"]["streamKey"],
+            "candidateId": fixture.candidate_id,
+            "closedBarTime": fixture.closed_bar_time - (count - index) * 300,
+        } for index in range(count)]
+        saved = bridge._save_ai_trade_council_automation_store(store)
+        return bridge, copy.deepcopy(saved["state"]["coverageRecords"])
+
+    def test_batch_retirement_preserves_queued_analyzed_and_refreshed_pending(self) -> None:
+        bridge, captured = self._batch_retirement_fixture()
+        original_capture = copy.deepcopy(captured)
+        store = bridge.load_ai_trade_council_automation_store()
+        store["state"]["coverageRecords"][0].update(status="queued", missionId="mission-queued")
+        store["state"]["coverageRecords"][1].update(status="analyzed", missionId="mission-completed")
+        store["state"]["coverageRecords"][2].update(snapshotId="f" * 64)
+        current = bridge._save_ai_trade_council_automation_store(store)["state"]["coverageRecords"]
+        with (
+            mock.patch.object(bridge, "_save_ai_trade_council_automation_store", wraps=bridge._save_ai_trade_council_automation_store) as save,
+            mock.patch.object(bridge, "_ai_trade_council_coverage_upsert", side_effect=AssertionError("per-record normalization is forbidden")),
+            mock.patch.object(bridge, "append_audit") as audit,
+        ):
+            retired_count = bridge._ai_trade_council_skip_new_bars(captured, "new_bar_only_backlog_cancelled")
+        self.assertEqual(retired_count, 1)
+        save.assert_called_once()
+        state = bridge.load_ai_trade_council_automation_store()["state"]
+        self.assertEqual(state["coverageRecords"][:3], current[:3])
+        self.assertEqual(state["coverageRecords"][3]["status"], "skipped")
+        self.assertEqual(state["pendingQueue"], [current[2]])
+        self.assertEqual(captured, original_capture)
+        self._assert_retirement_audit([call.args[0] for call in audit.call_args_list], [captured[3]["recordId"]])
+
+    def test_batch_retirement_deduplicates_captures_and_saves_once(self) -> None:
+        bridge, captured = self._batch_retirement_fixture(1)
+        with (
+            mock.patch.object(bridge, "_save_ai_trade_council_automation_store", wraps=bridge._save_ai_trade_council_automation_store) as save,
+            mock.patch.object(bridge, "append_audit") as audit,
+        ):
+            retired_count = bridge._ai_trade_council_skip_new_bars(captured * 3, "new_bar_only_backlog_cancelled")
+        self.assertEqual(retired_count, 1)
+        save.assert_called_once()
+        self._assert_retirement_audit([call.args[0] for call in audit.call_args_list], [captured[0]["recordId"]])
+        self.assertEqual(bridge.load_ai_trade_council_automation_store()["state"]["pendingQueue"], [])
+
+    def test_batch_retirement_with_no_matching_capture_is_a_durable_noop(self) -> None:
+        bridge, captured = self._batch_retirement_fixture(1)
+        before = bridge._ai_trade_council_automation_store_path().read_bytes()
+        for request in ([], [{**captured[0], "snapshotId": "e" * 64}],
+                        [{**captured[0], "closedBarTime": captured[0]["closedBarTime"] - 300}]):
+            with (
+                self.subTest(request=request),
+                mock.patch.object(bridge, "_save_ai_trade_council_automation_store") as save,
+                mock.patch.object(bridge, "append_audit") as audit,
+            ):
+                self.assertEqual(bridge._ai_trade_council_skip_new_bars(request, "new_bar_only_backlog_cancelled"), 0)
+                save.assert_not_called()
+                audit.assert_not_called()
+                self.assertEqual(bridge._ai_trade_council_automation_store_path().read_bytes(), before)
+
+    def test_batch_retirement_never_audits_a_failed_durable_save(self) -> None:
+        bridge, captured = self._batch_retirement_fixture(1)
+        before = bridge._ai_trade_council_automation_store_path().read_bytes()
+        with (
+            mock.patch.object(bridge, "_save_ai_trade_council_automation_store", side_effect=OSError("write failed")),
+            mock.patch.object(bridge, "append_audit") as audit,
+        ):
+            with self.assertRaises(OSError):
+                bridge._ai_trade_council_skip_new_bars(captured, "new_bar_only_backlog_cancelled")
+            audit.assert_not_called()
+        self.assertEqual(bridge._ai_trade_council_automation_store_path().read_bytes(), before)
+
+    def test_baseline_reports_actual_retirements_after_capture_changes(self) -> None:
+        bridge, _ = self._batch_retirement_fixture(1)
+        store = bridge.load_ai_trade_council_automation_store()
+        store["state"]["startupId"] = "previous-process"
+        bridge._save_ai_trade_council_automation_store(store)
+        retire = bridge._ai_trade_council_skip_new_bars
+
+        def refreshed_capture(records, reason):
+            current = bridge.load_ai_trade_council_automation_store()
+            current["state"]["coverageRecords"][0]["snapshotId"] = "e" * 64
+            bridge._save_ai_trade_council_automation_store(current)
+            return retire(records, reason)
+
+        with (
+            mock.patch.object(bridge, "_ai_trade_council_skip_new_bars", side_effect=refreshed_capture),
+            mock.patch.object(bridge, "_ai_trade_council_recover_created_round", return_value=None),
+            mock.patch.object(bridge, "append_audit") as audit,
+        ):
+            bridge.ai_trade_council_automation_tick()
+        baseline = [call.args[0] for call in audit.call_args_list
+                    if call.args[0].get("type") == "ai_trade_council.automation_baseline"]
+        self.assertEqual(len(baseline), 1)
+        self.assertEqual(baseline[0]["skippedCount"], 0)
+        self.assertEqual(bridge.load_ai_trade_council_automation_store()["state"]["coverageRecords"][0]["snapshotId"], "e" * 64)
+
+    def test_automation_read_model_exposes_gate_and_no_backfill_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             self.bridge.RUNTIME_DIR = root
@@ -109,9 +241,8 @@ class BackendQueueHistoryRegressionTests(unittest.TestCase):
             })
             self.bridge._save_ai_trade_council_automation_store(store)
 
-            # This fixture exercises queue projection, not daily rollover.
-            # Pin the Bangkok day so the fixed pending records remain runnable
-            # regardless of the calendar date on which CI executes.
+            # This is legacy evidence before the first scheduler tick, not
+            # permission to run it. Pin the day to isolate gate projection.
             with mock.patch.object(
                 self.bridge,
                 "_automation_day_key",
@@ -130,9 +261,14 @@ class BackendQueueHistoryRegressionTests(unittest.TestCase):
         self.assertEqual(model["state"]["pending"]["queueDepth"], 2)
         self.assertEqual(
             model["backlogPolicy"]["queueOrder"],
-            "oldest_closed_bar_first",
+            "new_closed_bar_only",
         )
         self.assertEqual(model["backlogPolicy"]["staleTradeCommand"], "blocked")
+        self.assertEqual(model["backlogPolicy"]["policy"], "new_closed_bar_only_no_backfill")
+        self.assertEqual(model["backlogPolicy"]["staleAnalysis"], "skipped_without_ai")
+        self.assertEqual(model["backlogPolicy"]["capacityPolicy"], "no_backfill")
+        self.assertEqual(model["backlogPolicy"]["maximumRunnablePending"], 1)
+        self.assertEqual(model["backlogPolicy"]["quotaResume"], "wait_for_next_closed_bar")
 
     def test_history_endpoint_rejects_invalid_cursor_instead_of_restarting_page_one(self) -> None:
         handler = object.__new__(self.bridge.BridgeHandler)
