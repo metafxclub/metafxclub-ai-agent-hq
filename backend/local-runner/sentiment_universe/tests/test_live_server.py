@@ -1,11 +1,14 @@
 """Loopback HTTP/auth boundaries with temporary data, never real provider calls."""
 import http.client
+from email.message import Message
 import json
 import os
 from pathlib import Path
+import socket
 from types import SimpleNamespace
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -109,6 +112,56 @@ class HandlerTests(unittest.TestCase):
                 self.assertEqual(json.loads(raw)['error'], 'request_rejected')
         self.assertEqual(self.market.saved, [])
 
+    def test_rejected_body_arriving_after_headers_still_returns_json(self):
+        small_body = b'{"email":"test@example.invalid","password":"TEST_ONLY"}'
+        cases = [
+            ('origin', small_body, {'Origin': None}, '/api/setup/myfxbook', 403, 'request_rejected'),
+            ('csrf', small_body, {'X-CSRF-Token': None}, '/api/setup/myfxbook', 403, 'request_rejected'),
+            ('host', small_body, {'Host': 'attacker.invalid'}, '/api/setup/myfxbook', 403, 'request_rejected'),
+            ('route', small_body, {}, '/api/trade', 404, 'not_found'),
+            ('content_type', small_body, {'Content-Type': 'text/plain'}, '/api/setup/myfxbook', 400, 'invalid_request'),
+            ('body_limit', b'x' * 8193, {}, '/api/setup/myfxbook', 400, 'invalid_request'),
+        ]
+        original_send = http.client.HTTPConnection.send
+        for name, body, headers, path, expected_status, expected_error in cases:
+            with self.subTest(rejection=name):
+                def send_after_headers(client, data):
+                    if data == body:
+                        # Separate TCP writes are normal; Windows used to abort
+                        # the socket when the rejection closed before this body.
+                        time.sleep(0.03)
+                    return original_send(client, data)
+                with patch.object(http.client.HTTPConnection, 'send', send_after_headers):
+                    status, _, raw = self.post(body, headers=headers, path=path)
+                self.assertEqual(status, expected_status)
+                self.assertEqual(json.loads(raw)['error'], expected_error)
+                self.assertEqual(self.market.saved, [])
+
+    def test_rejection_with_declared_but_absent_body_finishes_without_waiting_for_client(self):
+        finished = threading.Event()
+        original_discard = target.DashboardHandler.discard_rejected_body
+        def observe_discard(handler):
+            try:
+                return original_discard(handler)
+            finally:
+                finished.set()
+        client = socket.create_connection(('127.0.0.1', self.port), timeout=3)
+        try:
+            with patch.object(target.DashboardHandler, 'discard_rejected_body', observe_discard):
+                request = (f'POST /api/setup/myfxbook HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n'
+                           'Content-Length: 64\r\nContent-Type: application/json\r\n\r\n')
+                client.sendall(request.encode('ascii'))  # No Origin or promised body.
+                response = http.client.HTTPResponse(client)
+                response.begin()
+                self.assertEqual(response.status, 403)
+                self.assertEqual(json.loads(response.read())['error'], 'request_rejected')
+                # Own the raw socket; HTTPConnection would close it on HTTP/1.0.
+                # Server teardown must use its own deadline, not a client EOF.
+                self.assertTrue(finished.wait(2), 'rejected body exceeded its bounded drain deadline')
+        finally:
+            client.close()
+        self.assertEqual(self.market.saved, [])
+
     def test_csrf_missing_empty_wrong_are_rejected_without_saving(self):
         for token in [None, '', 'wrong', self.httpd.csrf + '-suffix', 'invalid-\u00e1-token']:
             self.assertEqual(self.post(headers={'X-CSRF-Token': token})[0], 403)
@@ -194,6 +247,57 @@ class HandlerTests(unittest.TestCase):
         status, _, raw = self.request('GET', '/escape.bin')
         self.assertEqual(status, 404)
         self.assertNotIn(b'PRIVATE_TEST_CANARY', raw)
+
+
+class RejectedBodyDrainTests(unittest.TestCase):
+    def handler(self, lengths):
+        handler = object.__new__(target.DashboardHandler)
+        handler.headers = Message()
+        for length in lengths:
+            handler.headers['Content-Length'] = length
+        handler.connection = SimpleNamespace(gettimeout=lambda: 7, settimeout=lambda value: None)
+        return handler
+
+    def test_untrusted_missing_duplicate_or_oversized_lengths_are_not_read(self):
+        cases = [[], ['1', '1'], [''], ['0'], ['-1'], ['invalid'], ['１２'], ['9' * 100],
+                 [str(target.DashboardHandler.REJECTED_BODY_DRAIN_BYTES + 1)]]
+        for lengths in cases:
+            with self.subTest(lengths=lengths):
+                handler = self.handler(lengths)
+                def unexpected_read(size):
+                    self.fail('untrusted or oversized body must not be drained')
+                handler.rfile = SimpleNamespace(read1=unexpected_read)
+                handler.discard_rejected_body()
+
+    def test_drain_obeys_byte_budget_absolute_deadline_and_restores_socket_timeout(self):
+        for mode in ('byte_limit', 'slow_trickle', 'socket_timeout', 'eof'):
+            with self.subTest(mode=mode):
+                handler = self.handler([str(target.DashboardHandler.REJECTED_BODY_DRAIN_BYTES)])
+                clock, requested, timeouts = [0.0], [], []
+                handler.connection.settimeout = timeouts.append
+                def read(size):
+                    requested.append(size)
+                    if mode == 'socket_timeout':
+                        raise TimeoutError('synthetic socket timeout')
+                    if mode == 'eof':
+                        return b''
+                    if mode == 'slow_trickle':
+                        clock[0] += 0.1
+                        return b'x'
+                    return b'x' * size
+                handler.rfile = SimpleNamespace(read1=read)
+                with patch.object(target.time, 'monotonic', side_effect=lambda: clock[0]):
+                    handler.discard_rejected_body()
+                self.assertEqual(timeouts[-1], 7)
+                self.assertTrue(all(0 < value <= handler.REJECTED_BODY_DRAIN_SECONDS for value in timeouts[:-1]))
+                self.assertTrue(all(size <= 8192 for size in requested))
+                if mode == 'byte_limit':
+                    self.assertEqual(sum(requested), handler.REJECTED_BODY_DRAIN_BYTES)
+                elif mode == 'slow_trickle':
+                    self.assertEqual(len(requested), 3)  # Timeout is not restarted per byte.
+                    self.assertGreater(timeouts[0], timeouts[-2])
+                else:
+                    self.assertEqual(len(requested), 1)
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows DPAPI contract')
