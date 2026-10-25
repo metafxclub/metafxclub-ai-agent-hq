@@ -58,6 +58,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned runner dependency check failed with exit code $LASTEXITCODE"
           }
+      - name: ตรวจ Sentiment providers และการกู้คืนปฏิทินข่าวด้วย fixtures
+        shell: pwsh
+        working-directory: backend/local-runner/sentiment_universe
+        run: |
+          & "${{ github.workspace }}/runner/.venv/Scripts/python.exe" -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw "Sentiment backend regression failed" }
+
+      - name: ตรวจ Sentiment data และข่าวบน frontend
+        if: matrix.python-version == '3.12'
+        shell: pwsh
+        working-directory: frontend/sentiment-universe-src
+        run: |
+          node --test tests/market-data.test.mjs tests/news-explainers.test.mjs tests/sentiment-data.test.mjs tests/hq-embed.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Sentiment frontend regression failed" }
+
       - name: ตรวจโครงสร้างและกฎความปลอดภัย
         shell: pwsh
         run: |
@@ -74,20 +89,6 @@ jobs:
             }
           }
 
-      - name: ตรวจ Sentiment providers และการกู้คืนปฏิทินข่าวด้วย fixtures
-        shell: pwsh
-        working-directory: backend/local-runner/sentiment_universe
-        run: |
-          & "${{ github.workspace }}/runner/.venv/Scripts/python.exe" -m unittest discover -s tests -v
-          if ($LASTEXITCODE -ne 0) { throw "Sentiment backend regression failed" }
-
-      - name: ตรวจ Sentiment data และข่าวบน frontend
-        if: matrix.python-version == '3.12'
-        shell: pwsh
-        working-directory: frontend/sentiment-universe-src
-        run: |
-          node --test tests/market-data.test.mjs tests/news-explainers.test.mjs tests/sentiment-data.test.mjs tests/hq-embed.test.mjs
-          if ($LASTEXITCODE -ne 0) { throw "Sentiment frontend regression failed" }
 
   isolated-installer:
     name: Isolated Windows installer and rollback
