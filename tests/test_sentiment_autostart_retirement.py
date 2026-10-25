@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import ctypes
 import os
 from pathlib import Path
 import shutil
@@ -110,6 +111,39 @@ class SentimentAutostartRetirementTests(unittest.TestCase):
         self.assertFalse(result["failed"], result)
         self.assertTrue(result["preserved"], result)
 
+    def short_path(self, path):
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
+        self.assertGreater(length, 0, "Could not read the isolated fixture's short path")
+        self.assertLess(length, len(buffer))
+        if buffer.value == str(path):
+            self.skipTest("The fixture filesystem does not provide an 8.3 alias")
+        return Path(buffer.value)
+
+    def test_short_temp_alias_argument_matches_exact_long_launcher(self):
+        # GitHub's TEMP may contain RUNNER~1. WScript preserves that alias in
+        # Arguments while GetFullPath expands the expected script path.
+        short_root = self.short_path(self.root)
+        short_launcher = short_root / self.launcher.relative_to(self.root)
+        result = self.invoke(arguments='"' + str(short_launcher) + '"')
+        self.assertFalse(result["failed"], result)
+        self.assertFalse(result["exists"], result)
+
+    def test_short_temp_alias_default_and_preflight_still_match(self):
+        short_root = self.short_path(self.root)
+        short_hq = short_root / self.hq.relative_to(self.root)
+        short_python = short_root / self.python.relative_to(self.root)
+        short_launcher = short_root / self.launcher.relative_to(self.root)
+        result = self.invoke(hqRoot=str(short_hq), target=str(short_python),
+                             arguments='"' + str(short_launcher) + '"', validateOnly=True)
+        self.assertFalse(result["failed"], result)
+        self.assertTrue(result["preserved"], result)
+
+    def test_exact_launcher_with_case_variation_matches_windows_identity(self):
+        result = self.invoke(arguments='"' + str(self.launcher).swapcase() + '"')
+        self.assertFalse(result["failed"], result)
+        self.assertFalse(result["exists"], result)
+
     def test_absent_shortcut_is_noop(self):
         result = self.invoke(createShortcut=False)
         self.assertFalse(result["failed"], result)
@@ -139,6 +173,42 @@ class SentimentAutostartRetirementTests(unittest.TestCase):
 
     def test_extra_arguments_are_not_treated_as_owned(self):
         result = self.invoke(arguments='"' + str(self.launcher) + '" --port 4999')
+        self.assertTrue(result["failed"], result)
+        self.assertTrue(result["preserved"], result)
+
+    def test_unquoted_path_with_spaces_is_not_a_single_launcher_argument(self):
+        result = self.invoke(arguments=str(self.launcher))
+        self.assertTrue(result["failed"], result)
+        self.assertTrue(result["preserved"], result)
+
+    def test_drive_relative_launcher_is_preserved(self):
+        relative = self.launcher.drive + str(self.launcher)[len(self.launcher.drive) + 1:]
+        result = self.invoke(arguments='"' + relative + '"')
+        self.assertTrue(result["failed"], result)
+        self.assertTrue(result["preserved"], result)
+
+    def test_current_drive_root_relative_launcher_is_preserved(self):
+        relative = str(self.launcher)[len(self.launcher.drive):]
+        result = self.invoke(arguments='"' + relative + '"')
+        self.assertTrue(result["failed"], result)
+        self.assertTrue(result["preserved"], result)
+
+    def test_trailing_newline_is_not_an_exact_single_argument(self):
+        result = self.invoke(arguments='"' + str(self.launcher) + '"\n')
+        self.assertTrue(result["failed"], result)
+        self.assertTrue(result["preserved"], result)
+
+    def test_short_path_with_extra_argument_is_preserved(self):
+        short_launcher = self.short_path(self.launcher)
+        result = self.invoke(arguments='"' + str(short_launcher) + '" --port 4999')
+        self.assertTrue(result["failed"], result)
+        self.assertTrue(result["preserved"], result)
+
+    def test_different_existing_launcher_is_preserved(self):
+        other = self.root / "foreign launcher/start-live.py"
+        other.parent.mkdir()
+        other.write_bytes(b"foreign fixture")
+        result = self.invoke(arguments='"' + str(other) + '"')
         self.assertTrue(result["failed"], result)
         self.assertTrue(result["preserved"], result)
 

@@ -45,7 +45,19 @@ function Remove-VerifiedLegacyShortcut([switch]$ValidateOnly, [string]$StartupDi
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $targetMatches = [string]::Equals([IO.Path]::GetFullPath([string]$shortcut.TargetPath),$legacyPython,[StringComparison]::OrdinalIgnoreCase)
-    $argsMatch = ([string]$shortcut.Arguments -ceq ('"'+$legacyLauncher+'"')) -or ([string]$shortcut.Arguments -ceq $legacyLauncher)
+    # WScript retains an 8.3 path in Arguments even when GetFullPath expands
+    # the expected launcher. Parse exactly one argument before normalizing it;
+    # never accept extra switches or a matching path prefix.
+    $shortcutArguments = [string]$shortcut.Arguments
+    $argumentPath = $null
+    if ($shortcutArguments -cmatch '^"([^"\r\n]+)"\z') { $argumentPath = $Matches[1] }
+    elseif ($shortcutArguments -cmatch '^[^\s"]+\z') { $argumentPath = $shortcutArguments }
+    $argsMatch = $false
+    # IsPathRooted also accepts C:relative and \relative on .NET Framework;
+    # their meaning depends on the shortcut's working directory/current drive.
+    if ($argumentPath -and $argumentPath -cmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+\\[^\\/]+\\)') {
+        $argsMatch = [string]::Equals([IO.Path]::GetFullPath($argumentPath),$legacyLauncher,[StringComparison]::OrdinalIgnoreCase)
+    }
     if ($targetMatches -and $argsMatch) {
         if ($ValidateOnly) { return }
         # The exact old shortcut is removed only after the replacement task exists.
