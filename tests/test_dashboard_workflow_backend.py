@@ -3706,12 +3706,12 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 "platformSelections": {
                     "mt4": {
                         "candidateId": candidate_id,
-                        "selectionRevision": 1,
+                        "selectionRevision": 7,
                         "selectedAt": checked_at,
                     },
                     "mt5": {
                         "candidateId": mt5_candidate_id,
-                        "selectionRevision": 2,
+                        "selectionRevision": 11,
                         "selectedAt": checked_at,
                     },
                 },
@@ -3721,25 +3721,14 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                         "candidateId": mt5_candidate_id,
                         "selectionRevision": 4,
                         "selectedAt": checked_at,
-                        "selectionRevision": 3,
                     },
                 },
             }
             legacy_only_store = copy.deepcopy(target_store)
-            # Council authority comes from the two header-owned locks and its
-            # active platform, never this compatibility per-prop selection.
-            target_store["candidates"][mt5_candidate_id] = {
-                "candidateId": mt5_candidate_id,
-                "platform": "mt5",
-                "localPath": str(mt5_root),
-                "identityKey": self.bridge._metatrader_identity_key("mt5", str(mt5_root)),
-                "available": True,
-            }
-            target_store["platformSelections"] = {
-                "mt4": {"candidateId": candidate_id, "selectedAt": checked_at, "selectionRevision": 7},
-                "mt5": {"candidateId": mt5_candidate_id, "selectedAt": checked_at, "selectionRevision": 11},
-            }
-            target_store["activePlatform"] = "mt4"
+            # Remove the header-owned authority in the negative fixture. A
+            # compatibility per-prop selection alone cannot select a terminal.
+            legacy_only_store.pop("platformSelections")
+            legacy_only_store.pop("activePlatform")
             worker = {"status": "idle", "operational": True, "operationalReason": None, "watchdogAlive": True}
             scheduler = {"status": "idle", "operational": True, "operationalReason": None}
             bridge_model = {

@@ -4697,34 +4697,83 @@ void OnTick()
         quoted_path = str(PS_PATH).replace("'", "''")
         harness = rf"""
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Windows.Forms
 $text = Get-Content -Raw '{quoted_path}'
 $helperStart = $text.IndexOf('function Wait-TesterStartStateStable')
 $helperEnd = $text.IndexOf('function New-TesterStartMonitor', $helperStart)
 if ($helperStart -lt 0 -or $helperEnd -le $helperStart) {{ throw 'stabilizer source missing' }}
+$helper = $text.Substring($helperStart, $helperEnd - $helperStart)
+# This is a convergence/deadline fixture, not a native UI or wall-clock test.
+# Hosted runner scheduling and the first exception's JIT cost must not consume
+# the 500 ms simulated provider-lag budget before the fourth mocked read.
+$clockToken = '[DateTime]::UtcNow'
+$pumpToken = '[System.Windows.Forms.Application]::DoEvents()'
+if ([regex]::Matches($helper, [regex]::Escape($clockToken)).Count -ne 2 -or
+    [regex]::Matches($helper, [regex]::Escape($pumpToken)).Count -ne 1 -or
+    [regex]::Matches($helper, [regex]::Escape('Start-Sleep -Milliseconds 25')).Count -ne 1) {{
+    throw 'stabilizer fixture clock seams changed'
+}}
+$helper = $helper.Replace('[System.Windows.Automation.AutomationElement]', '[object]')
+$helper = $helper.Replace($clockToken, '$script:now')
+$helper = $helper.Replace($pumpToken, 'Invoke-TestMessagePump')
 function Fail([string]$Code) {{ throw $Code }}
+function Reset-TestClock {{
+    $script:now = [DateTime]::Parse('2026-01-01T00:00:00Z').ToUniversalTime()
+    $script:reads = 0; $script:waits = 0; $script:pumps = 0
+}}
+function Start-Sleep([int]$Milliseconds) {{
+    if ($Milliseconds -ne 25) {{ throw 'stabilizer wait interval changed' }}
+    $script:waits++
+    $script:now = $script:now.AddMilliseconds($Milliseconds)
+}}
+function Invoke-TestMessagePump {{ $script:pumps++ }}
+$script:dispatches = 0
+function Invoke-TesterStartOnce {{ $script:dispatches++; throw 'unexpected_dispatch' }}
 $script:mode = 'lag'
-$script:reads = 0
 function Read-TesterStartState($Control, [string]$Code, [IntPtr]$ExpectedHandle) {{
     $script:reads++
     if ($ExpectedHandle -ne [IntPtr]123) {{ throw 'binding_changed' }}
+    if ($script:mode -ceq 'foreign_error') {{ throw 'provider_unexpected_error' }}
     if ($script:mode -ceq 'lag' -and $script:reads -le 3) {{ throw $Code }}
     if ($script:mode -ceq 'stop') {{ return 'Stop' }}
     return 'Start'
 }}
-Invoke-Expression $text.Substring($helperStart, $helperEnd - $helperStart)
+Invoke-Expression $helper
+Reset-TestClock
+$started = $script:now
 $observed = Wait-TesterStartStateStable $null 'mt5_tester_start_state_unverified' ([IntPtr]123) 'Start' 500
 $lagReads = $script:reads
-$script:mode = 'stop'; $script:reads = 0
+$lagElapsed = ($script:now - $started).TotalMilliseconds
+$lagWaits = $script:waits; $lagPumps = $script:pumps
+$script:mode = 'stop'; Reset-TestClock
+$started = $script:now
 $rejected = $false
 try {{
     [void](Wait-TesterStartStateStable $null 'mt5_tester_start_state_unverified' ([IntPtr]123) 'Start' 75)
 }} catch {{
     $rejected = $_.Exception.Message -ceq 'mt5_tester_start_state_unverified'
 }}
-[ordered]@{{ observed = $observed; lagReads = $lagReads; rejected = $rejected }} | ConvertTo-Json -Compress
+$stopReads = $script:reads; $stopWaits = $script:waits; $stopPumps = $script:pumps
+$stopElapsed = ($script:now - $started).TotalMilliseconds
+$script:mode = 'lag'; Reset-TestClock
+$bindingRejected = $false
+try {{
+    [void](Wait-TesterStartStateStable $null 'mt5_tester_start_state_unverified' ([IntPtr]124) 'Start' 500)
+}} catch {{ $bindingRejected = $_.Exception.Message -ceq 'binding_changed' }}
+$bindingReads = $script:reads; $bindingWaits = $script:waits
+$script:mode = 'foreign_error'; Reset-TestClock
+$foreignRejected = $false
+try {{
+    [void](Wait-TesterStartStateStable $null 'mt5_tester_start_state_unverified' ([IntPtr]123) 'Start' 500)
+}} catch {{ $foreignRejected = $_.Exception.Message -ceq 'provider_unexpected_error' }}
+[ordered]@{{
+    observed = $observed; lagReads = $lagReads; lagElapsed = $lagElapsed
+    lagWaits = $lagWaits; lagPumps = $lagPumps
+    rejected = $rejected; stopReads = $stopReads; stopElapsed = $stopElapsed
+    stopWaits = $stopWaits; stopPumps = $stopPumps
+    bindingRejected = $bindingRejected; bindingReads = $bindingReads; bindingWaits = $bindingWaits
+    foreignRejected = $foreignRejected; foreignReads = $script:reads; foreignWaits = $script:waits
+    dispatches = $script:dispatches
+}} | ConvertTo-Json -Compress
 """
         completed = subprocess.run(
             [
@@ -4745,7 +4794,21 @@ try {{
         observed = json.loads(completed.stdout.strip())
         self.assertEqual(observed["observed"], "Start")
         self.assertEqual(observed["lagReads"], 4)
+        self.assertEqual(observed["lagElapsed"], 75)
+        self.assertEqual(observed["lagWaits"], 3)
+        self.assertEqual(observed["lagPumps"], 3)
         self.assertTrue(observed["rejected"])
+        self.assertEqual(observed["stopReads"], 3)
+        self.assertEqual(observed["stopElapsed"], 75)
+        self.assertEqual(observed["stopWaits"], 3)
+        self.assertEqual(observed["stopPumps"], 3)
+        self.assertTrue(observed["bindingRejected"])
+        self.assertEqual(observed["bindingReads"], 1)
+        self.assertEqual(observed["bindingWaits"], 0)
+        self.assertTrue(observed["foreignRejected"])
+        self.assertEqual(observed["foreignReads"], 1)
+        self.assertEqual(observed["foreignWaits"], 0)
+        self.assertEqual(observed["dispatches"], 0)
 
     def test_powershell_clean_completion_pairing_rejects_cross_log_source_and_run(self) -> None:
         powershell = shutil.which("powershell.exe") or shutil.which("powershell")
