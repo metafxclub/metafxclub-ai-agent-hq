@@ -194,8 +194,11 @@ class MT5Setup:
         with self.lock:
             state = self._read()
             checked = stamp(state.get("checkedAt"))
+            # Compare at the ISO timestamp's microsecond precision. An unchanged
+            # coarse clock can otherwise appear earlier after checkedAt rounds up.
+            now = stamp(iso(time.time()))
             if (not isinstance(discovery_revision, str) or discovery_revision != state.get("discoveryRevision")
-                    or checked is None or not 0 <= time.time() - checked <= 600):
+                    or checked is None or not 0 <= now - checked <= 600):
                 raise MT5SetupError("mt5_discovery_expired")
             row = next((item for item in state.get("candidates", []) if item.get("candidateId") == candidate_id), None)
             if not row or not row.get("selectable"):

@@ -490,6 +490,12 @@ class NewsService:
             self._refreshing = True
             self._state['lastAttemptAt'] = utc_iso(current)
         try:
+            # Persist the attempt before network I/O so a crashed worker cannot
+            # restart directly into another provider request. Normal success
+            # or a handled failure replaces this interrupted-round reservation.
+            with self._lock:
+                self._state['nextAttemptAt'] = utc_iso(current + timedelta(minutes=30))
+                self._save()
             json_response = self.fetcher(URLS['json'])
             json_body = response_body(json_response)
             metadata, metadata_errors = {}, []

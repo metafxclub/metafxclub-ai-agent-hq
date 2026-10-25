@@ -83,6 +83,21 @@ jobs:
             throw "Regression suite failed on Python ${{ matrix.python-version }} with exit code $LASTEXITCODE"
           }
 
+      - name: Verify Sentiment providers and crash recovery fixtures
+        shell: pwsh
+        working-directory: backend/local-runner/sentiment_universe
+        run: |
+          & "${{ github.workspace }}/runner/.venv/Scripts/python.exe" -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw "Sentiment backend regression failed" }
+
+      - name: Verify Sentiment frontend data and news
+        if: matrix.python-version == '3.12'
+        shell: pwsh
+        working-directory: frontend/sentiment-universe-src
+        run: |
+          node --test tests/market-data.test.mjs tests/news-explainers.test.mjs tests/sentiment-data.test.mjs tests/hq-embed.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Sentiment frontend regression failed" }
+
   publish:
     needs: compatibility
     runs-on: windows-latest

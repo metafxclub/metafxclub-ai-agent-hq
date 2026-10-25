@@ -35,6 +35,7 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/retry",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/recover-source",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run",
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/resume-cancelled",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/restart-backtest",
         }
         download = "GET /api/props/right_server_racks/ea-factory/builds/:buildId/files/:fileId"
@@ -57,6 +58,56 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         self.assertTrue(download_shape["sameOriginOnly"])
         self.assertTrue(download_shape["opaqueIdentifiersOnly"])
         self.assertFalse(download_shape["absoluteFilesystemPathExposed"])
+
+    def test_cancelled_resume_contract_preserves_exact_intent_receipt_and_guards(self):
+        path = "/api/props/right_server_racks/ea-factory/builds/:buildId/resume-cancelled"
+        self.assertIn("POST " + path, self.bridge["endpoints"])
+        shape = self.bridge["ea_factory"]["endpointShapes"]["resumeCancelled"]
+        self.assertEqual((shape["method"], shape["path"]), ("POST", path))
+        self.assertEqual(shape["pathParameters"], ["buildId"])
+        self.assertEqual(shape["allowedRequestFields"], [
+            "previousRunId", "previousRunDigest", "idempotencyKey",
+        ])
+        self.assertEqual(shape["requiredRequestFields"], shape["allowedRequestFields"])
+        self.assertEqual(shape["eligibleRunStatuses"], ["cancelled"])
+        self.assertEqual(shape["eligibleStageIds"], [
+            "generate_source", "source_review", "compile_validate",
+        ])
+        self.assertEqual(shape["pristineVisibleStageIds"], [
+            "compile_validate", "backtest_recheck", "final_report",
+        ])
+        for guard in (
+            "compactCurrentCoverageRequired", "bothGlobalPlatformLocksRequired",
+            "originalTerminalBindingRequired", "confirmedCancellationRequired",
+            "exclusiveFactoryAdmissionRequired", "adoptsExactExistingMission",
+            "sourceReplacementRequiresVerifiedStop", "sourceReplacementRequiresNoSource",
+            "sourceReplacementPreservesRetryLimit", "coordinatorStartsAfterDurableCommit",
+        ):
+            with self.subTest(guard=guard):
+                self.assertTrue(shape[guard])
+        for permission in ("createsNewBuild", "retryCountersReset", "directAiDispatchAllowed",
+                           "phaseGateBypassAllowed", "liveTradingAllowed"):
+            with self.subTest(permission=permission):
+                self.assertFalse(shape[permission])
+        self.assertEqual(shape["sameKeyDifferentIntent"], "reject_conflict")
+        self.assertEqual(shape["historicalReplay"], "receipt_only_never_resurrects_prior_run")
+        self.assertEqual(shape["sameKeyAfterThreadStartFailure"],
+                         "recheck_and_attach_same_durable_successor")
+        self.assertEqual(shape["responseKinds"], [
+            "ea_factory_cancelled_run_resumed", "ea_factory_cancelled_run_resume_replayed",
+        ])
+        self.assertEqual(shape["responseEnvelopeFields"], [
+            "ok", "kind", "buildId", "previousRunId", "previousRunDigest", "runId",
+            "requestIdempotencyKey", "continuationArchiveDigest", "adoptedMissionId",
+            "idempotentReplay", "workerStarted", "eaFactoryReadResult",
+        ])
+        self.assertFalse(shape["receiptConfirmsReadiness"])
+        self.assertNotIn("oneClickRun", shape["responseEnvelopeFields"])
+        run_fields = self.bridge["ea_factory"]["readModelShape"]["oneClickRunFields"]
+        for field in ("canResumeCancelled", "resumeCancelledEndpoint", "resumeCancelledRunDigest",
+                      "resumeCancelledReasonCode", "resumeCancelledStageId", "resumeCancelledMissionId",
+                      "resumeCancelledReplacesStoppedMission"):
+            self.assertIn(field, run_fields)
 
     def test_factory_requests_are_exact_intent_only_and_idempotent(self):
         factory = self.bridge["ea_factory"]

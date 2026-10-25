@@ -1299,7 +1299,7 @@
             "history accepts only exact linked runtime reports; memory cards and meeting transcripts are excluded.",
             "analysisHistory projects each exact Council parent with Technical, Price Action, and News vote/confidence/status, completeness, consensus, no-trade, and exact Order linkage; skipped coverage rows contain no fabricated specialist votes.",
             "A ticket-bearing EXECUTION_UNKNOWN appears only when the selected channel and independent ticket/magic/comment/SL/TP identity match; it is amber unverified and is excluded from verified/executed counts.",
-            "Automation coverage preserves captured work: current closed bar precedes audit FIFO; deferred captures remain pending and are promoted as runnable slots free; stale backlog analysis can never publish a trade command.",
+            "Automation admits only newly observed closed bars when gates are ready. Missed, expired, restarted or quota-blocked bars are recorded as skipped and never replayed; skipped work cannot publish a trade command.",
             "validUntilBarTime stays in the selected MetaTrader broker-clock domain only for specialist vote and bar identity; Backend never compares it with UTC or guesses an offset, and roundDeadlineAt is the sole UTC decision expiry gate.",
             "OPEN outcome observedAt is EA UTC evidence with a bounded freshness age; CLOSED outcome observedAt and closedAt are raw broker OrderCloseTime values and must never be rendered as UTC or assigned a UTC age without explicit offset evidence.",
             "Agent chat freshness uses snapshotObservedAt or Mission completion timestamps with an explicit timezone; raw MetaTrader closedBarTime remains broker-clock identity only and is never formatted or aged as UTC.",

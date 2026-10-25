@@ -104,7 +104,7 @@ Agent Chat ไม่มีสิทธิ์เรียก Tool หรือส
 ### Money Management ของ AI Council EA (MT4 / MT5)
 
 - ตั้ง `MoneyManagementMode=MONEY_MANAGEMENT_FIXED_LOT` เพื่อใช้ `FixedLot` หรือเลือก `MONEY_MANAGEMENT_RISK_PERCENT` เพื่อให้ EA คำนวณ Lot จาก `RiskPercent` ของ `EQUITY`/`BALANCE` ตาม `RiskCapitalBase`; AI, Frontend และคำสั่งจาก Backend เปลี่ยนค่ากลุ่มนี้ไม่ได้
-- ค่าเริ่มต้นของ Risk Percent ใช้ Equity และรองรับ `EstimatedCommissionPerLot` เพื่อกันงบค่าธรรมเนียมตามหน่วยเงินที่ Terminal รายงาน
+- ค่าเริ่มต้นของ Risk Percent ใช้ Equity ทั้งสองแพลตฟอร์ม: MT4 v2.20 ใช้ `EstimatedCommissionPerLot` เพื่อกันงบค่าธรรมเนียมตามหน่วยเงินที่ Terminal รายงาน ส่วน MT5 v1.07 คำนวณความเสี่ยงจากราคาและ Slippage โดยไม่รวม Commission หรือ Swap (`riskCostBasis=price_and_slippage_excluding_commission`); Input ค่าคอมมิชชันเดิมของ MT5 คงไว้เพื่ออ่านชุดตั้งค่าเก่า แต่ไม่ใช้คำนวณ Lot ของคำสั่งใหม่
 - Standard, Cent และ Pro-Cent ใช้สูตรเดียวกันจากข้อมูลสัญญาและหน่วยเงินที่ Broker รายงาน (`TickSize`/`TickValue` ใน MT4 และ `OrderCalcProfit` ใน MT5) โดยไม่เดาจากชื่อบัญชีและไม่คูณ/หาร 100 เอง
 - EA ปัด Lot ลงตาม Min/Max/Step ของ Symbol เท่านั้น หาก Lot ตามความเสี่ยงต่ำกว่า Min Lot จะไม่เปิด Order และจะไม่บังคับปัดขึ้นเป็น Min Lot เช่น `0.0001` ใช้ได้เฉพาะเมื่อ Broker รายงานว่า Min/Step รองรับ
 - Risk Percent คือเพดานขาดทุนที่วางแผนไว้ ณ ราคา/SL ที่ตรวจสอบก่อนส่งคำสั่ง ไม่รับประกันผลขาดทุนจริงแบบเป๊ะ เพราะ Gap, Slippage, Commission, Swap และการ Fill ของ Broker อาจทำให้ผลจริงต่างออกไป ต้องทดสอบ Demo ก่อน Live เสมอ

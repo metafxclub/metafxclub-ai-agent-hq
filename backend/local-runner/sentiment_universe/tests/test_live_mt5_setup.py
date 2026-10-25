@@ -54,6 +54,38 @@ class MT5SetupTests(unittest.TestCase):
             config=setup.resolve_selection(second["candidates"][0]["candidateId"],second["discoveryRevision"])
             self.assertNotIn("terminalPid",config)
 
+    def test_fresh_selection_accepts_timestamp_rounded_above_frozen_clock(self):
+        for instant in (1792843200.1234567,1792843200.0000007):
+            with self.subTest(instant=instant),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)
+                binding=self.binding(root)
+                setup=MT5Setup(root/"state",discoverer=lambda:[binding])
+                with patch.object(setup_module.time,"time",return_value=instant):
+                    scan=setup.discover()
+                    self.assertGreater(correlation.stamp(scan["checkedAt"]),instant)
+                    row=scan["candidates"][0]
+                    config=setup.resolve_selection(row["candidateId"],scan["discoveryRevision"])
+                self.assertEqual(config["selectionId"],row["candidateId"])
+                self.assertTrue(Path(config["dataPath"]).samefile(binding["dataPath"]))
+
+    def test_selection_rejects_future_and_expired_at_microsecond_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            binding=self.binding(root)
+            setup=MT5Setup(root/"state",discoverer=lambda:[binding])
+            with patch.object(setup_module.time,"time",return_value=1792843200.1234567):
+                scan=setup.discover()
+            checked=correlation.stamp(scan["checkedAt"])
+            candidate=scan["candidates"][0]["candidateId"]
+            for age,accepted in ((-0.000001,False),(0,True),(599.999999,True),(600,True),(600.000001,False)):
+                with self.subTest(age=age),patch.object(setup_module.time,"time",return_value=checked+age):
+                    if accepted:
+                        config=setup.resolve_selection(candidate,scan["discoveryRevision"])
+                        self.assertEqual(config["selectionId"],candidate)
+                    else:
+                        with self.assertRaisesRegex(MT5SetupError,"^mt5_discovery_expired$"):
+                            setup.resolve_selection(candidate,scan["discoveryRevision"])
+
     def test_selection_rejects_disappeared_or_changed_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -84,7 +116,8 @@ class MT5SetupTests(unittest.TestCase):
             (profile/"origin.txt").write_text(str(Path(binding["terminalPath"]).parent),encoding="utf-16")
             rows=discover_bindings(processes=[{"terminalPath":binding["terminalPath"],"pid":123}],data_root=data_root)
             self.assertEqual(len(rows),1)
-            self.assertEqual(Path(rows[0]["dataPath"]),profile)
+            # Windows temp roots may use an 8.3 alias for the same directory.
+            self.assertTrue(Path(rows[0]["dataPath"]).samefile(profile))
             self.assertEqual(rows[0]["runningCount"],1)
             self.assertEqual(discover_bindings(processes=[],data_root=data_root),[])
 

@@ -316,5 +316,58 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(prior_day['calendarEvents'][0]['dayThai'], '2026-10-26')
 
 
+class NewsCrashReservationTests(unittest.TestCase):
+    class SimulatedWorkerCrash(BaseException):
+        pass
+
+    def test_crash_during_fetch_retains_attempt_and_thirty_minute_reservation(self):
+        now = instant('2026-10-25T05:00:00Z')
+        calls = []
+
+        def crash(url):
+            calls.append(url)
+            raise self.SimulatedWorkerCrash()
+
+        with tempfile.TemporaryDirectory() as folder:
+            service = news.NewsService(folder, fetcher=crash)
+            with self.assertRaises(self.SimulatedWorkerCrash):
+                service.refresh_if_due(now)
+            restored = news.NewsService(folder, fetcher=crash)
+            saved = restored.snapshot(now)
+            self.assertEqual(saved['lastAttemptAt'], '2026-10-25T05:00:00Z')
+            self.assertEqual(saved['nextAttemptAt'], '2026-10-25T05:30:00Z')
+            restored.refresh_if_due(instant('2026-10-25T05:00:16Z'))
+            self.assertEqual(len(calls), 1)
+
+    def test_interrupted_refresh_preserves_saved_events_and_source_freshness(self):
+        fetch = FakeFetcher([row()])
+        now = instant('2026-10-24T05:00:00Z')
+
+        def crash(_):
+            raise self.SimulatedWorkerCrash()
+
+        with tempfile.TemporaryDirectory() as folder:
+            service = news.NewsService(folder, fetcher=fetch)
+            old = service.refresh_if_due(instant('2026-10-23T10:00:00Z'))
+            service.fetcher = crash
+            with self.assertRaises(self.SimulatedWorkerCrash):
+                service.refresh_if_due(now)
+            restored = news.NewsService(folder, fetcher=crash)
+            result = restored.refresh_if_due(instant('2026-10-24T05:00:16Z'))
+            self.assertEqual(result['calendarEvents'], old['calendarEvents'])
+            self.assertEqual(result['lastSuccessAt'], old['lastSuccessAt'])
+            self.assertEqual(result['status'], 'stale')
+            self.assertEqual(result['nextAttemptAt'], '2026-10-24T05:30:00Z')
+
+    def test_failed_attempt_persistence_does_not_contact_provider(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as folder:
+            service = news.NewsService(folder, fetcher=lambda url: calls.append(url))
+            with patch.object(service, '_save', side_effect=OSError('fixture_write_failure')):
+                result = service.refresh_if_due(instant('2026-10-25T05:00:00Z'))
+            self.assertEqual(calls, [])
+            self.assertEqual(result['status'], 'error')
+
+
 if __name__ == '__main__':
     unittest.main()
