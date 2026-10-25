@@ -804,9 +804,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
             tzinfo=self.bridge.THAILAND_TIMEZONE,
         )
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
-            self.bridge.save_direct_daily_fx_news_schedule(
-                {"enabled": False, "times": ["00:00", "12:00"]}
-            )
+            self.assertFalse(self.bridge.load_dashboard_workflow_settings()["newsBiasSchedule"]["requestedEnabled"])
             with self.assertRaises(self.bridge.RequestError) as blocked:
                 self.bridge.run_dashboard_workflow_action(
                     "left_audit_crystals",
@@ -898,9 +896,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
             tzinfo=self.bridge.THAILAND_TIMEZONE,
         )
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
-            self.bridge.save_direct_daily_fx_news_schedule(
-                {"enabled": False, "times": ["00:00", "12:00"]}
-            )
+            self.assertFalse(self.bridge.load_dashboard_workflow_settings()["newsBiasSchedule"]["requestedEnabled"])
             runner = mock.Mock(return_value={
                 "ok": False,
                 "kind": "guarded",
@@ -1071,9 +1067,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
 
     def test_quota_pause_does_not_burn_slots_and_recovery_dispatches_each_device_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
-            self.bridge.save_direct_daily_fx_news_schedule(
-                {"enabled": False, "times": ["00:00", "12:00"]}
-            )
+            self.assertFalse(self.bridge.load_dashboard_workflow_settings()["newsBiasSchedule"]["requestedEnabled"])
             quota = {"value": self.quota(5)}
             runner = mock.Mock(side_effect=lambda prop_id, _payload, **_kwargs: {
                 "ok": True,
@@ -1229,9 +1223,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
             tzinfo=self.bridge.THAILAND_TIMEZONE,
         )
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
-            self.bridge.save_direct_daily_fx_news_schedule(
-                {"enabled": False, "times": ["00:00", "12:00"]}
-            )
+            self.assertFalse(self.bridge.load_dashboard_workflow_settings()["newsBiasSchedule"]["requestedEnabled"])
             with mock.patch.object(
                 self.bridge,
                 "_dashboard_scheduler_local_now",

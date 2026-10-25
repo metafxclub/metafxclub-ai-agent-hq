@@ -82,6 +82,10 @@ $health | Select-Object ok, status, agentCount, agentRosterComplete, version
 ## กติกาสำหรับการแก้โค้ด
 
 - อ่านโครงสร้างและ Contract ก่อนแก้
+- เมื่อแทนหน้าจอหรือฟังก์ชันเดิม ต้องทำตาม `docs/system-replacement-policy-th.md`: ระบุบริการเจ้าของงานใหม่และเลิกงานเดิมให้ครบทั้ง UI, API, scheduler, worker, คิว และ autostart ไม่ถือว่าการซ่อนหน้าเดิมคือการย้ายระบบเสร็จ
+- ห้ามเพิ่มตัวดึงข้อมูลหรืองาน AI ชุดใหม่โดยปล่อยชุดเดิมทำงานอัตโนมัติคู่กัน ต้องมีเจ้าของงานที่ active เพียงชุดเดียวต่อหน้าที่ พร้อมตรวจ cold start, restart, upgrade และ rollback ว่าไม่ปลุกงานเดิมกลับมา
+- แยก legacy compatibility ที่อ่านประวัติได้ออกจากงานที่ยังรันจริง ตรวจจากสถานะงานและเวลาที่ดึงข้อมูล ไม่สรุปจากชื่อไฟล์หรือหน้าตาเพียงอย่างเดียว การเก็บโค้ดอ่านข้อมูลเก่าต้องไม่สร้างงานหรือใช้โควตาเอง
+- การปลดงานเก่าต้องเจาะจงตัวตนของงานนั้น ห้ามปิด scheduler ร่วม, สภา AI, MT4/MT5 หรือแตะออเดอร์เพื่อแก้ความซ้ำซ้อน และห้ามลบ Scheduled Task/Startup shortcut ของผู้ใช้ที่ยังยืนยันเจ้าของไม่ได้
 - รักษาไฟล์และข้อมูลเดิมของผู้ใช้ ห้ามลบหรือย้ายโดยไม่จำเป็น
 - Real tool call ทุกครั้งต้องมี Mission ID, Owner agent, Status, Audit log และ Report routing
 - การเปลี่ยน Installer ต้องคง Entry point เหล่านี้: `1-INSTALL-HQ.bat`, `installer/install.ps1`, `Open Metafx Agent HQ.cmd`, `scripts/repair-hq.cmd` และ `scripts/status-local-bridge.cmd`

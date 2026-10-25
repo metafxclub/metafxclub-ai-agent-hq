@@ -10,7 +10,10 @@ param(
     [int]$HealthTimeoutSeconds = 60,
 
     [ValidateRange(0, 65535)]
-    [int]$Port = 0
+    [int]$Port = 0,
+
+    # For maintenance beside active trading terminals, refuse force-stop.
+    [switch]$GracefulOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -854,9 +857,15 @@ function Stop-VerifiedProcess {
         if (-not (Test-BridgeProcess -ProcessRecord $record -ExpectedPort $bridgePort)) {
             throw "Refusing force-stop fallback for PID $ProcessId because its process identity changed after the graceful shutdown attempt."
         }
+        if ($GracefulOnly) {
+            throw "Graceful-only maintenance did not stop the bridge cleanly; refusing force-stop."
+        }
         Write-AuditEvent -Operation "shutdown" -Outcome "graceful_fallback_force" -ProcessId $ProcessId -Message "Graceful shutdown did not complete; force-stopping only the re-verified exact bridge PID."
     }
     else {
+        if ($GracefulOnly) {
+            throw "Graceful-only maintenance refuses forced startup cleanup."
+        }
         Write-AuditEvent -Operation "shutdown" -Outcome "forced_stop_requested" -ProcessId $ProcessId -Message "Force-stop requested for an exact bridge process during guarded startup cleanup."
     }
 

@@ -317,8 +317,8 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                     {"rateReservePercent": invalid},
                 )
 
-    def test_news_pending_slot_expires_at_midnight_without_researching_prior_date(self) -> None:
-        """A prior Bangkok-day slot must expire, never run as today's news."""
+    def test_retired_news_never_captures_even_a_same_day_or_midnight_slot(self) -> None:
+        """Persisted enablement cannot recreate a job on either Bangkok day."""
 
         captured: list[dict] = []
 
@@ -369,14 +369,10 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                     ),
                 ),
             ):
-                self.bridge._save_dashboard_schedule_preference(
-                    "newsBiasSchedule",
-                    {
-                        "enabled": True,
-                        "times": ["23:59"],
-                        "minimumImpact": "high",
-                    },
-                )
+                self.bridge.write_json(settings_path, {"newsBiasSchedule": {
+                    "requestedEnabled": True, "times": ["23:59"],
+                    "minimumImpact": "high", "automaticDailyCalendarVersion": 3,
+                }})
                 captured_slots = self.bridge._dashboard_workflow_capture_due_slots(slot_time)
                 result = self.bridge.dashboard_workflow_scheduler_tick(
                     retry_time,
@@ -384,18 +380,15 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                 )
                 stored = self.bridge.load_dashboard_workflow_settings()["newsBiasSchedule"]
 
-        self.assertEqual(len(captured_slots), 1)
+        self.assertEqual(len(captured_slots), 0)
         self.assertFalse(result["dispatched"])
         self.assertEqual(result["kind"], "scheduler_idle")
         self.assertEqual(captured, [])
         self.assertIsNone(stored["pendingSlotKey"])
         self.assertIsNone(stored["pendingScheduledAt"])
-        self.assertEqual(stored["dailyExecutionDate"], "2026-08-10")
+        self.assertFalse(stored["requestedEnabled"])
         self.assertEqual(stored["dailyExecutionCount"], 0)
-        self.assertEqual(
-            stored["lastResultKind"],
-            "pending_expired_at_bangkok_day_boundary",
-        )
+        self.assertEqual(stored["retirementReason"], "replaced_by_sentiment_universe")
 
 
 if __name__ == "__main__":

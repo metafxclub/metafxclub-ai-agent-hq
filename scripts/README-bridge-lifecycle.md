@@ -21,6 +21,8 @@ Runtime files are intentionally kept outside the frontend:
 
 Logs rotate to at most three prior generations. A running Bridge is never stopped merely because a PID file exists: the controller re-reads the Windows process and verifies its executable, exact server path, host, and port before stopping it.
 
+For scoped maintenance, call `start-local-bridge.ps1 -Action Restart -GracefulOnly` (and the confirmed `-Port` when required). This optional switch requests the authenticated graceful shutdown but refuses the force-stop fallback and forced startup cleanup. If the verified Bridge cannot exit cleanly, the command fails instead of killing it or starting a replacement beside it. Existing launchers keep their current behavior when the switch is omitted. Check for in-flight Council/mission/order-dispatch work before maintenance: graceful-only controls how the process stops; it does not establish that active work is idle or authorize changing a terminal or open orders.
+
 For a new installation, `installer/install.ps1 -ListAvailableEndpoints` proposes three loopback URLs before any installation change. The user confirms one URL, and the installer starts the Bridge with that exact Port. If the confirmed Port becomes unavailable, the controller stops safely and asks for a new selection instead of silently changing the URL. Normal Open/Status/Stop operations continue to use the endpoint that passed Health and was saved in `data/runtime/bridge-endpoint.json`.
 
 `scripts/check-codex-readiness.cmd` reads only the sanitized Bridge status and Codex Rate Limit endpoints. It reports the current Windows user's Codex readiness without reading or copying auth files.

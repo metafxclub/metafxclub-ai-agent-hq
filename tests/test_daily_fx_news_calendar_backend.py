@@ -133,47 +133,27 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
             } if actual_status in {"released", "revised"} else {},
         }
 
-    def test_direct_service_v3_migrates_once_then_preserves_enabled_and_times(self) -> None:
+    def test_legacy_news_schedule_migration_is_permanently_retired(self) -> None:
         default = self.bridge._default_dashboard_workflow_settings()["newsBiasSchedule"]
-        self.assertTrue(default["requestedEnabled"])
-        self.assertEqual(default["times"], ["00:00", "12:00"])
-        self.assertEqual(default["minimumImpact"], "low")
-        self.assertEqual(default["automaticDailyCalendarVersion"], 3)
-        legacy = self.bridge._dashboard_workflow_settings_shape({
-            "newsBiasSchedule": {
-                "requestedEnabled": False,
-                "times": ["07:00", "13:00", "19:00"],
-                "minimumImpact": "high",
-                "savedAt": "2026-08-13T00:00:00Z",
-                "automaticDailyCalendarVersion": 2,
-                "pendingSlotKey": "2026-08-13@20:00",
-                "pendingScheduledAt": "2026-08-13T13:00:00Z",
-                "dailyExecutionDate": "2026-08-13",
-                "dailyExecutionCount": 2,
-                "dailyExecutionSlotKeys": ["2026-08-13@07:00", "2026-08-13@20:00"],
-            }
-        })["newsBiasSchedule"]
-        self.assertTrue(legacy["requestedEnabled"])
-        self.assertEqual(legacy["times"], ["00:00", "12:00"])
-        self.assertEqual(legacy["minimumImpact"], "low")
-        self.assertEqual(legacy["automaticDailyCalendarVersion"], 3)
-        self.assertIsNone(legacy["pendingSlotKey"])
-        self.assertIsNone(legacy["pendingScheduledAt"])
-        self.assertIsNone(legacy["dailyExecutionDate"])
-        self.assertEqual(legacy["dailyExecutionCount"], 0)
-        self.assertEqual(legacy["dailyExecutionSlotKeys"], [])
-        saved = self.bridge._dashboard_workflow_settings_shape({
-            "newsBiasSchedule": {
-                "requestedEnabled": False,
-                "times": ["09:15"],
-                "minimumImpact": "high",
-                "savedAt": "2026-08-14T00:00:00Z",
-                "automaticDailyCalendarVersion": 3,
-            }
-        })["newsBiasSchedule"]
-        self.assertFalse(saved["requestedEnabled"])
-        self.assertEqual(saved["times"], ["09:15"])
-        self.assertEqual(saved["minimumImpact"], "low")
+        self.assertFalse(default["requestedEnabled"])
+        for version in (2, 3):
+            shaped = self.bridge._dashboard_workflow_settings_shape({
+                "newsBiasSchedule": {
+                    "requestedEnabled": True, "times": ["07:00", "13:00", "19:00"],
+                    "minimumImpact": "high", "savedAt": "2026-08-13T00:00:00Z",
+                    "automaticDailyCalendarVersion": version,
+                    "pendingSlotKey": "2026-08-13@20:00",
+                    "pendingScheduledAt": "2026-08-13T13:00:00Z",
+                    "dailyExecutionDate": "2026-08-13", "dailyExecutionCount": 2,
+                    "dailyExecutionSlotKeys": ["2026-08-13@07:00", "2026-08-13@20:00"],
+                }
+            })
+            legacy = shaped["newsBiasSchedule"]
+            self.assertFalse(legacy["requestedEnabled"])
+            self.assertEqual(legacy["retirementReason"], "replaced_by_sentiment_universe")
+            self.assertIsNone(legacy["pendingSlotKey"])
+            self.assertIsNone(legacy["pendingScheduledAt"])
+            self.assertEqual(self.bridge._dashboard_workflow_settings_shape(shaped), shaped)
 
     def test_same_event_is_upserted_and_released_zero_never_regresses_to_pending(self) -> None:
         morning = self.report(
@@ -1255,85 +1235,44 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
                             {"actionId": action_id, "form": {}},
                         )
                     self.assertEqual(caught.exception.status, 410)
-                    self.assertEqual(str(caught.exception), "direct_service_required")
+                    self.assertEqual(str(caught.exception), "replaced_by_sentiment_universe")
         run_bridge_task.assert_not_called()
         find_room_prop.assert_not_called()
         append_audit.assert_not_called()
 
-    def test_direct_schedule_accepts_only_enabled_and_times_without_mission(self) -> None:
-        saved = {
-            "requestedEnabled": True,
-            "times": ["00:00", "12:00"],
-            "minimumImpact": "low",
-            "timezone": "Asia/Bangkok",
-        }
+    def test_direct_schedule_cannot_reenable_retired_service(self) -> None:
         with (
-            mock.patch.object(self.bridge, "_save_dashboard_schedule_preference", return_value=saved) as save,
-            mock.patch.object(self.bridge, "_fx_daily_news_direct_service_read_model", return_value={"status": "ready"}),
+            mock.patch.object(self.bridge, "_save_dashboard_schedule_preference") as save,
             mock.patch.object(self.bridge, "run_bridge_task") as run_bridge_task,
-            mock.patch.object(self.bridge, "append_audit"),
         ):
-            result = self.bridge.save_direct_daily_fx_news_schedule({
-                "enabled": True,
-                "times": ["12:00", "00:00"],
-            })
-        save.assert_called_once_with(
-            "newsBiasSchedule",
-            {"enabled": True, "times": ["00:00", "12:00"]},
-        )
+            for payload in (
+                {"enabled": True, "times": ["12:00", "00:00"]},
+                {"enabled": True, "times": ["00:00"], "minimumImpact": "high"},
+                {"enabled": False, "times": []},
+            ):
+                with self.assertRaises(self.bridge.RequestError) as caught:
+                    self.bridge.save_direct_daily_fx_news_schedule(payload)
+                self.assertEqual(caught.exception.status, 410)
+                self.assertEqual(str(caught.exception), "replaced_by_sentiment_universe")
+        save.assert_not_called()
         run_bridge_task.assert_not_called()
-        self.assertIsNone(result["mission"])
-        self.assertFalse(result["missionCreated"])
-        self.assertFalse(result["agentUsed"])
-        self.assertFalse(result["aiUsed"])
-        with self.assertRaises(self.bridge.RequestError):
-            self.bridge.save_direct_daily_fx_news_schedule({
-                "enabled": True,
-                "times": ["00:00"],
-                "minimumImpact": "high",
-            })
 
-    def test_direct_refresh_persists_snapshot_without_mission_or_agent_dispatch(self) -> None:
-        empty_store = self.bridge.fx_news_direct.empty_store()
-        collection = {"marketDate": "2026-08-14", "sourceCache": {}}
-        snapshot = {
-            "snapshotId": "fxnews-2026-08-14-unit",
-            "marketDate": "2026-08-14",
-            "updatedAt": "2026-08-14T05:00:00Z",
-            "currentDataAvailable": True,
-            "sourceStatus": "quiet_day",
-            "dataStatus": "verified_empty",
-            "events": [],
-        }
-        persisted = {
-            **empty_store,
-            "latestSnapshotId": snapshot["snapshotId"],
-            "latestSuccessfulSnapshotId": snapshot["snapshotId"],
-            "history": [snapshot],
-        }
+    def test_direct_refresh_preserves_history_without_collecting_or_dispatching(self) -> None:
         with (
-            mock.patch.object(self.bridge, "_load_fx_daily_news_direct_store", return_value=empty_store),
-            mock.patch.object(self.bridge.fx_news_direct, "collect_official_sources", return_value=collection),
-            mock.patch.object(self.bridge.fx_news_direct, "build_snapshot", return_value=snapshot),
-            mock.patch.object(self.bridge.fx_news_direct, "append_snapshot", return_value=persisted),
-            mock.patch.object(self.bridge, "_save_fx_daily_news_direct_store", return_value=persisted) as save_store,
-            mock.patch.object(self.bridge, "_fx_daily_news_direct_service_read_model", return_value={"status": "ready"}),
-            mock.patch.object(self.bridge, "_fx_news_read_model", return_value={"dataStatus": "verified_empty"}),
-            mock.patch.object(self.bridge, "_fx_bias_read_model", return_value={"assessedPairCount": 28}),
-            mock.patch.object(self.bridge, "run_bridge_task") as run_bridge_task,
-            mock.patch.object(self.bridge, "append_audit"),
+            mock.patch.object(self.bridge, "_load_fx_daily_news_direct_store") as load,
+            mock.patch.object(self.bridge.fx_news_direct, "collect_official_sources") as collect,
+            mock.patch.object(self.bridge, "_save_fx_daily_news_direct_store") as save,
+            mock.patch.object(self.bridge, "run_bridge_task") as dispatch,
         ):
-            result = self.bridge.refresh_deterministic_daily_fx_news(
-                trigger_source="frontend",
-                now_utc=datetime.fromisoformat("2026-08-14T05:00:00+00:00"),
-            )
-        save_store.assert_called_once_with(persisted)
-        run_bridge_task.assert_not_called()
-        self.assertEqual(result["snapshotId"], snapshot["snapshotId"])
-        self.assertIsNone(result["mission"])
-        self.assertFalse(result["missionCreated"])
-        self.assertFalse(result["agentUsed"])
-        self.assertFalse(result["aiUsed"])
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.refresh_deterministic_daily_fx_news(
+                    trigger_source="frontend",
+                    now_utc=datetime.fromisoformat("2026-08-14T05:00:00+00:00"),
+                )
+        self.assertEqual(caught.exception.status, 410)
+        self.assertEqual(str(caught.exception), "replaced_by_sentiment_universe")
+        for operation in (load, collect, save, dispatch):
+            operation.assert_not_called()
 
     def test_partial_direct_coverage_assesses_only_pairs_with_both_currencies(self) -> None:
         report = self.report(
@@ -1583,9 +1522,11 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
             store=store,
             now_local=datetime.fromisoformat("2026-08-14T10:00:00+07:00"),
         )
-        self.assertTrue(service["directRefreshAvailable"])
-        self.assertEqual(service["refreshEndpoint"], "/api/props/left_signal_cube/news/refresh")
-        self.assertEqual(service["scheduleEndpoint"], "/api/props/left_signal_cube/news/schedule")
+        self.assertFalse(service["directRefreshAvailable"])
+        self.assertEqual(service["status"], "retired")
+        self.assertTrue(service["archiveOnly"])
+        self.assertIsNone(service["refreshEndpoint"])
+        self.assertIsNone(service["scheduleEndpoint"])
         history = service["historyDays"][0]
         self.assertEqual(history["calendarDate"], "2026-08-14")
         canonical = history["events"][0]
@@ -1611,20 +1552,11 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
             ("informational_publication", False),
         )
 
-    def test_scheduler_runs_direct_news_before_mission_gate(self) -> None:
+    def test_scheduler_rejects_restored_legacy_pending_news_before_any_work(self) -> None:
         pending = {
-            "settingsKey": "newsBiasSchedule",
-            "propId": "left_signal_cube",
-            "actionId": "refresh_daily_market_news",
-            "slotKey": "2026-08-14@12:00",
+            "settingsKey": "newsBiasSchedule", "propId": "left_signal_cube",
+            "actionId": "refresh_daily_market_news", "slotKey": "2026-08-14@12:00",
             "schedule": {},
-        }
-        direct_result = {
-            "ok": True,
-            "kind": "news_direct_refresh",
-            "snapshotId": "fxnews-2026-08-14-direct",
-            "marketNews": {"dataStatus": "verified_empty"},
-            "idempotentReplay": False,
         }
         with (
             mock.patch.object(self.bridge, "_dashboard_workflow_reconcile_schedule_states"),
@@ -1632,24 +1564,20 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
             mock.patch.object(self.bridge, "_dashboard_workflow_pending_jobs", return_value=[pending]),
             mock.patch.object(self.bridge, "_dashboard_workflow_pending_is_current", return_value=True),
             mock.patch.object(self.bridge, "_dashboard_workflow_retry_ready", return_value=True),
-            mock.patch.object(self.bridge, "_dashboard_workflow_reserve_daily_execution", return_value={"allowed": True}),
-            mock.patch.object(self.bridge, "refresh_deterministic_daily_fx_news", return_value=direct_result) as refresh,
-            mock.patch.object(self.bridge, "_dashboard_workflow_update_schedule_state") as update_state,
+            mock.patch.object(self.bridge, "_dashboard_workflow_reserve_daily_execution") as reserve,
+            mock.patch.object(self.bridge, "refresh_deterministic_daily_fx_news") as refresh,
+            mock.patch.object(self.bridge, "_dashboard_workflow_update_schedule_state"),
             mock.patch.object(self.bridge, "_active_dashboard_workflow_schedule_mission") as active_mission,
             mock.patch.object(self.bridge, "run_dashboard_workflow_action") as mission_dispatch,
+            mock.patch.object(self.bridge, "_dashboard_workflow_scheduler_gate") as quota,
             mock.patch.object(self.bridge, "append_audit"),
         ):
             result = self.bridge.dashboard_workflow_scheduler_tick(
-                datetime.fromisoformat("2026-08-14T12:00:00+07:00"),
-                refresh_quota=False,
+                datetime.fromisoformat("2026-08-14T12:00:00+07:00"), refresh_quota=False,
             )
-        refresh.assert_called_once()
-        active_mission.assert_not_called()
-        mission_dispatch.assert_not_called()
-        self.assertTrue(update_state.called)
-        self.assertTrue(result["dispatched"])
-        self.assertEqual(result["snapshotId"], "fxnews-2026-08-14-direct")
-        self.assertIsNone(result["missionId"])
+        for operation in (refresh, reserve, quota, active_mission, mission_dispatch):
+            operation.assert_not_called()
+        self.assertFalse(result["dispatched"])
 
 
 if __name__ == "__main__":
