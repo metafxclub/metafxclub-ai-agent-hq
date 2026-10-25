@@ -84,7 +84,8 @@ class MT5SetupTests(unittest.TestCase):
             (profile/"origin.txt").write_text(str(Path(binding["terminalPath"]).parent),encoding="utf-16")
             rows=discover_bindings(processes=[{"terminalPath":binding["terminalPath"],"pid":123}],data_root=data_root)
             self.assertEqual(len(rows),1)
-            self.assertEqual(Path(rows[0]["dataPath"]),profile)
+            # Windows temp roots may use an 8.3 alias for the same directory.
+            self.assertTrue(Path(rows[0]["dataPath"]).samefile(profile))
             self.assertEqual(rows[0]["runningCount"],1)
             self.assertEqual(discover_bindings(processes=[],data_root=data_root),[])
 
