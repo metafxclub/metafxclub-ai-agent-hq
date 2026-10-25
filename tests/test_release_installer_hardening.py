@@ -1330,17 +1330,17 @@ $installResultPath = Join-Path $installRoot 'data\runtime\install-result.json'
 New-Item -ItemType Directory -Path (Split-Path -Parent $installResultPath) -Force | Out-Null
 [IO.File]::WriteAllText(
     (Join-Path $installRoot 'VERSION'),
-    "0.9.23`n",
+    "0.9.24`n",
     (New-Object Text.UTF8Encoding($false))
 )
 $commit = 'abcdef0123456789abcdef0123456789abcdef01'
 $initial = [ordered]@{{
     version = 2
-    application_version = '0.9.23'
+    application_version = '0.9.24'
     source = [ordered]@{{
         provenance = 'verified_remote_git_tag'
         repository = 'https://github.com/metafxclub/metafxclub-ai-agent-hq.git'
-        tag = 'v0.9.23'
+        tag = 'v0.9.24'
         commit = $commit
     }}
     endpoint = [ordered]@{{ health = 'ready' }}
@@ -1465,7 +1465,7 @@ Get-Content -LiteralPath $installResultPath -Raw -Encoding UTF8
             self.assertEqual(0, completed.returncode, completed.stderr)
             receipt = json.loads(completed.stdout)
             self.assertEqual("verified_remote_git_tag", receipt["source"]["provenance"])
-            self.assertEqual("v0.9.23", receipt["source"]["tag"])
+            self.assertEqual("v0.9.24", receipt["source"]["tag"])
             self.assertEqual("abcdef0123456789abcdef0123456789abcdef01", receipt["source"]["commit"])
             self.assertEqual("repair_required", receipt["endpoint"]["health"])
             self.assertEqual("not_checked", receipt["codex"]["status"])
