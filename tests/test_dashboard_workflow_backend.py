@@ -3721,9 +3721,25 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                         "candidateId": mt5_candidate_id,
                         "selectionRevision": 4,
                         "selectedAt": checked_at,
+                        "selectionRevision": 3,
                     },
                 },
             }
+            legacy_only_store = copy.deepcopy(target_store)
+            # Council authority comes from the two header-owned locks and its
+            # active platform, never this compatibility per-prop selection.
+            target_store["candidates"][mt5_candidate_id] = {
+                "candidateId": mt5_candidate_id,
+                "platform": "mt5",
+                "localPath": str(mt5_root),
+                "identityKey": self.bridge._metatrader_identity_key("mt5", str(mt5_root)),
+                "available": True,
+            }
+            target_store["platformSelections"] = {
+                "mt4": {"candidateId": candidate_id, "selectedAt": checked_at, "selectionRevision": 7},
+                "mt5": {"candidateId": mt5_candidate_id, "selectedAt": checked_at, "selectionRevision": 11},
+            }
+            target_store["activePlatform"] = "mt4"
             worker = {"status": "idle", "operational": True, "operationalReason": None, "watchdogAlive": True}
             scheduler = {"status": "idle", "operational": True, "operationalReason": None}
             bridge_model = {
@@ -3757,6 +3773,14 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 mock.patch.object(self.bridge, "_load_metatrader_target_store_unlocked", return_value=target_store) as target_load,
             ):
                 model = self.bridge._equipment_connection_center_read_model(raw_bridge, use_cache=False)
+                legacy_selection = self.bridge._metatrader_selection_read_model(
+                    self.bridge.AI_TRADE_COUNCIL_PROP_ID, terminals, target_store=legacy_only_store,
+                    allowed_platforms={"mt4", "mt5"},
+                )
+                current_selection = self.bridge._metatrader_selection_read_model(
+                    self.bridge.AI_TRADE_COUNCIL_PROP_ID, terminals, target_store=target_store,
+                    allowed_platforms={"mt4", "mt5"},
+                )
 
         self.assertEqual(model["summary"]["deviceCount"], 9)
         self.assertEqual([item["propId"] for item in model["devices"]], list(self.bridge.EQUIPMENT_CONNECTION_CENTER_PROP_IDS))
@@ -3773,6 +3797,10 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         }
         self.assertEqual(probe_counts, {key: 1 for key in probe_counts})
         worker_probe.assert_called_once_with(include_queue_count=False)
+        self.assertEqual(legacy_selection["status"], "not_selected")
+        self.assertIsNone(legacy_selection["selectedCandidate"])
+        self.assertIsNone(legacy_selection["selectionRevision"])
+        self.assertEqual(current_selection["selectionRevision"], 7)
 
         ai_trade = next(item for item in model["devices"] if item["propId"] == "left_analytics_console")
         by_id = {item["id"]: item for item in ai_trade["items"]}
