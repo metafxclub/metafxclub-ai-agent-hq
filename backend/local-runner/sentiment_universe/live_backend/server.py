@@ -190,6 +190,12 @@ class MarketService:
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
+    # A rejected POST can arrive as separate header/body packets. Closing with
+    # unread bytes can reset the Windows socket before the client reads JSON.
+    # This discard budget is separate from the 8 KiB accepted setup-body limit.
+    REJECTED_BODY_DRAIN_BYTES = 16 * 1024
+    REJECTED_BODY_DRAIN_SECONDS = 0.25
+
     server_version = 'MetafxUniverse/1'
 
     def __init__(self, request, client_address, server, **kwargs):
@@ -234,6 +240,42 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(raw)
+
+    def discard_rejected_body(self):
+        lengths = self.headers.get_all('Content-Length', [])
+        if len(lengths) != 1:
+            return
+        length = lengths[0].strip(' \t')
+        if not length.isascii() or not length.isdecimal() or len(length) > 10:
+            return
+        remaining = int(length)
+        if not 0 < remaining <= self.REJECTED_BODY_DRAIN_BYTES:
+            return
+        deadline = time.monotonic() + self.REJECTED_BODY_DRAIN_SECONDS
+        previous_timeout = self.connection.gettimeout()
+        try:
+            while remaining:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                self.connection.settimeout(timeout)
+                chunk = self.rfile.read1(min(remaining, 8192))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass  # Denied or disconnected clients cannot delay teardown indefinitely.
+        finally:
+            try:
+                self.connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+
+    def reject_json(self, value, status):
+        self.close_connection = True
+        self.send_json(value, status)
+        self.wfile.flush()
+        self.discard_rejected_body()
 
     def end_headers(self):
         self.send_header('X-Content-Type-Options', 'nosniff')
@@ -280,16 +322,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         allowed = {f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}'}
         token = self.headers.get('X-CSRF-Token', '')
         if not self.valid_host() or origin not in allowed or not token.isascii() or not secrets.compare_digest(token, self.server.csrf):
-            return self.send_json({'error': 'request_rejected'}, 403)
+            return self.reject_json({'error': 'request_rejected'}, 403)
         route = urlsplit(self.path).path
         if route not in ('/api/setup/myfxbook', '/api/setup/mt5/select'):
-            return self.send_json({'error': 'not_found'}, 404)
+            return self.reject_json({'error': 'not_found'}, 404)
         try:
             if self.headers.get('Transfer-Encoding') or self.headers.get('Content-Type', '').split(';')[0].strip() != 'application/json':
-                return self.send_json({'error': 'invalid_request'}, 400)
+                return self.reject_json({'error': 'invalid_request'}, 400)
             size = int(self.headers.get('Content-Length', '0'))
             if not 1 <= size <= 8192:
-                return self.send_json({'error': 'invalid_request'}, 400)
+                return self.reject_json({'error': 'invalid_request'}, 400)
             data = json.loads(self.rfile.read(size))
             if not isinstance(data, dict):
                 return self.send_json({'error': 'invalid_request'}, 400)
