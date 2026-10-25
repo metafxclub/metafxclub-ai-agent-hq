@@ -327,9 +327,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         }
 
     def disable_direct_news_schedule(self) -> None:
-        self.bridge.save_direct_daily_fx_news_schedule(
-            {"enabled": False, "times": ["00:00", "12:00"]}
-        )
+        # Retirement is permanent; scheduler fixtures must not call the closed API.
+        self.assertFalse(self.bridge.load_dashboard_workflow_settings()["newsBiasSchedule"]["requestedEnabled"])
 
     def schedule_jobs(self, *settings_keys: str) -> tuple[dict, ...]:
         return tuple(
@@ -2478,46 +2477,28 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(model["lastError"], "runner_timeout")
         self.assertEqual(model["lastErrorAt"], "2026-08-09T02:02:00+00:00")
 
-    def test_news_schedule_refreshes_direct_snapshot_without_followup_mission(self) -> None:
-        captured: list[dict] = []
-
-        def fake_refresh(**kwargs) -> dict:
-            captured.append(kwargs)
-            return {
-                "ok": True,
-                "kind": "news_direct_refresh",
-                "snapshotId": "fx-news-direct-1",
-                "marketNews": {"dataStatus": "verified"},
-            }
-
+    def test_persisted_news_schedule_cannot_refresh_or_create_followup_mission(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "dashboard-workflow-settings.json"
             with (
                 mock.patch.object(self.bridge, "DASHBOARD_WORKFLOW_SETTINGS_PATH", settings_path),
                 mock.patch.object(self.bridge, "load_missions", return_value=[]),
                 mock.patch.object(self.bridge, "append_audit"),
-                mock.patch.object(
-                    self.bridge,
-                    "refresh_deterministic_daily_fx_news",
-                    side_effect=fake_refresh,
-                ),
+                mock.patch.object(self.bridge, "refresh_deterministic_daily_fx_news") as refresh,
                 mock.patch.object(self.bridge, "run_dashboard_workflow_action") as mission_runner,
             ):
-                self.bridge.save_direct_daily_fx_news_schedule(
-                    {"enabled": True, "times": ["13:00"]}
-                )
+                self.bridge.write_json(settings_path, {"newsBiasSchedule": {
+                    "requestedEnabled": True, "times": ["13:00"],
+                    "automaticDailyCalendarVersion": 3,
+                }})
                 result = self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 9, 13, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
                     refresh_quota=False,
                 )
-        self.assertEqual(len(captured), 1)
-        self.assertEqual(
-            captured[0]["idempotency_key"],
-            "dashboard-schedule:newsBiasSchedule:2026-08-09:1300",
-        )
-        self.assertEqual(captured[0]["trigger_source"], "schedule")
-        self.assertTrue(result["dispatched"])
-        self.assertIsNone(result["missionId"])
+                stored = self.bridge.load_dashboard_workflow_settings()["newsBiasSchedule"]
+        self.assertFalse(stored["requestedEnabled"])
+        self.assertFalse(result["dispatched"])
+        refresh.assert_not_called()
         mission_runner.assert_not_called()
 
     def test_trusted_schedule_trigger_is_persisted_without_accepting_frontend_spoofing(self) -> None:

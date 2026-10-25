@@ -203,7 +203,7 @@ from hq_backend.research.radar_image_adapter import (  # noqa: E402 - public HTT
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.25"
+BRIDGE_RUNTIME_VERSION = "0.9.26"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -18072,6 +18072,14 @@ BACKEND_OWNED_DAILY_SCHEDULE_TIME = "09:00"
 BACKEND_OWNED_DAILY_SCHEDULE_TIMEZONE = "Asia/Bangkok"
 BACKEND_OWNED_DAILY_SCHEDULE_VERSION = 2
 
+LEGACY_MARKET_RETIRED_REASON = "replaced_by_sentiment_universe"
+LEGACY_MARKET_RETIREMENT_VERSION = 1
+LEGACY_MARKET_ACTIONS = frozenset({
+    "save_news_bias_schedule", "refresh_daily_market_news",
+    "analyze_daily_market_news", "build_fx_pair_bias", "analyze_fx28_trends",
+})
+LEGACY_MARKET_SCHEDULE_KEYS = frozenset({"newsBiasSchedule", "fx28TrendSchedule"})
+
 DASHBOARD_WORKFLOW_SCHEDULE_JOBS = (
     {
         "settingsKey": "discoverySchedule",
@@ -18088,14 +18096,6 @@ DASHBOARD_WORKFLOW_SCHEDULE_JOBS = (
         "defaultTimes": ["09:00"],
         "maxTimes": 1,
         "maxRunsPerDay": 1,
-    },
-    {
-        "settingsKey": "newsBiasSchedule",
-        "propId": "left_signal_cube",
-        "actionId": "refresh_daily_market_news",
-        "defaultTimes": ["00:00", "12:00"],
-        "maxTimes": 2,
-        "maxRunsPerDay": 2,
     },
 )
 
@@ -18159,12 +18159,15 @@ def _default_dashboard_workflow_settings() -> dict:
             "consumerWriteChecks": {},
         },
         "newsBiasSchedule": {
-            "requestedEnabled": True,
+            "requestedEnabled": False,
             "times": ["00:00", "12:00"],
             "minimumImpact": "low",
             "timezone": "Asia/Bangkok",
             "savedAt": None,
             "automaticDailyCalendarVersion": 3,
+            "retired": True,
+            "retirementReason": LEGACY_MARKET_RETIRED_REASON,
+            "retirementVersion": LEGACY_MARKET_RETIREMENT_VERSION,
             **copy.deepcopy(DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS),
         },
         "agentPreferences": {
@@ -18182,11 +18185,6 @@ def _default_dashboard_workflow_settings() -> dict:
 def _dashboard_workflow_settings_shape(value: object) -> dict:
     defaults = _default_dashboard_workflow_settings()
     source = copy.deepcopy(value) if isinstance(value, dict) else {}
-    raw_news_schedule = (
-        copy.deepcopy(source.get("newsBiasSchedule"))
-        if isinstance(source.get("newsBiasSchedule"), dict)
-        else None
-    )
     raw_discovery_schedule = (
         copy.deepcopy(source.get("discoverySchedule"))
         if isinstance(source.get("discoverySchedule"), dict)
@@ -18252,29 +18250,21 @@ def _dashboard_workflow_settings_shape(value: object) -> dict:
         discovery_schedule["automaticDailyDiscoveryVersion"] = 1
     discovery_schedule["timezone"] = "Asia/Bangkok"
     result["discoverySchedule"] = discovery_schedule
-    # v3 is a one-time migration from the retired Mission/Codex schedule to
-    # the local deterministic service.  It intentionally resets stale Mission
-    # reservations.  Once v3 is persisted, later user time/enabled edits are
-    # preserved unchanged.
-    news_schedule = (
-        result.get("newsBiasSchedule")
-        if isinstance(result.get("newsBiasSchedule"), dict)
-        else {}
-    )
-    if (
-        not isinstance(raw_news_schedule, dict)
-        or clamp_int(raw_news_schedule.get("automaticDailyCalendarVersion"), 0, 0, 99) < 3
-    ):
-        news_schedule["requestedEnabled"] = True
-        news_schedule["times"] = ["00:00", "12:00"]
-        news_schedule["minimumImpact"] = "low"
-        news_schedule["savedAt"] = None
-        for key, value in DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS.items():
-            news_schedule[key] = copy.deepcopy(value)
-        news_schedule["automaticDailyCalendarVersion"] = 3
-        result["newsBiasSchedule"] = news_schedule
-    # Impact is a service-owned deterministic policy, not a user-editable
-    # preference.  Preserve only enabled/times after the v3 migration.
+    # Sentiment owns the market pipeline. Keep old history/preferences for
+    # inspection, but normalize retirement on every read so an old installer,
+    # config restore or client cannot silently reactivate duplicate collection.
+    for settings_key in LEGACY_MARKET_SCHEDULE_KEYS:
+        retired_schedule = result.get(settings_key)
+        retired_schedule = retired_schedule if isinstance(retired_schedule, dict) else {}
+        if "retiredPendingSlotKey" not in retired_schedule and retired_schedule.get("pendingSlotKey"):
+            retired_schedule["retiredPendingSlotKey"] = retired_schedule["pendingSlotKey"]
+            retired_schedule["retiredPendingScheduledAt"] = retired_schedule.get("pendingScheduledAt")
+        retired_schedule.update(requestedEnabled=False, retired=True,
+                                retirementReason=LEGACY_MARKET_RETIRED_REASON,
+                                retirementVersion=LEGACY_MARKET_RETIREMENT_VERSION,
+                                pendingSlotKey=None, pendingScheduledAt=None)
+        result[settings_key] = retired_schedule
+    news_schedule = result["newsBiasSchedule"]
     news_schedule["minimumImpact"] = "low"
     news_schedule["timezone"] = "Asia/Bangkok"
     result["newsBiasSchedule"] = news_schedule
@@ -21439,6 +21429,8 @@ def _dashboard_schedule_next_run_at(
     times: list[str],
     now_local: datetime | None = None,
 ) -> str | None:
+    if settings_key in LEGACY_MARKET_SCHEDULE_KEYS:
+        return None
     if not bool(schedule.get("requestedEnabled", False)):
         return None
     pending_at = parse_iso(str(schedule.get("pendingScheduledAt") or ""))
@@ -21638,6 +21630,14 @@ def _dashboard_schedule_read_model(
         minimum_impact = str(schedule.get("minimumImpact") or "").strip().lower()
         if minimum_impact in {"low", "medium", "high"}:
             model["minimumImpact"] = minimum_impact
+    if settings_key in LEGACY_MARKET_SCHEDULE_KEYS:
+        model.update(_legacy_market_retirement(), enabled=False, effectiveEnabled=False,
+                     requestedEnabled=False, nextRunAt=None, pendingSlotKey=None,
+                     pendingScheduledAt=None, automaticReadOnlyResearch=False,
+                     automaticRunsImplemented=False, manualRunAllowed=False,
+                     userConfigurable=False, gateAllowed=False,
+                     gateReason=LEGACY_MARKET_RETIRED_REASON,
+                     statusLabelTh=_legacy_market_retirement()["messageTh"])
     return model
 
 
@@ -22560,6 +22560,99 @@ FX_TREND_TICK_LOCK = threading.Lock()
 FX_TREND_THREAD: threading.Thread | None = None
 
 
+def _legacy_market_retirement() -> dict:
+    """Permanent backend policy, independent of frontend flags or old settings."""
+    return {"status": "retired", "retired": True,
+            "reasonCode": LEGACY_MARKET_RETIRED_REASON,
+            "replacement": "sentiment_universe",
+            "retirementVersion": LEGACY_MARKET_RETIREMENT_VERSION,
+            "messageTh": "ระบบ FX28 และข่าวเดิมยุติการทำงานแล้ว ใช้ Sentiment Universe แทน"}
+
+
+def _legacy_market_workflow_retired(prop_id: object, action_id: object) -> bool:
+    return prop_id == "left_signal_cube" and isinstance(action_id, str) and action_id in LEGACY_MARKET_ACTIONS
+
+
+def _legacy_market_mission_retired(mission: object) -> bool:
+    """Match only the retired equipment lineage; never general/Council work."""
+    if not isinstance(mission, dict):
+        return False
+    context = mission.get("workflowContext")
+    context = context if isinstance(context, dict) else {}
+    return _legacy_market_workflow_retired(context.get("propId"), context.get("actionId"))
+
+
+def _legacy_market_retired_response() -> dict:
+    return {**_legacy_market_retirement(), "ok": False,
+            "kind": LEGACY_MARKET_RETIRED_REASON,
+            "code": LEGACY_MARKET_RETIRED_REASON, "_httpStatus": 410}
+
+
+def _legacy_market_archive_read_model(value: dict) -> dict:
+    """Expose legacy evidence as history without claiming it is a live feed."""
+    model = copy.deepcopy(value)
+    model["archivedDataStatus"] = value.get("dataStatus") or value.get("status")
+    model["archivedSourceStatus"] = value.get("sourceStatus")
+    model.update(_legacy_market_retirement(), archiveOnly=True,
+                 dataStatus="archived", sourceStatus="retired",
+                 currentDataAvailable=False, failClosed=True)
+    return model
+
+
+def _retire_legacy_market_pending_missions() -> int:
+    """Cancel only unstarted obsolete work in one durable transaction.
+
+    Completed history and running work are preserved. Admission/lease guards
+    independently prevent replay, even when a stale queue is restored later.
+    """
+    retired = []
+    with MISSIONS_LOCK:
+        missions = load_missions()
+        now = utc_now()
+        for mission in missions:
+            if (mission.get("status") not in {"queued", "waiting_approval"}
+                    or not _legacy_market_mission_retired(mission)):
+                continue
+            previous_status = mission["status"]
+            mission.update(status="cancelled", phase="legacy_market_retired",
+                           workStatus="cancelled", runnerStatus="retired",
+                           autoEligible=False, errorCode=LEGACY_MARKET_RETIRED_REASON,
+                           result=_legacy_market_retirement()["messageTh"],
+                           updatedAt=now, completedAt=now)
+            mission["retirement"] = {**_legacy_market_retirement(),
+                                     "previousStatus": previous_status, "retiredAt": now}
+            execution = mission.get("execution")
+            execution = dict(execution) if isinstance(execution, dict) else {}
+            execution.update(dispatchState="cancelled", nextAttemptAt=None,
+                             completedAt=now, lastDeferredReason=LEGACY_MARKET_RETIRED_REASON)
+            mission["execution"] = execution
+            approval = mission.get("approval")
+            if isinstance(approval, dict) and approval.get("required"):
+                mission["approval"] = {**approval, "state": "invalidated"}
+            retired.append(str(mission.get("id") or ""))
+        if retired:
+            save_missions(missions)
+    for offset in range(0, len(retired), 50):
+        append_audit({"type": "market.legacy_pending_retired",
+                      "reason": LEGACY_MARKET_RETIRED_REASON,
+                      "missionIds": retired[offset:offset + 50], "total": len(retired),
+                      "realToolExecuted": False, "metaTraderActions": False})
+    return len(retired)
+
+
+def retire_legacy_market_runtime() -> dict:
+    """Persist upgrade retirement before starting workers; retain old caches."""
+    load_dashboard_workflow_settings()
+    count = _retire_legacy_market_pending_missions()
+    path = RUNTIME_DIR / "legacy-market-retirement.json"
+    marker = read_json(path, {})
+    if not isinstance(marker, dict) or marker.get("retirementVersion") != LEGACY_MARKET_RETIREMENT_VERSION:
+        write_json(path, {**_legacy_market_retirement(), "retiredAt": utc_now(),
+                          "pipelines": ["fx28", "fx_news_direct"],
+                          "historyPreserved": True}, keep_backup=path.exists())
+    return {**_legacy_market_retirement(), "retiredMissionCount": count}
+
+
 def _fx_trend_path(name: str) -> Path:
     return RUNTIME_DIR / "fx28-trend" / name
 
@@ -22619,94 +22712,13 @@ def _fx_trend_validate_result(mission: dict, result: dict, fields: dict) -> dict
 
 
 def _fx_trend_retry_infrastructure_failure(mission_id: str, lease_id: str, runner: dict, result: dict) -> dict | None:
-    """One same-day retry, preserving immutable inputs and normal quota gates."""
-    failure = str(result.get("status") or result.get("blockedCapability") or "")
-    if result.get("ok") is True or failure not in {"timeout", "runner_failed"}:
-        return None
-    now = datetime.now(timezone.utc)
-    retry_at = now + timedelta(minutes=5)
-    deferred = None
-    with MISSIONS_LOCK:
-        missions = load_missions()
-        for mission in missions:
-            execution = mission.get("execution") or {}
-            context = _workflow_context_storage(mission.get("workflowContext"))
-            if (mission.get("id") != mission_id or mission.get("status") != "running" or execution.get("leaseId") != lease_id
-                or not context or context.get("propId") != "left_signal_cube" or context.get("actionId") != fx_trend.ACTION_ID
-                or context.get("triggerSource") != "schedule" or _trusted_workflow_guard_intent(mission) is None
-                or mission.get("executionMode") != "auto_guarded" or mission.get("autoEligible") is not True):
-                continue
-            day = (context.get("inputs") or {}).get("marketDate")
-            previous = mission.get("fxTrendRetry") if isinstance(mission.get("fxTrendRetry"), dict) else {}
-            if (day != now.astimezone(THAILAND_TIMEZONE).date().isoformat()
-                or day != retry_at.astimezone(THAILAND_TIMEZONE).date().isoformat()
-                or previous.get("retryCount", 0) != 0
-                or int(mission.get("attemptCount") or 0) >= 2):
-                return None
-            try:
-                _fx_trend_assignment(context.get("inputs"))
-            except (ValueError, TypeError, KeyError, OSError, DataIntegrityError):
-                return None
-            mission["fxTrendRetry"] = {"schemaVersion": "fx28-infrastructure-retry-v1", "retryCount": 1, "maximumAttempts": 2,
-                "lastFailureCode": failure, "lastFailedAt": fx_trend.iso(now), "nextAttemptAt": fx_trend.iso(retry_at),
-                "processStarted": result.get("processStarted", runner.get("processStarted")) is True,
-                "sameMission": True, "sameAssignment": True, "marketDate": day}
-            mission.update(status="queued", phase="fx28_infrastructure_retry_deferred", workStatus="queued", runnerStatus=failure,
-                errorCode=None, result="ข้อขัดข้องชั่วคราว กำหนดลองซ้ำอีกหนึ่งครั้งหลัง 5 นาที โดยใช้โควตาปกติ", startedAt=None, completedAt=None,
-                heartbeatAt=fx_trend.iso(now), updatedAt=fx_trend.iso(now))
-            execution = copy.deepcopy(execution)
-            for key in ("workerId", "leaseId", "startedAt", "timeoutAt", "completedAt", "authorizationConsumedAt", "authorizationConsumedLeaseId"):
-                execution.pop(key, None)
-            execution.update(dispatchState="deferred", heartbeatAt=fx_trend.iso(now), nextAttemptAt=fx_trend.iso(retry_at),
-                             lastDeferredReason=failure, automaticRetry=True, processStarted=False, processTreeTerminated=False)
-            mission["execution"] = execution
-            _issue_backend_auto_safe_authorization(mission, issued_at=fx_trend.iso(now))
-            deferred = mission
-            save_missions(missions)
-            break
-    if deferred:
-        append_audit({"type": "fx28.infrastructure_retry_deferred", "missionId": mission_id, "leaseId": lease_id,
-                      "reason": failure, "nextAttemptAt": fx_trend.iso(retry_at), "maximumAttempts": 2,
-                      "newDailyMission": False, "quotaRefunded": False, "orderSubmissionAllowed": False})
-        MISSION_WORKER_WAKE.set()
-    return deferred
+    """Retired jobs are never retried, including old infrastructure failures."""
+    return None
 
 
 def _fx_trend_collect(previous: dict) -> dict:
-    context = _global_metatrader_platform_context("mt5", require_all_platforms=False)
-    if not context:
-        raise ValueError("mt5_selected_terminal_unavailable")
-    record = context["record"]
-    install = Path(str(record.get("installPath") or ""))
-    executable = install if install.suffix.lower() == ".exe" else install / "terminal64.exe"
-    data = str(record.get("dataPath") or record.get("localPath") or "")
-    if not executable.is_file() or not data or not Path(data).is_dir():
-        raise ValueError("mt5_selected_terminal_path_invalid")
-    command = [str(CODEX_RUNNER_PYTHON), str(PROJECT_ROOT / "backend" / "local-runner" / "hq_backend" / "research" / "fx_trend_mt5.py"),
-               "--terminal-path", str(executable), "--data-path", data, "--candidate-id", str(record["candidateId"]), "--terminal-pid", "0"]
-    clock = previous.get("clock") if isinstance(previous.get("clock"), dict) else {}
-    verified = fx_trend.timestamp(clock.get("verifiedAt"))
-    offset = clock.get("offsetSeconds")
-    if previous.get("terminalToken") == context.get("token") and verified and fx_trend.number(offset) and 0 <= (datetime.now(timezone.utc) - verified).total_seconds() <= 8 * 86400:
-        command += ["--clock-offset-seconds", str(int(offset)), "--clock-verified-at", fx_trend.iso(verified)]
-    result = run_safe_command(command, timeout=120, output_limit=8000000, kill_process_tree_on_timeout=True,
-                              cancel_event=DASHBOARD_WORKFLOW_SCHEDULER_STOP, structured_json_output=True)
-    if not result.get("ok"):
-        try:
-            failed = json.loads(result.get("output") or "{}")
-            code = str(failed.get("errorCode") or "")
-        except (ValueError, TypeError):
-            code = ""
-        raise ValueError(code if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) else "fx28_collector_failed")
-    snapshot = json.loads(result.get("output") or "{}")
-    if snapshot.get("schemaVersion") != "fx28-market-snapshot-v1" or (snapshot.get("source") or {}).get("terminalCandidateId") != record["candidateId"]:
-        raise ValueError("fx28_collector_identity_invalid")
-    # Recheck the selected terminal after the bounded read; never publish a
-    # collection made across an operator selection change.
-    current = _global_metatrader_platform_context("mt5", require_all_platforms=False)
-    if not current or current.get("token") != context.get("token"):
-        raise ValueError("fx28_selected_terminal_changed")
-    return snapshot
+    """Obsolete collector retained only as an explicit fail-closed entry point."""
+    raise RequestError(LEGACY_MARKET_RETIRED_REASON, 410)
 
 
 def _fx_trend_news_sources() -> list[dict]:
@@ -22736,12 +22748,10 @@ def _fx_trend_read_model(*, now: datetime | None = None) -> dict:
                     horizon.update(status="stale", bias="INSUFFICIENT_DATA", reasonTh="ข้อมูลราคาล่าสุดเก่าแล้ว รอรอบเก็บแท่งปิดจริง")
     if store.get("lastError") and not updated:
         model["status"] = "error"
-    local = now.astimezone(THAILAND_TIMEZONE)
-    next_daily = local.replace(hour=8, minute=0, second=0, microsecond=0)
-    if next_daily <= local:
-        next_daily += timedelta(days=1)
-    model["schedule"] = {"priceRefreshMinutes": 15, "priceNextRunAt": store.get("nextPriceAt"), "aiTime": "08:00", "timezone": "Asia/Bangkok",
-                         "aiNextRunAt": fx_trend.iso(next_daily), "maximumRunsPerDay": 1, "maximumAttempts": 2, "backendOwned": True}
+    model["schedule"] = {**_legacy_market_retirement(), "enabled": False,
+                         "priceRefreshMinutes": None, "priceNextRunAt": None, "aiTime": None,
+                         "timezone": "Asia/Bangkok", "aiNextRunAt": None,
+                         "maximumRunsPerDay": 0, "maximumAttempts": 0, "backendOwned": True}
     ai = copy.deepcopy(store.get("ai")) if isinstance(store.get("ai"), dict) else {"status": "waiting", "reasonTh": "รอข้อมูลราคาที่ตรวจสอบได้สำหรับรอบรายวัน"}
     mission = find_mission(ai.get("missionId")) if ai.get("missionId") else None
     if mission:
@@ -22769,114 +22779,33 @@ def _fx_trend_read_model(*, now: datetime | None = None) -> dict:
                 for key in ("analysis", "summaryTh", "newsSources", "collectedAt"):
                     ai.pop(key, None)
                 ai.update(status="failed", reasonTh="ตรวจสอบหลักฐานคำอธิบายรายวันไม่ผ่าน")
-    model["ai"] = ai
+    model["archivedAi"] = ai
+    model["ai"] = _legacy_market_retirement()
+    model.update(_legacy_market_retirement(), archiveOnly=True, currentDataAvailable=False)
     model["history"] = copy.deepcopy(store.get("history") or [])[-14:]
     model["lastError"] = store.get("lastError")
     return model
 
 
 def _fx_trend_daily_admission(store: dict, now: datetime) -> dict:
-    local = now.astimezone(THAILAND_TIMEZONE)
-    day = local.date().isoformat()
-    if local.hour < 8:
-        return store
-    key = "dashboard-schedule:fx28TrendSchedule:" + day + ":0800"
-    existing = find_mission_by_idempotency(key)
-    if existing:
-        store["ai"] = {**(store.get("ai") or {}), "status": str(existing.get("status") or "queued"), "missionId": existing["id"], "marketDate": day, "updatedAt": existing.get("updatedAt")}
-        return store
-    previous_ai = store.get("ai") or {}
-    if previous_ai.get("marketDate") == day and previous_ai.get("missionId"):
-        store["ai"] = {**previous_ai, "status": "failed", "reasonTh": "ไม่พบ Mission รายวันที่เคยบันทึกไว้ จึงไม่สร้างงานซ้ำโดยอัตโนมัติ"}
-        return store
-    model = store.get("model") or {}
-    updated = fx_trend.timestamp(model.get("updatedAt"))
-    if model.get("status") not in {"ready", "partial"} or not updated or not -120 <= (now - updated).total_seconds() <= 1800:
-        store["ai"] = {"status": "waiting", "reasonTh": "รอแท่งปิดจริงที่ใหม่และตรวจสอบได้ก่อนสร้างงาน Codex", "updatedAt": fx_trend.iso(now)}
-        return store
-    # Give the trading Council and already admitted work priority. No quota is
-    # reserved until this read-only daily job reaches the normal worker gates.
-    busy = any(mission.get("status") in {"running", "queued"} and mission.get("toolId") in {"codex_cli_task", "codex_web_research"} for mission in load_missions(shared_snapshot=True))
-    if busy:
-        store["ai"] = {"status": "deferred", "reasonTh": "รอสภา AI และงานที่รับไว้ก่อนหน้าเสร็จ จึงใช้โควตารายวัน", "updatedAt": fx_trend.iso(now)}
-        return store
-    gate = _dashboard_workflow_scheduler_gate(refresh_quota=True, settings_key="fx28TrendSchedule")
-    if not gate.get("allowed"):
-        store["ai"] = {"status": "deferred", "reasonTh": gate.get("messageTh") or str(gate.get("reason") or "quota_unavailable"), "updatedAt": fx_trend.iso(now),
-                       "quota": {"status": gate.get("reason"), "remainingPercent": gate.get("remainingPercent"), "reasonTh": gate.get("messageTh"), "nextAttemptAt": gate.get("nextAttemptAt")}}
-        return store
-    raw = read_json(_fx_trend_path("latest-snapshot.json"), {})
-    if fx_trend.digest(raw) != model.get("snapshotDigest"):
-        raise ValueError("fx28_latest_snapshot_changed")
-    if any(error.get("code") == "collection_time_budget_reached" for pair in raw.get("pairs", []) if isinstance(pair, dict) for error in pair.get("errors", []) if isinstance(error, dict)):
-        store["ai"] = {"status": "waiting", "reasonTh": "รอ MT5 โหลดประวัติแท่งให้ครบรอบก่อนใช้โควตา Codex", "updatedAt": fx_trend.iso(now)}
-        return store
-    assignment = fx_trend.make_assignment(model, day, _fx_trend_news_sources())
-    assignment_digest = fx_trend.digest(assignment)
-    for folder, identity, payload in (("snapshots", model["snapshotDigest"], raw), ("assignments", assignment_digest, assignment)):
-        path = _fx_trend_path(folder) / (identity + ".json")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            if fx_trend.digest(read_json(path, {})) != identity:
-                raise ValueError("fx28_immutable_artifact_changed")
-        else:
-            write_json(path, payload)
-    inputs = {key: assignment[key] for key in ("snapshotId", "snapshotDigest", "marketDate")}
-    inputs["assignmentDigest"] = assignment_digest
-    result = run_dashboard_workflow_action("left_signal_cube", {"actionId": fx_trend.ACTION_ID, "form": inputs, "idempotencyKey": key}, trusted_trigger_source="schedule")
-    mission = result.get("mission") or {}
-    store["ai"] = {"status": str(mission.get("status") or "deferred"), "missionId": mission.get("id"), "marketDate": day, "updatedAt": fx_trend.iso(now),
-                   "reasonTh": "งานอธิบายราคาและข่าวรายวัน ใช้โควตาปกติหนึ่งงาน ไม่มีคำสั่งซื้อขาย" if mission.get("id") else str(result.get("message") or result.get("kind") or "dispatch_unavailable"),
-                   "quota": {"status": "allowed", "remainingPercent": gate.get("remainingPercent")}}
-    return store
+    """Archive projection only; no Mission, quota probe, MT5 or file writes."""
+    retired = copy.deepcopy(store) if isinstance(store, dict) else {}
+    retired["archivedAi"] = copy.deepcopy(retired.get("ai") or {})
+    retired["ai"] = _legacy_market_retirement()
+    retired["nextPriceAt"] = None
+    retired["retirement"] = _legacy_market_retirement()
+    return retired
 
 
 def fx_trend_service_tick(*, now: datetime | None = None) -> dict:
-    if not FX_TREND_TICK_LOCK.acquire(blocking=False):
-        return {"status": "busy"}
-    try:
-        now = now or datetime.now(timezone.utc)
-        store = _fx_trend_store()
-        due = fx_trend.timestamp(store.get("nextPriceAt"))
-        if not due or due <= now:
-            try:
-                raw = _fx_trend_collect(store)
-                model = fx_trend.build_read_model(raw, now=now)
-                if model.get("snapshotId") is None:
-                    raise ValueError("fx28_market_snapshot_invalid")
-                _fx_trend_path("latest-snapshot.json").parent.mkdir(parents=True, exist_ok=True)
-                write_json(_fx_trend_path("latest-snapshot.json"), raw)
-                terminal_context = _global_metatrader_platform_context("mt5", require_all_platforms=False)
-                store.update(model=model, clock=(raw.get("source") or {}).get("clock"), lastError=None,
-                             terminalToken=(terminal_context or {}).get("token") if (terminal_context or {}).get("token", {}).get("candidateId") == (raw.get("source") or {}).get("terminalCandidateId") else None)
-                history = list(store.get("history") or [])
-                history.append({"snapshotId": model["snapshotId"], "updatedAt": model["updatedAt"], "dataAsOf": model["dataAsOf"], "evaluatedPairCount": model["summary"]["evaluatedPairCount"], "status": model["status"], "aiMissionId": (store.get("ai") or {}).get("missionId")})
-                store["history"] = history[-14:]
-            except (ValueError, TypeError, KeyError, OSError, DataIntegrityError, json.JSONDecodeError) as error:
-                store["lastError"] = str(error)[:120] if isinstance(error, ValueError) else type(error).__name__
-                store["lastErrorAt"] = fx_trend.iso(now)
-            store["nextPriceAt"] = fx_trend.iso(now + timedelta(minutes=15))
-            _fx_trend_save(store)
-        try:
-            store = _fx_trend_daily_admission(store, now)
-        except (RequestError, ValueError, TypeError, KeyError, OSError, DataIntegrityError) as error:
-            store["ai"] = {"status": "deferred", "reasonTh": "รอบรายวันยังเริ่มไม่ได้: " + type(error).__name__, "updatedAt": fx_trend.iso(now)}
-        _fx_trend_save(store)
-        return {"status": (store.get("model") or {}).get("status", "waiting"), "ai": store.get("ai")}
-    finally:
-        FX_TREND_TICK_LOCK.release()
+    """Compatibility no-op: Sentiment Universe exclusively owns market data."""
+    return {**_legacy_market_retirement(), "ai": _legacy_market_retirement(),
+            "priceCollectionEnabled": False, "missionCreated": False}
 
 
 def _fx_trend_service_loop() -> None:
-    while not DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
-        try:
-            fx_trend_service_tick()
-        except Exception as error:
-            try:
-                append_audit({"type": "fx28.background_error", "errorCode": type(error).__name__, "orderSubmissionAllowed": False})
-            except Exception:
-                pass
-        DASHBOARD_WORKFLOW_SCHEDULER_STOP.wait(30)
+    """Do not keep a dormant duplicate thread alive after retirement."""
+    return None
 
 
 def _load_fx_daily_news_direct_store() -> dict:
@@ -23111,8 +23040,9 @@ def _fx_daily_news_direct_service_read_model(
         limit=14,
     )
     return {
-        "status": status,
-        "refreshInProgress": bool(runtime.get("refreshInProgress")),
+        **_legacy_market_retirement(),
+        "archiveOnly": True, "archivedDataStatus": status,
+        "refreshInProgress": False,
         "lastAttemptAt": source.get("lastAttemptAt") or runtime.get("lastAttemptAt"),
         "lastSuccessAt": source.get("lastSuccessAt") or runtime.get("lastSuccessAt"),
         "nextRunAt": _dashboard_schedule_next_run_at(
@@ -23134,9 +23064,10 @@ def _fx_daily_news_direct_service_read_model(
         "configuredCurrencies": sorted({row["currency"] for row in FX_DAILY_NEWS_DIRECT_SOURCES}),
         "configuredSourceCount": len(FX_DAILY_NEWS_DIRECT_SOURCES),
         "fixedMinimumImpact": "low",
-        "directRefreshAvailable": True,
-        "refreshEndpoint": "/api/props/left_signal_cube/news/refresh",
-        "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule",
+        "directRefreshAvailable": False,
+        "readOnly": True,
+        "refreshEndpoint": None,
+        "scheduleEndpoint": None,
         "missionCreated": False,
         "agentUsed": False,
         "aiUsed": False,
@@ -23152,126 +23083,8 @@ def refresh_deterministic_daily_fx_news(
     fetcher=None,
     now_utc: datetime | None = None,
 ) -> dict:
-    """Refresh today's Bangkok calendar without creating a Mission or event."""
-
-    trigger = str(trigger_source or "backend").strip().lower()
-    if trigger not in {"frontend", "schedule", "backend"}:
-        trigger = "backend"
-    raw_key = str(idempotency_key or "").strip()
-    digest = payload_digest("fx-news-direct-v1", raw_key) if raw_key else None
-    store = _load_fx_daily_news_direct_store()
-    if digest:
-        existing = next(
-            (
-                row for row in reversed(store.get("history") or [])
-                if row.get("idempotencyKeyDigest") == digest
-            ),
-            None,
-        )
-        if isinstance(existing, dict):
-            return {
-                "ok": True,
-                "kind": "news_direct_refresh_replayed",
-                "idempotentReplay": True,
-                "snapshotId": existing.get("snapshotId"),
-                "directNewsService": _fx_daily_news_direct_service_read_model(store=store),
-                "marketNews": _fx_news_read_model(),
-                "fxBias": _fx_bias_read_model(),
-                "mission": None,
-                "missionCreated": False,
-                "agentUsed": False,
-                "aiUsed": False,
-            }
-    if not FX_DAILY_NEWS_DIRECT_REFRESH_LOCK.acquire(blocking=False):
-        raise RequestError("Daily news refresh is already in progress.", 409)
-    try:
-        reference = now_utc or datetime.now(timezone.utc)
-        if reference.tzinfo is None:
-            reference = reference.replace(tzinfo=timezone.utc)
-        else:
-            reference = reference.astimezone(timezone.utc)
-        attempt_at = reference.isoformat().replace("+00:00", "Z")
-        market_date = reference.astimezone(THAILAND_TIMEZONE).date().isoformat()
-        with FX_DAILY_NEWS_DIRECT_LOCK:
-            FX_DAILY_NEWS_DIRECT_RUNTIME.update({
-                "refreshInProgress": True,
-                "lastAttemptAt": attempt_at,
-                "lastErrorCode": None,
-            })
-        collection = fx_news_direct.collect_official_sources(
-            market_date,
-            now_utc=reference,
-            fetcher=fetcher,
-            previous_cache=store.get("sourceCache"),
-        )
-        snapshot = fx_news_direct.build_snapshot(
-            collection,
-            trigger_source=trigger,
-            idempotency_digest=digest,
-        )
-        store = fx_news_direct.append_snapshot(
-            store,
-            snapshot,
-            collection.get("sourceCache") if isinstance(collection.get("sourceCache"), dict) else {},
-        )
-        store = _save_fx_daily_news_direct_store(store)
-        success = snapshot.get("currentDataAvailable") is True
-        with FX_DAILY_NEWS_DIRECT_LOCK:
-            FX_DAILY_NEWS_DIRECT_RUNTIME.update({
-                "lastSuccessAt": snapshot.get("updatedAt") if success else FX_DAILY_NEWS_DIRECT_RUNTIME.get("lastSuccessAt"),
-                "lastErrorCode": None if success else "source_failure",
-            })
-        append_audit({
-            "type": "fx_news.direct_refresh_completed",
-            "triggerSource": trigger,
-            "snapshotId": snapshot.get("snapshotId"),
-            "marketDate": market_date,
-            "sourceStatus": snapshot.get("sourceStatus"),
-            "successfulSourceCount": snapshot.get("successfulSourceCount"),
-            "failedSourceCount": snapshot.get("failedSourceCount"),
-            "eventCount": len(snapshot.get("events") or []),
-            "idempotencyKeyDigest": digest[:16] if digest else None,
-            "missionCreated": False,
-            "agentUsed": False,
-            "aiUsed": False,
-            "externalWrites": False,
-            "metaTraderActions": False,
-        })
-        return {
-            "ok": True,
-            "kind": (
-                "news_direct_refresh"
-                if success
-                else "news_direct_refresh_source_failure"
-            ),
-            "idempotentReplay": False,
-            "snapshotId": snapshot.get("snapshotId"),
-            "directNewsService": _fx_daily_news_direct_service_read_model(store=store),
-            "marketNews": _fx_news_read_model(),
-            "fxBias": _fx_bias_read_model(),
-            "mission": None,
-            "missionCreated": False,
-            "agentUsed": False,
-            "aiUsed": False,
-        }
-    except RequestError:
-        raise
-    except Exception as error:
-        with FX_DAILY_NEWS_DIRECT_LOCK:
-            FX_DAILY_NEWS_DIRECT_RUNTIME["lastErrorCode"] = type(error).__name__.lower()
-        append_audit({
-            "type": "fx_news.direct_refresh_failed",
-            "triggerSource": trigger,
-            "errorCode": type(error).__name__.lower(),
-            "missionCreated": False,
-            "agentUsed": False,
-            "aiUsed": False,
-        })
-        raise
-    finally:
-        with FX_DAILY_NEWS_DIRECT_LOCK:
-            FX_DAILY_NEWS_DIRECT_RUNTIME["refreshInProgress"] = False
-        FX_DAILY_NEWS_DIRECT_REFRESH_LOCK.release()
+    """Reject stale clients before any network, quota, lock or cache access."""
+    raise RequestError(LEGACY_MARKET_RETIRED_REASON, 410)
 
 
 def _empty_fx_news_read_model(
@@ -63989,6 +63802,11 @@ def _workflow_action_contract_gate(prop_id: str, action_id: str, action: dict) -
 
 
 def _workflow_action_availability(prop_id: str, action_id: str, action: dict, bridge: dict) -> dict:
+    if _legacy_market_workflow_retired(prop_id, action_id):
+        return {**_legacy_market_retirement(),
+                "adapterStatus": LEGACY_MARKET_RETIRED_REASON,
+                "adapterImplemented": False, "runtimeReady": False,
+                "realToolAvailable": False}
     contract_gate = _workflow_action_contract_gate(prop_id, action_id, action)
     if not contract_gate.get("allowed"):
         return {
@@ -67000,7 +66818,7 @@ def workflow_dashboard_read_model(
         "right_server_racks": ("source_builder", "โรงงานสร้าง EA และ Indicator", "สร้างและตรวจ Source Code ใน Workspace โดยไม่อ้างว่า Compile หรือทดสอบแล้ว"),
         "right_tool_console": ("experiment_planning", "ห้องทดลอง EA", "เตรียมแผน Backtest, Optimization และ EA Discovery ก่อนต่อ Adapter จริง"),
         "left_audit_crystals": ("radar_website_tool", "Radar Website Tool", "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ พร้อมหลักฐาน ตรวจซ้ำ และประวัติ 7 วัน"),
-        "left_signal_cube": ("fx_news_bias", "วิเคราะห์ข่าวและมุมมอง 28 คู่เงิน", "อ่านข่าวปัจจุบันจากเว็บสาธารณะและสร้าง Bias ระยะสั้น กลาง และยาวครบ 28 คู่ในรอบเดียว โดยไม่สร้างข้อมูลแทนแหล่งข่าว"),
+        "left_signal_cube": ("fx_news_bias", "คลังรายงาน FX28 และข่าวเดิม", "เก็บรายงานเดิมเพื่ออ่านย้อนหลังเท่านั้น ระบบนี้ยุติการเก็บข้อมูลและวิเคราะห์แล้ว ใช้ Sentiment Universe สำหรับข้อมูลปัจจุบัน"),
         "terminal_workstation": ("ea_development", "EA Development Studio", "ตรวจและพัฒนา Source MQL4/MQL5 ใน Workspace แบบ Source-only พร้อมไฟล์ดาวน์โหลดที่ Backend อนุญาต"),
         "right_status_crystals": ("hq_connection_center", "ศูนย์รวมสถานะการเชื่อมต่อ HQ", "ดู Local Bridge, Codex CLI, Adapter และตารางงานของทุกอุปกรณ์จาก Backend ชุดเดียว โดยไม่เปิดเผย Secret, Path, PID หรือข้อมูลบัญชี"),
     }
@@ -67225,27 +67043,30 @@ def workflow_dashboard_read_model(
             max_times=2,
             settings=workflow_settings,
         )
-        model["marketNews"] = _fx_news_read_model(
+        model["marketNews"] = _legacy_market_archive_read_model(_fx_news_read_model(
             combined_news_reports,
             now_local=fx_now_local,
-        )
-        model["fxBias"] = _fx_bias_read_model(
+        ))
+        model["fxBias"] = _legacy_market_archive_read_model(_fx_bias_read_model(
             combined_news_reports,
             now_local=fx_now_local,
-        )
+        ))
         model["fxTrend"] = _fx_trend_read_model()
         model["directNewsService"] = _fx_daily_news_direct_service_read_model(
             settings=workflow_settings,
             store=direct_store,
             now_local=fx_now_local,
         )
-        model["primaryViews"] = ["pair_bias", "today", "history"]
+        model.update(_legacy_market_retirement(), archiveOnly=True)
+        model["primaryViews"] = ["history"]
         model["leftRail"] = {
-            "refreshEndpoint": "/api/props/left_signal_cube/news/refresh",
-            "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule",
+            "retired": True,
+            "readOnly": True,
+            "refreshEndpoint": None,
+            "scheduleEndpoint": None,
             "schedule": model["schedule"],
             "method": {
-                "mode": fx_news_direct.PROVIDER_MODE,
+                "mode": "retired_archive",
                 "labelTh": "วิธีการทำงาน",
                 "oneMissionProducesNewsAndBias": False,
                 "missionCreated": False,
@@ -67260,7 +67081,7 @@ def workflow_dashboard_read_model(
         }
         model["newsTruth"] = {
             "publicWebReadOnly": True,
-            "liveFeedConnected": True,
+            "liveFeedConnected": False,
             "providerMode": fx_news_direct.PROVIDER_MODE,
             "officialStructuredSourcesConfigured": True,
             "authoritativePublicSourcesRequired": True,
@@ -67270,9 +67091,9 @@ def workflow_dashboard_read_model(
             "forexFactoryDirectFeedClaimAllowed": False,
             "forexFactoryScraping": False,
             "fairEconomyScraping": False,
-            "automaticSchedulerImplemented": True,
+            "automaticSchedulerImplemented": False,
             "insufficientDataWhenUnverified": True,
-            "oneScheduledRunProducesNewsAnd28PairBias": True,
+            "oneScheduledRunProducesNewsAnd28PairBias": False,
             "missionCreated": False,
             "agentUsed": False,
             "aiUsed": False,
@@ -67280,7 +67101,7 @@ def workflow_dashboard_read_model(
         }
         model.update({
             "schemaVersion": "dashboard-direct-news-v1",
-            "coordinationMode": "direct_backend_service",
+            "coordinationMode": "retired_archive",
             "agentTransferOnly": False,
             "directDashboardDependency": False,
             "allowedActionIds": [],
@@ -68748,6 +68569,8 @@ def save_dashboard_discovery_schedule(form: dict) -> dict:
 
 
 def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
+    if settings_key in LEGACY_MARKET_SCHEDULE_KEYS:
+        raise RequestError(LEGACY_MARKET_RETIRED_REASON, 410)
     defaults = (
         ["09:00"]
         if settings_key == "indicatorScoutSchedule"
@@ -68792,45 +68615,8 @@ def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
 
 
 def save_direct_daily_fx_news_schedule(payload: object) -> dict:
-    request = payload if isinstance(payload, dict) else {}
-    if set(request) != {"enabled", "times"}:
-        raise RequestError("News schedule accepts exactly enabled and times.", 422)
-    if not isinstance(request.get("enabled"), bool):
-        raise RequestError("News schedule enabled must be boolean.", 422)
-    raw_times = request.get("times")
-    if not isinstance(raw_times, list) or not 1 <= len(raw_times) <= 2:
-        raise RequestError("News schedule requires one or two Bangkok times.", 422)
-    times: list[str] = []
-    for raw in raw_times:
-        candidate = str(raw or "").strip()
-        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", candidate):
-            raise RequestError("News schedule times must use HH:MM.", 422)
-        if candidate in times:
-            raise RequestError("News schedule times must be unique.", 422)
-        times.append(candidate)
-    schedule = _save_dashboard_schedule_preference(
-        "newsBiasSchedule",
-        {"enabled": request["enabled"], "times": sorted(times)},
-    )
-    append_audit({
-        "type": "fx_news.direct_schedule_saved",
-        "enabled": bool(request["enabled"]),
-        "times": sorted(times),
-        "timezone": "Asia/Bangkok",
-        "missionCreated": False,
-        "agentUsed": False,
-        "aiUsed": False,
-    })
-    return {
-        "ok": True,
-        "kind": "news_direct_schedule_saved",
-        "schedule": schedule,
-        "directNewsService": _fx_daily_news_direct_service_read_model(),
-        "mission": None,
-        "missionCreated": False,
-        "agentUsed": False,
-        "aiUsed": False,
-    }
+    """A legacy client may inspect history but cannot reactivate collection."""
+    raise RequestError(LEGACY_MARKET_RETIRED_REASON, 410)
 
 
 def _save_dashboard_agent_preferences(form: dict) -> dict:
@@ -69723,19 +69509,12 @@ def run_dashboard_workflow_action(
 ) -> dict:
     request = payload if isinstance(payload, dict) else {}
     action_id = str(request.get("actionId") or "").strip()
-    if prop_id == "left_signal_cube" and action_id in {
-        "save_news_bias_schedule",
-        "refresh_daily_market_news",
-        "analyze_daily_market_news",
-        "build_fx_pair_bias",
-    }:
-        raise RequestError("direct_service_required", 410)
+    if _legacy_market_workflow_retired(prop_id, action_id):
+        raise RequestError(LEGACY_MARKET_RETIRED_REASON, 410)
     trigger_source = str(trusted_trigger_source or "frontend").strip().lower()
     if trigger_source not in {"frontend", "schedule", "backend"}:
         trigger_source = "backend"
     frontend_intent_only = trigger_source == "frontend"
-    if action_id == fx_trend.ACTION_ID and trigger_source != "schedule":
-        raise RequestError("backend_owned_schedule_only", 403)
     append_audit({
         "type": "dashboard.workflow_action_requested",
         "propId": safe_reference(prop_id),
@@ -70481,6 +70260,8 @@ def _dashboard_workflow_pending_is_current(pending: dict) -> bool:
     """Compare-and-check a captured slot against the latest persisted settings."""
 
     settings_key = str(pending.get("settingsKey") or "")
+    if settings_key in LEGACY_MARKET_SCHEDULE_KEYS:
+        return False
     source = load_dashboard_workflow_settings()
     schedule = source.get(settings_key) if isinstance(source.get(settings_key), dict) else {}
     return bool(
@@ -70502,6 +70283,9 @@ def _dashboard_workflow_reserve_daily_execution(
     """
 
     settings_key = str(pending.get("settingsKey") or "")
+    if settings_key in LEGACY_MARKET_SCHEDULE_KEYS or _legacy_market_workflow_retired(pending.get("propId"), pending.get("actionId")):
+        return {**_legacy_market_retirement(), "allowed": False,
+                "kind": LEGACY_MARKET_RETIRED_REASON, "settingsKey": settings_key}
     job = _dashboard_workflow_schedule_job(settings_key) or {}
     maximum_runs = clamp_int(job.get("maxRunsPerDay"), 0, 0, 24)
     if not maximum_runs:
@@ -70884,6 +70668,9 @@ def _dashboard_workflow_scheduler_gate(
     quota: dict | None = None,
     settings: dict | None = None,
 ) -> dict:
+    if settings_key in LEGACY_MARKET_SCHEDULE_KEYS:
+        return {**_legacy_market_retirement(), "allowed": False,
+                "reason": LEGACY_MARKET_RETIRED_REASON, "settingsKey": settings_key}
     operator_mode_model = (
         operator_mode
         if isinstance(operator_mode, dict)
@@ -71028,7 +70815,9 @@ def dashboard_workflow_scheduler_tick(
         eligible_jobs: list[dict] = []
         skipped_jobs: list[dict] = []
         for pending in pending_jobs:
-            if not _dashboard_workflow_pending_is_current(pending):
+            if (pending.get("settingsKey") in LEGACY_MARKET_SCHEDULE_KEYS
+                    or _legacy_market_workflow_retired(pending.get("propId"), pending.get("actionId"))
+                    or not _dashboard_workflow_pending_is_current(pending)):
                 skipped_jobs.append({
                     "settingsKey": pending["settingsKey"],
                     "slotKey": pending["slotKey"],
@@ -71056,136 +70845,6 @@ def dashboard_workflow_scheduler_tick(
                 "skippedJobs": skipped_jobs,
                 "captured": captured,
             }
-        # Daily news is an independent local service.  Dispatch it before the
-        # Mission gate and never inspect/create an active Mission for it.
-        direct_news_pending = next(
-            (
-                item for item in eligible_jobs
-                if item.get("settingsKey") == "newsBiasSchedule"
-                and item.get("actionId") == "refresh_daily_market_news"
-            ),
-            None,
-        )
-        if direct_news_pending is not None:
-            idempotency_key = f"dashboard-schedule:{direct_news_pending['slotKey']}"
-            try:
-                with DASHBOARD_WORKFLOW_SETTINGS_LOCK:
-                    if not _dashboard_workflow_pending_is_current(direct_news_pending):
-                        return {
-                            "ok": True,
-                            "kind": "schedule_pending_cancelled",
-                            "dispatched": False,
-                            "settingsKey": "newsBiasSchedule",
-                            "slotKey": direct_news_pending["slotKey"],
-                            "skippedJobs": skipped_jobs,
-                            "captured": captured,
-                        }
-                    reservation = _dashboard_workflow_reserve_daily_execution(
-                        direct_news_pending,
-                        local_now,
-                    )
-                if not reservation.get("allowed"):
-                    return {
-                        "ok": True,
-                        "kind": str(reservation.get("kind") or "daily_execution_guarded"),
-                        "dispatched": False,
-                        "settingsKey": "newsBiasSchedule",
-                        "slotKey": direct_news_pending["slotKey"],
-                        "skippedJobs": skipped_jobs,
-                        "captured": captured,
-                    }
-                result = refresh_deterministic_daily_fx_news(
-                    trigger_source="schedule",
-                    idempotency_key=idempotency_key,
-                    now_utc=local_now.astimezone(timezone.utc),
-                )
-                snapshot_id = safe_reference(result.get("snapshotId"))
-                if not result.get("ok") or not snapshot_id:
-                    raise RuntimeError("direct news refresh returned no durable snapshot")
-            except Exception as error:
-                failed_at = utc_now()
-                _dashboard_workflow_update_schedule_state(
-                    "newsBiasSchedule",
-                    {
-                        "lastAttemptAt": failed_at,
-                        "lastAttemptSlotKey": direct_news_pending["slotKey"],
-                        "lastRunAt": failed_at,
-                        "lastMissionId": None,
-                        "lastSnapshotId": None,
-                        "lastSlotKey": direct_news_pending["slotKey"],
-                        "lastRunStatus": "failed",
-                        "lastResultKind": "news_direct_refresh_exception",
-                        "lastError": f"{type(error).__name__}: {redact_text(str(error), 120)}",
-                        "lastErrorAt": failed_at,
-                        "pendingSlotKey": None,
-                        "pendingScheduledAt": None,
-                    },
-                )
-                append_audit({
-                    "type": "fx_news.direct_schedule_failed",
-                    "settingsKey": "newsBiasSchedule",
-                    "slotKey": direct_news_pending["slotKey"],
-                    "errorCode": type(error).__name__.lower(),
-                    "missionCreated": False,
-                    "agentUsed": False,
-                    "aiUsed": False,
-                })
-                return {
-                    "ok": False,
-                    "kind": "news_direct_refresh_exception",
-                    "dispatched": False,
-                    "settingsKey": "newsBiasSchedule",
-                    "slotKey": direct_news_pending["slotKey"],
-                    "skippedJobs": skipped_jobs,
-                    "captured": captured,
-                }
-            completed_at = utc_now()
-            market_news = result.get("marketNews") if isinstance(result.get("marketNews"), dict) else {}
-            _dashboard_workflow_update_schedule_state(
-                "newsBiasSchedule",
-                {
-                    "lastAttemptAt": completed_at,
-                    "lastAttemptSlotKey": direct_news_pending["slotKey"],
-                    "lastRunAt": completed_at,
-                    "lastMissionId": None,
-                    "lastSnapshotId": snapshot_id,
-                    "lastSlotKey": direct_news_pending["slotKey"],
-                    "lastRunStatus": str(market_news.get("dataStatus") or "completed"),
-                    "lastResultKind": redact_text(str(result.get("kind") or "news_direct_refresh"), 80),
-                    "lastIdempotentReplay": bool(result.get("idempotentReplay", False)),
-                    "lastError": None,
-                    "lastErrorAt": None,
-                    "pendingSlotKey": None,
-                    "pendingScheduledAt": None,
-                },
-            )
-            append_audit({
-                "type": "fx_news.direct_schedule_completed",
-                "settingsKey": "newsBiasSchedule",
-                "slotKey": direct_news_pending["slotKey"],
-                "snapshotId": snapshot_id,
-                "idempotencyKeyDigest": payload_digest(idempotency_key)[:16],
-                "idempotentReplay": bool(result.get("idempotentReplay", False)),
-                "missionCreated": False,
-                "agentUsed": False,
-                "aiUsed": False,
-            })
-            return {
-                "ok": True,
-                "kind": str(result.get("kind") or "news_direct_refresh"),
-                "dispatched": True,
-                "settingsKey": "newsBiasSchedule",
-                "slotKey": direct_news_pending["slotKey"],
-                "snapshotId": snapshot_id,
-                "missionId": None,
-                "idempotentReplay": bool(result.get("idempotentReplay", False)),
-                "skippedJobs": skipped_jobs,
-                "captured": captured,
-            }
-        eligible_jobs = [
-            item for item in eligible_jobs
-            if item.get("settingsKey") != "newsBiasSchedule"
-        ]
         runnable_jobs: list[dict] = []
         for pending in eligible_jobs:
             active = _active_dashboard_workflow_schedule_mission(
@@ -71281,7 +70940,9 @@ def dashboard_workflow_scheduler_tick(
                 # user disables or changes one device, other devices remain
                 # eligible in this same tick.
                 with DASHBOARD_WORKFLOW_SETTINGS_LOCK:
-                    if not _dashboard_workflow_pending_is_current(pending):
+                    if (pending.get("settingsKey") in LEGACY_MARKET_SCHEDULE_KEYS
+                            or _legacy_market_workflow_retired(pending.get("propId"), pending.get("actionId"))
+                            or not _dashboard_workflow_pending_is_current(pending)):
                         skipped_jobs.append({
                             "settingsKey": pending["settingsKey"],
                             "slotKey": pending["slotKey"],
@@ -71633,7 +71294,7 @@ def dashboard_workflow_scheduler_loop() -> None:
 
 
 def start_dashboard_workflow_scheduler() -> threading.Thread:
-    global DASHBOARD_WORKFLOW_SCHEDULER_THREAD, FX_TREND_THREAD
+    global DASHBOARD_WORKFLOW_SCHEDULER_THREAD
     with DASHBOARD_WORKFLOW_SCHEDULER_STATE_LOCK:
         if DASHBOARD_WORKFLOW_SCHEDULER_THREAD and DASHBOARD_WORKFLOW_SCHEDULER_THREAD.is_alive():
             return DASHBOARD_WORKFLOW_SCHEDULER_THREAD
@@ -71652,9 +71313,6 @@ def start_dashboard_workflow_scheduler() -> threading.Thread:
             daemon=True,
         )
         DASHBOARD_WORKFLOW_SCHEDULER_THREAD.start()
-        if FX_TREND_THREAD is None or not FX_TREND_THREAD.is_alive():
-            FX_TREND_THREAD = threading.Thread(target=_fx_trend_service_loop, name="metafx-fx28-prices", daemon=True)
-            FX_TREND_THREAD.start()
         return DASHBOARD_WORKFLOW_SCHEDULER_THREAD
 
 
@@ -98598,7 +98256,14 @@ def create_mission(
     raw_prompt = str(payload.get("prompt") or payload.get("detail") or payload.get("title") or "Review mission packet.").strip()
     if contains_potential_secret(raw_prompt):
         raise RequestError("Potential secret detected. Submit intent without credentials.", 422)
+    # Older action IDs may no longer survive the workflow-context validator.
+    # Reject their explicit lineage before normalization can turn them into a
+    # generic Mission without context.
+    if _legacy_market_mission_retired({"workflowContext": workflow_context}):
+        raise RequestError(LEGACY_MARKET_RETIRED_REASON, 410)
     safe_workflow_context = _workflow_context_storage(workflow_context)
+    if _legacy_market_mission_retired({"workflowContext": safe_workflow_context}):
+        raise RequestError(LEGACY_MARKET_RETIRED_REASON, 410)
     trusted_meeting_implementation = (
         _trusted_meeting_implementation_prompt is not None
     )
@@ -100168,6 +99833,8 @@ def _approve_mission_locked(mission_id: str, payload: dict) -> dict:
     mission = find_mission(mission_id)
     if not mission:
         return {"ok": False, "kind": "not_found", "message": "Mission not found.", "_httpStatus": 404}
+    if _legacy_market_mission_retired(mission):
+        return _legacy_market_retired_response()
     if mission.get("status") != "waiting_approval":
         return {"ok": False, "kind": "invalid_mission_state", "message": "Only waiting_approval missions can receive a decision.", "_httpStatus": 409}
     approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
@@ -100425,6 +100092,8 @@ def execute_mission(mission_id: str, payload: dict | None = None) -> dict:
     mission = find_mission(mission_id)
     if not mission:
         return {"ok": False, "kind": "not_found", "message": "Mission not found.", "_httpStatus": 404}
+    if _legacy_market_mission_retired(mission):
+        return _legacy_market_retired_response()
     workflow_context = (
         mission.get("workflowContext")
         if isinstance(mission.get("workflowContext"), dict)
@@ -100998,6 +100667,8 @@ def _manager_explicit_read_only_intent(detail: str) -> bool:
 
 def auto_execution_authorization_error(mission: dict, *, require_operator_mode: bool = True) -> str | None:
     """Validate the immutable, digest-bound marker required for automatic execution."""
+    if _legacy_market_mission_retired(mission):
+        return LEGACY_MARKET_RETIRED_REASON
     execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
     approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
     council_context = mission.get("analysisContext") if isinstance(mission.get("analysisContext"), dict) else {}
@@ -101545,6 +101216,9 @@ def _claim_auto_mission_unlocked(
         for mission in missions:
             if mission.get("id") != mission_id or mission.get("status") != "queued":
                 continue
+            if _legacy_market_mission_retired(mission):
+                invalid = (mission_id, LEGACY_MARKET_RETIRED_REASON)
+                break
             if _ea_factory_mission_dispatch_denied(mission):
                 break  # Keep the exact queued receipt unchanged for cancel/resume repair.
             manager_parent_error = _manager_delegate_parent_state_error(mission, missions)
@@ -104339,6 +104013,9 @@ def _expire_prior_day_radar_mission(mission: object) -> bool:
 
 def process_auto_mission(worker_id: str, mission: dict) -> None:
     if MISSION_WORKER_STOP.is_set():
+        return
+    if _legacy_market_mission_retired(mission):
+        _retire_legacy_market_pending_missions()
         return
     mission_id = str(mission.get("id") or "")
     agent_id = str(mission.get("owner") or "manager")
@@ -114019,6 +113696,7 @@ def main() -> int:
         httpd = BridgeHTTPServer((args.host, args.port), BridgeHandler)
         actual_port = int(httpd.server_port)
         write_bridge_control_file(args.host, actual_port)
+        retired_market_runtime = retire_legacy_market_runtime()
         start_mission_worker()
         resumed_ea_factory_one_click_runs = (
             resume_interrupted_ea_factory_one_click_runs()
@@ -114057,6 +113735,7 @@ def main() -> int:
                 recovered_interactive_meeting_count
             ),
             "reconciledParentMissions": reconciled_parent_count,
+            "legacyMarketRetirement": retired_market_runtime,
             "missionWorker": mission_worker_read_model(),
             "visibleEaFrontOfficeAdapterConfigured": (
                 visible_ea_front_office_adapter_configured

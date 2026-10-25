@@ -9,6 +9,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([bool]$LegacyLauncherPath -xor [bool]$LegacyPythonPath) { throw 'Legacy shortcut migration requires both exact launcher and Python paths.' }
 
 function Test-SentimentSetupRequired($SetupStatus) {
     if ($null -eq $SetupStatus -or -not $SetupStatus.PSObject.Properties['encryptedCredentialsPresent'] -or $SetupStatus.encryptedCredentialsPresent -ne $true) { return $true }
@@ -31,11 +32,15 @@ function Get-SentimentSetupStatus {
 }
 $lifecycle = Join-Path $PSScriptRoot 'sentiment-universe.ps1'
 $register = Join-Path $PSScriptRoot 'register-sentiment-autostart.ps1'
+$registerArgs = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$register,'-Port',[string]$Port)
+if ($LegacyLauncherPath -and $LegacyPythonPath) { $registerArgs += @('-LegacyLauncherPath',$LegacyLauncherPath,'-LegacyPythonPath',$LegacyPythonPath) }
+# Resolve an old launcher's ownership before starting any new collector.
+$preflightArgs = $registerArgs + @('-ValidateMigrationOnly')
+& powershell.exe @preflightArgs
+if ($LASTEXITCODE -ne 0) { throw 'Sentiment legacy launcher migration is unresolved; no new service was started by setup.' }
 & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $lifecycle -Action Ensure -Port $Port
 if ($LASTEXITCODE -ne 0) { throw 'Sentiment service is not ready; HQ was not restarted.' }
-$registerArgs = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$register,'-Port',[string]$Port)
 if ($SkipAutostart) { $registerArgs += '-Remove' }
-if ($LegacyLauncherPath -and $LegacyPythonPath) { $registerArgs += @('-LegacyLauncherPath',$LegacyLauncherPath,'-LegacyPythonPath',$LegacyPythonPath) }
 & powershell.exe @registerArgs
 if ($LASTEXITCODE -ne 0) { throw 'Sentiment is running, but its autostart setup needs repair. Saved credentials were preserved.' }
 Write-Host "One-time account setup: http://127.0.0.1:$Port/connect"

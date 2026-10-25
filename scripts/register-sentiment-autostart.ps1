@@ -2,6 +2,7 @@
 param(
     [ValidateRange(1024,65535)][int]$Port = 4197,
     [switch]$Remove,
+    [switch]$ValidateMigrationOnly,
     [string]$LegacyLauncherPath = '',
     [string]$LegacyPythonPath = ''
 )
@@ -28,27 +29,52 @@ function Test-OwnedTask($Task) {
         return $sid -eq $currentUser.User.Value
     } catch { return $false }
 }
-function Remove-VerifiedLegacyShortcut {
-    if (-not $LegacyLauncherPath -or -not $LegacyPythonPath) { return }
-    $legacyLauncher = [IO.Path]::GetFullPath($LegacyLauncherPath)
-    $legacyPython = [IO.Path]::GetFullPath($LegacyPythonPath)
+function Remove-VerifiedLegacyShortcut([switch]$ValidateOnly, [string]$StartupDirectory = [Environment]::GetFolderPath('Startup')) {
+    if ([bool]$LegacyLauncherPath -xor [bool]$LegacyPythonPath) { throw 'Legacy shortcut migration requires both exact launcher and Python paths.' }
+    # The normal installer knows only its own installed package. External
+    # prototype paths remain an explicit, reviewed migration input.
+    $launcherPath = if ($LegacyLauncherPath) { $LegacyLauncherPath } else { Join-Path $hqRoot 'backend\local-runner\sentiment_universe\scripts\start-live.py' }
+    $pythonPath = if ($LegacyPythonPath) { $LegacyPythonPath } else { Join-Path $hqRoot 'runner\.venv\Scripts\pythonw.exe' }
+    if (-not [IO.Path]::IsPathRooted($launcherPath) -or -not [IO.Path]::IsPathRooted($pythonPath)) { throw 'Legacy shortcut migration requires absolute paths.' }
+    $legacyLauncher = [IO.Path]::GetFullPath($launcherPath)
+    $legacyPython = [IO.Path]::GetFullPath($pythonPath)
     if ([IO.Path]::GetFileName($legacyLauncher) -cne 'start-live.py' -or [IO.Path]::GetFileName($legacyPython) -ine 'pythonw.exe') { throw 'Legacy shortcut migration requires exact start-live.py and pythonw.exe paths.' }
-    $startup = [Environment]::GetFolderPath('Startup')
-    if (-not $startup) { return }
-    $shortcutPath = Join-Path $startup 'Metafxclub Sentiment Universe.lnk'
+    if (-not $StartupDirectory) { return }
+    $shortcutPath = Join-Path $StartupDirectory 'Metafxclub Sentiment Universe.lnk'
     if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) { return }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $targetMatches = [string]::Equals([IO.Path]::GetFullPath([string]$shortcut.TargetPath),$legacyPython,[StringComparison]::OrdinalIgnoreCase)
-    $argsMatch = ([string]$shortcut.Arguments -ceq ('"'+$legacyLauncher+'"')) -or ([string]$shortcut.Arguments -ceq $legacyLauncher)
+    # WScript retains an 8.3 path in Arguments even when GetFullPath expands
+    # the expected launcher. Parse exactly one argument before normalizing it;
+    # never accept extra switches or a matching path prefix.
+    $shortcutArguments = [string]$shortcut.Arguments
+    $argumentPath = $null
+    if ($shortcutArguments -cmatch '^"([^"\r\n]+)"\z') { $argumentPath = $Matches[1] }
+    elseif ($shortcutArguments -cmatch '^[^\s"]+\z') { $argumentPath = $shortcutArguments }
+    $argsMatch = $false
+    # IsPathRooted also accepts C:relative and \relative on .NET Framework;
+    # their meaning depends on the shortcut's working directory/current drive.
+    if ($argumentPath -and $argumentPath -cmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+\\[^\\/]+\\)') {
+        $argsMatch = [string]::Equals([IO.Path]::GetFullPath($argumentPath),$legacyLauncher,[StringComparison]::OrdinalIgnoreCase)
+    }
     if ($targetMatches -and $argsMatch) {
+        if ($ValidateOnly) { return }
         # The exact old shortcut is removed only after the replacement task exists.
         Remove-Item -LiteralPath $shortcutPath -Force
     } else {
-        Write-Warning 'Existing Startup shortcut has a different target and was preserved.'
+        throw 'Existing Sentiment Startup shortcut has an unverified target or arguments and was preserved. Review its exact launcher/Python paths before migration; no successful migration is claimed.'
     }
 }
 
+# Reject an unresolved old launcher before registering another autostart path.
+# Re-read its identity again immediately before removal after registration.
+if ($ValidateMigrationOnly) {
+    Remove-VerifiedLegacyShortcut -ValidateOnly
+    Write-Host 'Sentiment legacy launcher identity check passed; no service or task was changed.'
+    exit 0
+}
+if (-not $Remove) { Remove-VerifiedLegacyShortcut -ValidateOnly }
 $previous = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($previous -and -not (Test-OwnedTask $previous)) { throw 'A different task owns this name; it was not overwritten or removed.' }
 if ($Remove) {

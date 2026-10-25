@@ -71,6 +71,7 @@ class Fx28TrendRunnerTests(unittest.TestCase):
                       result_profile=self.runner.FX_TREND_RESULT_PROFILE, output_limit=20000)
         params.update(overrides)
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(self.runner, "CODEX_RUNS_DIR", Path(folder)), \
+             mock.patch.object(self.runner, "AUTO_WORKSPACE_ROOT", Path(folder) / "workspace"), \
              mock.patch.object(self.runner, "chat_status", return_value={"ok": True, "status": "ready"}), \
              mock.patch.object(self.runner, "run_chat_command", side_effect=fake_chat), \
              mock.patch.object(self.runner, "complete_radar_evidence_open_urls", side_effect=AssertionError("No children")), \
