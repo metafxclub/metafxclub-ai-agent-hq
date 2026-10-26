@@ -403,6 +403,8 @@ DASHBOARD_WORKFLOW_SCHEDULER_MAX_HEARTBEAT_AGE_SECONDS = max(
 MISSION_WORKER_MAX_HEARTBEAT_AGE_SECONDS = 12 * 60
 DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME = {
     "status": "stopped",
+    "phase": "stopped",
+    "phaseStartedAt": None,
     "startedAt": None,
     "lastHeartbeatAt": None,
     "lastSuccessAt": None,
@@ -414,6 +416,7 @@ DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME = {
     "lastError": None,
     "lastErrorAt": None,
 }
+DASHBOARD_WORKFLOW_SCHEDULER_PHASE_STARTED_MONOTONIC: float | None = None
 BRIDGE_PROCESS_GUARD: dict[str, object] | None = None
 BRIDGE_PROCESS_GUARD_STATE = {
     "acquired": False,
@@ -18708,6 +18711,12 @@ def _dashboard_workflow_scheduler_operational_state(
 
     with DASHBOARD_WORKFLOW_SCHEDULER_STATE_LOCK:
         runtime = copy.deepcopy(DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME)
+        phase_started = DASHBOARD_WORKFLOW_SCHEDULER_PHASE_STARTED_MONOTONIC
+        runtime["phaseElapsedSeconds"] = (
+            round(max(0.0, time.monotonic() - phase_started), 1)
+            if phase_started is not None
+            else 0.0
+        )
     alive = _dashboard_workflow_scheduler_alive()
     status = str(runtime.get("status") or "stopped").strip().lower()
     heartbeat = parse_iso(str(runtime.get("lastHeartbeatAt") or ""))
@@ -18748,10 +18757,17 @@ def _dashboard_workflow_scheduler_operational_state(
 
 
 def _dashboard_workflow_scheduler_runtime_update(**values: object) -> None:
+    global DASHBOARD_WORKFLOW_SCHEDULER_PHASE_STARTED_MONOTONIC
     with DASHBOARD_WORKFLOW_SCHEDULER_STATE_LOCK:
         for key in DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME:
             if key in values:
                 DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME[key] = values[key]
+        if "phase" in values:
+            # Diagnostic progress must not refresh heartbeat or imply success.
+            DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME["phaseStartedAt"] = utc_now()
+            DASHBOARD_WORKFLOW_SCHEDULER_PHASE_STARTED_MONOTONIC = (
+                None if values["phase"] == "stopped" else time.monotonic()
+            )
 
 
 def dashboard_workflow_scheduler_read_model() -> dict:
@@ -18768,7 +18784,15 @@ def dashboard_workflow_scheduler_read_model() -> dict:
         "timezone": "Asia/Bangkok",
         "pollSeconds": DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS,
         "readOnlyAutomaticActions": True,
-        "externalWrites": False,
+        # Capability only: delivery still requires the active, authorized Sheet
+        # configuration checked by the existing outbox/backfill implementation.
+        "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+        "externalWriteScopes": (
+            ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else []
+        ),
+        "googleSheetExternalWritesEnabled": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+        "googleSheetExternalWritesRequireActiveConfiguration": True,
+        "otherExternalWrites": False,
         "metaTraderActions": False,
     }
 
@@ -65941,16 +65965,9 @@ def _research_sheet_backfill_recent_reports(
         if allowed_consumer_ids is None
         else {str(value) for value in allowed_consumer_ids if str(value)}
     )
-    deep_research_allowed = allowed is None or "deepResearch" in allowed
-    deep_version_index = None
-    if deep_research_allowed and any(
-        _research_sheet_deep_version_candidate(report)
-        for report in recent_reports
-    ):
-        # Build once from the complete durable history. Reusing this index for
-        # every projected report removes the former O(N*M) backfill path and
-        # keeps version/current selection correct beyond any recent-report cap.
-        deep_version_index = _research_sheet_runtime_deep_version_index()
+    # Compact A-J projection no longer consumes historical version metadata.
+    # Keep the full-history index for explicit history readers, without
+    # rebuilding it on every bounded background backfill.
     for report in recent_reports:
         if not (
             isinstance(report, dict)
@@ -65968,7 +65985,7 @@ def _research_sheet_backfill_recent_reports(
                 report,
                 flush=False,
                 allowed_consumer_ids=allowed_consumer_ids,
-                deep_version_index=deep_version_index,
+                deep_version_index=None,
             )
         except DataIntegrityError:
             # One malformed/oversized historical report must not abort Sheet
@@ -71213,6 +71230,7 @@ def dashboard_workflow_scheduler_loop() -> None:
     next_sheet_backfill_maintenance = 0.0
     _dashboard_workflow_scheduler_runtime_update(
         status="running",
+        phase="starting",
         startedAt=started_at,
         lastHeartbeatAt=started_at,
         lastError=None,
@@ -71246,6 +71264,7 @@ def dashboard_workflow_scheduler_loop() -> None:
         heartbeat_at = utc_now()
         _dashboard_workflow_scheduler_runtime_update(
             status="running",
+            phase="scheduler_tick",
             lastHeartbeatAt=heartbeat_at,
         )
         try:
@@ -71281,6 +71300,7 @@ def dashboard_workflow_scheduler_loop() -> None:
                 time.monotonic() + RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
             )
             try:
+                _dashboard_workflow_scheduler_runtime_update(phase="sheet_flush")
                 _flush_research_sheet_outbox(max_items=20)
             except Exception as error:
                 # Sheet delivery is downstream of the durable local report.
@@ -71302,6 +71322,7 @@ def dashboard_workflow_scheduler_loop() -> None:
                 time.monotonic() + RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
             )
             try:
+                _dashboard_workflow_scheduler_runtime_update(phase="sheet_backfill")
                 _research_sheet_backfill_recent_reports()
             except Exception as error:
                 try:
@@ -71312,10 +71333,12 @@ def dashboard_workflow_scheduler_loop() -> None:
                     })
                 except Exception:
                     pass
+        _dashboard_workflow_scheduler_runtime_update(phase="waiting")
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.wait(DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS)
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.clear()
     _dashboard_workflow_scheduler_runtime_update(
         status="stopped",
+        phase="stopped",
         lastHeartbeatAt=utc_now(),
     )
     try:
@@ -71345,6 +71368,7 @@ def start_dashboard_workflow_scheduler() -> threading.Thread:
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.clear()
         _dashboard_workflow_scheduler_runtime_update(
             status="starting",
+            phase="starting",
             startedAt=utc_now(),
             lastHeartbeatAt=utc_now(),
             lastError=None,
@@ -71369,7 +71393,9 @@ def stop_dashboard_workflow_scheduler() -> None:
     if FX_TREND_THREAD and FX_TREND_THREAD.is_alive():
         FX_TREND_THREAD.join(timeout=5)
     if not thread or not thread.is_alive():
-        _dashboard_workflow_scheduler_runtime_update(status="stopped", lastHeartbeatAt=utc_now())
+        _dashboard_workflow_scheduler_runtime_update(
+            status="stopped", phase="stopped", lastHeartbeatAt=utc_now()
+        )
 
 
 AI_TRADE_COUNCIL_PROP_ID = "left_analytics_console"
@@ -75324,35 +75350,32 @@ def _run_safe_command_with_tree_timeout(
             "processTreeTerminated": False,
             "processStarted": True,
         }
-    except PermissionError as error:
+    except (PermissionError, FileNotFoundError) as error:
+        process_started = process is not None
+        tree_terminated = False
+        if process_started and process.poll() is None:
+            tree_terminated = _terminate_command_process_tree(process, job_holder)
+        failure_code = "permission_denied" if isinstance(error, PermissionError) else "not_found"
+        message = (
+            "Command transport failed after process start."
+            if process_started
+            else "Command could not start because permission was denied."
+            if failure_code == "permission_denied"
+            else "Command executable was not found."
+        )
         return {
             "ok": False,
-            "exitCode": "permission_denied",
+            "exitCode": failure_code,
             "output": _safe_command_failure_output(
-                "permission_denied",
-                "Command could not start because permission was denied.",
+                failure_code,
+                message,
                 output_limit,
                 structured_json_output=structured_json_output,
                 diagnostic=error,
             ),
             "durationMs": round((time.perf_counter() - started) * 1000),
-            "processTreeTerminated": False,
-            "processStarted": False,
-        }
-    except FileNotFoundError as error:
-        return {
-            "ok": False,
-            "exitCode": "not_found",
-            "output": _safe_command_failure_output(
-                "not_found",
-                "Command executable was not found.",
-                output_limit,
-                structured_json_output=structured_json_output,
-                diagnostic=error,
-            ),
-            "durationMs": round((time.perf_counter() - started) * 1000),
-            "processTreeTerminated": False,
-            "processStarted": False,
+            "processTreeTerminated": bool(tree_terminated),
+            "processStarted": process_started,
         }
     except Exception as error:
         tree_terminated = False
@@ -88706,6 +88729,29 @@ def evaluate_ai_trade_council_outcomes(
 
 
 
+def _ai_trade_council_current_admission_survives_tick_gap(state: dict, identity: dict) -> bool:
+    """Continue an already observed/admitted bar, never admit a missed bar."""
+    if (state.get("startupId") != SERVER_STARTED_AT
+        or state.get("streamKey") != identity.get("streamKey")
+        or state.get("lastObservedClosedBarTime") != identity.get("lastClosedBarTime")):
+        return False
+    now = datetime.now(timezone.utc)
+    for record in state.get("coverageRecords") or []:
+        if (record.get("status") != "pending"
+            or record.get("triggerPolicy") != "new_closed_bar_only_no_backfill"
+            or record.get("triggerStartupId") != SERVER_STARTED_AT
+            or record.get("executionPolicy") != "current_exact_snapshot"
+            or not _ai_trade_council_pending_matches_current_closed_bar(record, identity)):
+            continue
+        admitted = parse_iso(record.get("quotaAdmittedAt"))
+        detected = parse_iso(record.get("detectedAt"))
+        deadline = _ai_trade_council_automatic_deadline(record)
+        if (admitted is not None and detected is not None and deadline is not None
+            and detected <= admitted <= now < deadline):
+            return True
+    return False
+
+
 def ai_trade_council_automation_tick() -> dict:
     """Admit only a newly observed closed bar; skipped triggers never catch up."""
     if not AI_TRADE_COUNCIL_AUTOMATION_RUN_LOCK.acquire(blocking=False):
@@ -88811,7 +88857,10 @@ def ai_trade_council_automation_tick() -> dict:
             baseline_reason = "bar_time_regression_baseline"
         elif state.get("lastSchedulerTickAt") and (
             datetime.now(timezone.utc) - parse_iso(state["lastSchedulerTickAt"]).astimezone(timezone.utc)
-        ).total_seconds() > 60:
+        ).total_seconds() > 60 and not _ai_trade_council_current_admission_survives_tick_gap(state, identity):
+            # A slow preceding tick can spend >60s inside quota/capture before
+            # saving a valid admission. Keep only that exact current bar on its
+            # original deadline; an unobserved new bar still baselines here.
             baseline_reason = "new_bar_only_missed_trigger"
 
         if baseline_reason:
@@ -104532,6 +104581,8 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
         return
     corrective_open_hourly_stamps: list[float] = []
     active_registered = False
+    runner = None
+    claimed_lease_id = None
     try:
         if MISSION_WORKER_STOP.is_set():
             return
@@ -104540,6 +104591,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             return
         execution = claimed.get("execution") if isinstance(claimed.get("execution"), dict) else {}
         lease_id = str(execution.get("leaseId") or "")
+        claimed_lease_id = lease_id
         if MISSION_WORKER_STOP.is_set():
             finish_auto_mission(
                 mission_id, lease_id,
@@ -105325,14 +105377,22 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             }
         finish_auto_mission(mission_id, lease_id, runner, result)
     except Exception:
-        current = find_mission(mission_id)
+        current = find_mission(mission_id) if claimed_lease_id else None
         execution = current.get("execution") if isinstance((current or {}).get("execution"), dict) else {}
-        lease_id = str(execution.get("leaseId") or "")
-        if lease_id:
+        if claimed_lease_id and execution.get("leaseId") == claimed_lease_id:
+            # A persistence/validation exception can occur after the guarded
+            # runner returned. Preserve its durable spawn evidence when the
+            # fallback records failure; never relabel an actual run as unstarted
+            # or finalize a newer worker's lease after this invocation lost it.
+            runner_evidence = runner if isinstance(runner, dict) else {}
             finish_auto_mission(
                 mission_id,
-                lease_id,
-                {"processStarted": False, "exitCode": "internal_worker_error"},
+                claimed_lease_id,
+                {
+                    "processStarted": bool(execution.get("processStarted") or runner_evidence.get("processStarted")),
+                    "processTreeTerminated": bool(execution.get("processTreeTerminated") or runner_evidence.get("processTreeTerminated")),
+                    "exitCode": "internal_worker_error",
+                },
                 {
                     "ok": False,
                     "status": "internal_worker_error",

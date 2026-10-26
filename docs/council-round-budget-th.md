@@ -41,6 +41,23 @@ Worker ตรวจสิทธิ์เริ่มงานทั้งก่�
 
 หลัง Bridge เริ่มใหม่ งานอัตโนมัติที่ผูกกับ startup เดิมไม่ถูกนำไปรันเป็นรอบย้อนหลัง เช่นเดียวกับงานจากแท่งก่อนหน้าเมื่อแท่งล่าสุดเปลี่ยนแล้ว รอบที่ role ใดล้มเหลวไม่เริ่ม role นั้นซ้ำบนแท่งเดิมโดยอัตโนมัติ
 
+หาก tick ก่อนหน้าใช้เวลาเตรียมข้อมูลนานกว่า 60 วินาที แต่รับแท่งนั้นและบันทึก admission ที่ถูกต้องไว้แล้ว ระบบจะดำเนินรอบเดิมต่อได้เฉพาะเมื่อยังเป็นแท่งล่าสุด, stream และ startup เดิม และยังไม่พ้น deadline ที่บันทึกไว้ การผ่อนเงื่อนไขนี้ไม่รับแท่งที่ไม่เคยตรวจพบ ไม่เพิ่มเวลา และไม่เปิดทางให้รอบที่ขาดโควตากลับมาวิเคราะห์ย้อนหลัง
+
+## เมื่อบันทึกผลหรือสื่อสารกับ Process ล้มเหลว
+
+- หาก Process เริ่มไปแล้ว จะเก็บหลักฐานว่าเริ่มแล้ว แม้การบันทึกผลสำเร็จล้มเหลว; ไม่เปลี่ยนประวัติให้ดูเหมือนยังไม่เคยรัน
+- ข้อผิดพลาดด้านสิทธิ์หรือไฟล์ระหว่างรับผลหลังเปิด Process จะหยุดเฉพาะ Process ของงานนั้น และรายงานตามผลการหยุดจริง ข้อผิดพลาดก่อนเปิด Process ยังคงระบุว่าไม่ได้เริ่ม
+- Exception handler จบงานได้เฉพาะ lease ที่ Worker ตัวนั้น claim สำเร็จและยังตรงกับข้อมูลปัจจุบัน; Worker เก่าหรือ Worker ที่ claim ไม่สำเร็จไม่สามารถปิดงานของ Worker ใหม่
+- หากบันทึก claim แล้วแต่ขั้นตอน audit ล้มเหลวจน Worker ไม่ได้รับ claim กลับมา จะไม่เริ่ม AI หรือหักสิทธิ์รันเพิ่ม งานที่ค้างอยู่ยังถูกจำกัดด้วย deadline และ Watchdog เดิม ไม่ลองซ้ำอัตโนมัติ
+
+## อ่านสถานะ Scheduler ที่ใช้เวลานาน
+
+สถานะ Dashboard scheduler เพิ่ม `phase`, `phaseStartedAt` และ `phaseElapsedSeconds` เพื่อแยกช่วง `scheduler_tick`, `sheet_flush`, `sheet_backfill` และ `waiting` เวลาที่ใช้ในแต่ละช่วงนับด้วย monotonic clock เพื่อไม่ให้เวลาระบบที่ปรับย้อนทำให้ค่าผิด การเปลี่ยน phase ไม่ต่ออายุ heartbeat และไม่เปลี่ยนเกณฑ์เตือน stale หรือรอบส่งข้อมูล
+
+ค่า `externalWrites` ของ Scheduler บอกความสามารถตาม flag ของ Sheet sync เช่นเดียวกับ startup audit ไม่ใช่หลักฐานว่ามีการส่งข้อมูลในรอบนั้น การส่งจริงยังต้องผ่าน active configuration และเงื่อนไขอนุญาตเดิม สภา AI ยังคงใช้ thread เดิมที่แยกจาก Dashboard scheduler; heartbeat ของ Dashboard ที่ช้าเพียงอย่างเดียวจึงไม่ยืนยันว่า Council หยุดตาม
+
+รอบ backfill ของ Sheet ไม่สร้างดัชนี Deep Research จากประวัติทั้งหมดอีก เพราะรูปแบบแถว A–J ปัจจุบันไม่ใช้ดัชนีนั้นแล้ว ยังคงอ่านรายงานล่าสุดไม่เกิน 240 รายการตามเดิม และคงลำดับ, consumer scope, outbox, quarantine และการกันส่งซ้ำไว้ ชุดทดสอบประวัติจำลอง 260 รายการตรวจว่าลดการอ่านไฟล์จาก 500 ครั้งเหลือ 240 ครั้งและข้อมูลแถวเหมือนเดิม ไม่ใช้ผลนี้ยืนยันสาเหตุของ heartbeat ช้าในเครื่องจริง
+
 ## ส่วนที่ยังเหมือนเดิม
 
 - รอบที่ผู้ใช้สั่งเองยังใช้สัญญาเวลาเดิม **240 วินาที**; แพตช์นี้ไม่ได้เพิ่มเวลารอบ manual
@@ -67,6 +84,8 @@ Worker ตรวจสิทธิ์เริ่มงานทั้งก่�
 
 ชุด `tests/test_council_total_round_deadline.py` ตรวจ deadline ที่จุดเผยแพร่คำสั่งสุดท้ายทั้ง MT4 และ MT5 รวมกรณีเวลาตรงขอบหมดอายุ ชุด Gateway เดิมตรวจ idempotency และ Guard ต่อไป
 
+ชุด `tests/test_council_admitted_scheduler_gap.py` ตรวจ tick ที่เตรียมงานช้าและเงื่อนไขห้าม backfill ส่วน `tests/test_council_worker_negative_paths.py` ตรวจการบันทึกผลล้มเหลว, ข้อผิดพลาดก่อน/หลังเปิด Process และ Worker เก่าที่ถือ lease คนละชุดกับงานปัจจุบัน ทั้งหมดใช้ข้อมูลและ Process จำลอง
+
 รันทดสอบแบบแยก:
 
 ```powershell
@@ -74,6 +93,9 @@ python -m unittest discover -s tests -p test_council_parallel_round_budget.py -v
 python -m unittest discover -s tests -p test_council_total_round_deadline.py -v
 python -m unittest discover -s tests -p test_council_worker_lease_budget.py -v
 python -m unittest discover -s tests -p test_council_dispatch_reservations.py -v
+python -m unittest discover -s tests -p test_council_admitted_scheduler_gap.py -v
+python -m unittest discover -s tests -p test_council_worker_negative_paths.py -v
+python -m unittest discover -s tests -p test_scheduler_phase_observability.py -v
 ```
 
 ไฟล์ทดสอบใช้ `TemporaryDirectory` สำหรับ runtime, Workspace และ Common Files ทั้งหมด ไม่มีข้อมูลบัญชีจริงหรือคำสั่ง Broker จริงอยู่ใน fixture ผลผ่านของชุดนี้รับรองพฤติกรรมตามกรณีที่ทดสอบ ไม่ใช่หลักฐานว่าบัญชี Broker ทุกแห่งส่งออเดอร์จริงได้โดยไม่มีเงื่อนไขเพิ่มเติม
