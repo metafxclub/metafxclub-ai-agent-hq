@@ -25,7 +25,7 @@ import time
 import unicodedata
 import zipfile
 import zlib
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
 from decimal import (
     Decimal,
@@ -336,6 +336,7 @@ MEMORY_INDEX_LOCK = threading.RLock()
 AUDIT_LOCK = threading.Lock()
 MISSIONS_LOCK = threading.RLock()
 MISSIONS_READ_CACHE_LOCK = MISSIONS_LOCK
+COUNCIL_MISSION_BATCH = threading.local()
 REPORTS_LOCK = threading.RLock()
 RADAR_BATCH_REPORT_COMMIT_LOCK = threading.RLock()
 RADAR_IMAGE_ADAPTER_LOCK = threading.RLock()
@@ -602,6 +603,7 @@ AI_TRADE_COUNCIL_HIGHER_TIMEFRAME = {
 }
 AI_TRADE_COUNCIL_AUTOMATION_POLL_SECONDS = 5
 AI_TRADE_COUNCIL_AUTOMATION_SETTLE_SECONDS = 10
+AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS = 300
 AI_TRADE_COUNCIL_QUEUE_ASSEMBLY_GRACE_SECONDS = 30
 AI_TRADE_COUNCIL_AUTOMATION_MAX_DAILY_ROUNDS = 24
 AI_TRADE_COUNCIL_AUTOMATION_DAILY_LIMIT_MODES = ("unlimited", "limited")
@@ -16568,6 +16570,46 @@ def _mission_backend_auto_safe_marker_is_coherent(mission: dict) -> bool:
     return secrets.compare_digest(expected_digest, mission_payload_digest(mission))
 
 
+def _mission_council_round_timing_read_model(mission: dict) -> dict:
+    """Expose recorded Council times only, never its private analysis packet."""
+    context = mission.get("analysisContext") if isinstance(mission.get("analysisContext"), dict) else {}
+    delegation = mission.get("delegation") if isinstance(mission.get("delegation"), dict) else {}
+    if not (
+        context.get("kind") in {"ai_trade_council_parent", "ai_trade_council_vote"}
+        or delegation.get("mode") == "ai_trade_council_read_only"
+        or mission.get("reportType") in {"ai_trade_council_report", "ai_trade_council_vote"}
+    ):
+        return {}
+    automation = context.get("automation") if isinstance(context.get("automation"), dict) else {}
+
+    def timestamp(*values: object) -> str | None:
+        for value in values:
+            parsed = parse_iso(value) if isinstance(value, str) else None
+            if parsed is not None:
+                return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return None
+
+    started_at = timestamp(context.get("roundStartedAt"), delegation.get("roundStartedAt"))
+    deadline_at = timestamp(context.get("roundDeadlineAt"), delegation.get("roundDeadlineAt"))
+    timing_source = "recorded_round" if started_at or deadline_at else None
+    if started_at is None and deadline_at is None:
+        # Older admission windows are a fallback, not a replacement for a
+        # recorded round deadline (which may legitimately differ from them).
+        started_at = timestamp(automation.get("quotaAdmittedAt"))
+        deadline_at = timestamp(automation.get("triggerExpiresAt"))
+        if started_at or deadline_at:
+            timing_source = "legacy_admission_window"
+    trigger_mode = delegation.get("triggerMode")
+    if trigger_mode not in {"auto_on_new_closed_bar", "manual"}:
+        trigger_mode = "auto_on_new_closed_bar" if automation else "manual"
+    return {
+        "roundStartedAt": started_at,
+        "roundDeadlineAt": deadline_at,
+        "roundTimingSource": timing_source,
+        "triggerMode": trigger_mode,
+    }
+
+
 def mission_read_model_item(mission: dict) -> dict:
     """Return a frontend-safe mission card without internal approval digests or paths."""
     approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
@@ -16691,6 +16733,7 @@ def mission_read_model_item(mission: dict) -> dict:
             and str(approval.get("state") or "") == "approved"
         ),
         "delegation": {
+            **_mission_council_round_timing_read_model(mission),
             "state": redact_text(str(delegation.get("state") or ""), 40),
             "mode": redact_text(str(delegation.get("mode") or ""), 120),
             "snapshotId": safe_reference(delegation.get("snapshotId")),
@@ -75077,6 +75120,7 @@ def _run_safe_command_with_tree_timeout(
     cancel_event: threading.Event | None = None,
     tracking_key: str | None = None,
     factory_start_lease: str | None = None,
+    council_start_lease: str | None = None,
     structured_json_output: bool = False,
 ) -> dict:
     global MISSION_WORKER_PROCESS, MISSION_WORKER_JOB_HOLDER
@@ -75100,7 +75144,7 @@ def _run_safe_command_with_tree_timeout(
     cancellation = {"requested": False, "treeTerminated": False}
     job_holder = None
     try:
-        with MISSIONS_LOCK if factory_start_lease is not None else nullcontext():
+        with MISSIONS_LOCK if factory_start_lease is not None or council_start_lease is not None else nullcontext():
             if factory_start_lease is not None:
                 current = find_mission(tracking_key)
                 current_execution = current.get("execution") if isinstance(current, dict) and isinstance(current.get("execution"), dict) else {}
@@ -75116,6 +75160,29 @@ def _run_safe_command_with_tree_timeout(
                             structured_json_output=structured_json_output,
                         ),
                     }
+            if council_start_lease is not None:
+                current = find_mission(tracking_key)
+                current_execution = (current or {}).get("execution") or {}
+                timeout_at = parse_iso(current_execution.get("timeoutAt"))
+                now = datetime.now(timezone.utc)
+                if (cancel_event is not None and cancel_event.is_set()
+                    or not isinstance(current, dict) or not _council_automatic_vote(current)
+                    or current.get("status") != "running"
+                    or current_execution.get("dispatchState") != "running"
+                    or current_execution.get("leaseId") != council_start_lease
+                    or current_execution.get("leasePhase") != "executing"
+                    or current_execution.get("processStarted") is True
+                    or timeout_at is None or now >= timeout_at):
+                    return {
+                        "ok": False, "exitCode": "cancelled", "processStarted": False,
+                        "processTreeTerminated": True, "durationMs": 0,
+                        "output": _safe_command_failure_output(
+                            "cancelled", "Council Mission lease expired or was cancelled before process start.",
+                            output_limit, structured_json_output=structured_json_output,
+                        ),
+                    }
+                # Preparation/store latency must not extend the process lease.
+                timeout = min(timeout, max(0.001, (timeout_at - now).total_seconds()))
             process = subprocess.Popen(
                 command,
                 cwd=str(PROJECT_ROOT),
@@ -75138,10 +75205,54 @@ def _run_safe_command_with_tree_timeout(
                         MISSION_WORKER_PROCESSES[tracking_key] = {
                             "process": process,
                             "jobHolder": job_holder,
+                            **({"leaseId": council_start_lease} if council_start_lease is not None else {}),
                         }
             if os.name == "nt" and (not job_holder or not _resume_windows_process(process)):
                 _terminate_command_process_tree(process, job_holder)
                 raise RuntimeError("Unable to start command inside the guarded Windows process job.")
+            if council_start_lease is not None:
+                try:
+                    missions = load_missions()
+                    current = next(row for row in missions if row.get("id") == tracking_key)
+                    current_execution = current.get("execution") or {}
+                    if (current.get("status") != "running"
+                        or current_execution.get("leaseId") != council_start_lease
+                        or current_execution.get("leasePhase") != "executing"
+                        or current_execution.get("processStarted") is True):
+                        raise RuntimeError("Council launch lease changed before start receipt.")
+                    # Persist actual spawn once while the launch lock is held;
+                    # a second invocation using this same lease cannot spawn.
+                    current_execution["processStarted"] = True
+                    current_execution["processStartedAt"] = utc_now()
+                    current["execution"] = current_execution
+                    save_missions(missions)
+                except Exception:
+                    tree_terminated = _terminate_command_process_tree(process, job_holder)
+                    return {
+                        "ok": False, "exitCode": "council_process_start_receipt_failed",
+                        "processStarted": True, "processTreeTerminated": bool(tree_terminated),
+                        "durationMs": round((time.perf_counter() - started) * 1000),
+                        "output": _safe_command_failure_output(
+                            "council_process_start_receipt_failed",
+                            "Council process was stopped because its durable start receipt could not be stored.",
+                            output_limit, structured_json_output=structured_json_output,
+                        ),
+                    }
+                # Saving the receipt is part of the existing hard lease, not
+                # additional runtime. Stop if storage itself used the remainder.
+                remaining = (timeout_at - datetime.now(timezone.utc)).total_seconds()
+                if remaining <= 0:
+                    tree_terminated = _terminate_command_process_tree(process, job_holder)
+                    return {
+                        "ok": False, "exitCode": "timeout", "processStarted": True,
+                        "processTreeTerminated": bool(tree_terminated),
+                        "durationMs": round((time.perf_counter() - started) * 1000),
+                        "output": _safe_command_failure_output(
+                            "timeout", "Council hard execution deadline passed during start receipt storage.",
+                            output_limit, structured_json_output=structured_json_output,
+                        ),
+                    }
+                timeout = min(timeout, remaining)
         if cancel_event is not None:
             def watch_for_cancellation() -> None:
                 if cancel_event.wait():
@@ -75287,6 +75398,7 @@ def run_safe_command(
     cancel_event: threading.Event | None = None,
     tracking_key: str | None = None,
     factory_start_lease: str | None = None,
+    council_start_lease: str | None = None,
     structured_json_output: bool = False,
 ) -> dict:
     if kill_process_tree_on_timeout:
@@ -75298,6 +75410,7 @@ def run_safe_command(
             cancel_event=cancel_event,
             tracking_key=tracking_key,
             **({"factory_start_lease": factory_start_lease} if factory_start_lease is not None else {}),
+            **({"council_start_lease": council_start_lease} if council_start_lease is not None else {}),
             structured_json_output=structured_json_output,
         )
     started = time.perf_counter()
@@ -78524,6 +78637,20 @@ def _mt4_trade_gateway_publish_for_selection(
         gateway = _mt4_trade_gateway_instance(
             mt5_account_binding_id=mt5_account_binding_id
         )
+        # Target/quote checks and acquiring this lock may consume the remaining
+        # round budget. Recheck at publication admission, without altering an
+        # already-issued command's TTL, ACK lifecycle or EA-owned risk policy.
+        publication_deadline = parse_iso(str(analysis_context.get("roundDeadlineAt") or ""))
+        if (
+            publication_deadline is None
+            or datetime.now(timezone.utc) >= publication_deadline.astimezone(timezone.utc)
+        ):
+            return {
+                "ok": False,
+                "reasonCode": "decision_dispatch_window_expired",
+                "published": None,
+                "command": None,
+            }
         published = gateway.queue_trade_intent(intent)
         command_id = safe_reference(
             (published.get("command") or {}).get("commandId")
@@ -84445,6 +84572,26 @@ def _ai_trade_council_canonical_instrument(symbol: object) -> dict:
     }
 
 
+def _ai_trade_council_automatic_deadline(automation: object) -> datetime | None:
+    """Read the immutable admission deadline without extending older rounds.
+
+    New automatic rounds have one total budget from new-bar detection through
+    decision/publication admission. Existing shorter admissions stay shorter;
+    no clock, retry or reconstruction may grant a fresh budget to stored work.
+    """
+    if not isinstance(automation, dict):
+        return None
+    admitted_at = parse_iso(str(automation.get("quotaAdmittedAt") or ""))
+    expires_at = parse_iso(str(automation.get("triggerExpiresAt") or ""))
+    if admitted_at is None or expires_at is None:
+        return None
+    admitted_at = admitted_at.astimezone(timezone.utc)
+    expires_at = expires_at.astimezone(timezone.utc)
+    if not 0 < (expires_at - admitted_at).total_seconds() <= AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS:
+        return None
+    return expires_at
+
+
 def _ai_trade_council_expected_valid_until(
     closed_bar_time: int,
     timeframe: str,
@@ -84679,6 +84826,9 @@ def load_ai_trade_council_prompt_contract() -> dict:
         != AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN
         or quality_gate.get("decisionExpirySource")
         != AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE
+        or type(quality_gate.get("automaticTotalBudgetSeconds")) is not int
+        or quality_gate.get("automaticTotalBudgetSeconds")
+        != AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS
         or not isinstance(protective_fallback, dict)
         or protective_fallback.get("enabled") is not True
         or protective_fallback.get("trigger")
@@ -84804,6 +84954,7 @@ def load_ai_trade_council_prompt_contract() -> dict:
         "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
         "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
         "roundDeadlineSeconds": clamp_int(quality_gate.get("roundDeadlineSeconds"), 240, 60, 290),
+        "automaticTotalBudgetSeconds": AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS,
         "maximumSnapshotSpreadPoints": clamp_int(quality_gate.get("maximumSnapshotSpreadPoints"), 1000, 1, 10_000_000),
         "maximumNewsAgeSeconds": clamp_int(quality_gate.get("maximumNewsAgeSeconds"), 86400, 300, 604800),
         "maximumFutureEvidenceSkewSeconds": clamp_int(quality_gate.get("maximumFutureEvidenceSkewSeconds"), 300, 0, 3600),
@@ -87770,6 +87921,17 @@ def _run_ai_trade_council_analysis_unlocked(
     round_deadline_at = round_started_at + timedelta(
         seconds=int(quality_policy["roundDeadlineSeconds"])
     )
+    if automation_packet:
+        automatic_deadline = _ai_trade_council_automatic_deadline(automation_packet)
+        admitted_at = parse_iso(str(automation_packet.get("quotaAdmittedAt") or ""))
+        if automatic_deadline is None or admitted_at is None or admitted_at > round_started_at:
+            raise RequestError("AI Trade Council automatic admission is invalid.", 409)
+        if round_started_at >= automatic_deadline:
+            raise RequestError("AI Trade Council automatic round deadline expired.", 409)
+        # Preparation, all three workers and synthesis share the original
+        # admission budget. Never restart this clock when missions are created.
+        round_started_at = admitted_at.astimezone(timezone.utc)
+        round_deadline_at = automatic_deadline
     council_quality_gate.update({
         "confidenceFloorDefault": quality_policy["confidenceFloorDefault"],
         "confidenceFloorByRole": quality_policy["confidenceFloorByRole"],
@@ -88044,215 +88206,217 @@ def _run_ai_trade_council_analysis_unlocked(
     if not allowed:
         raise RequestError(f"กรุณารอ {retry_after} วินาทีก่อนเริ่มรอบวิเคราะห์ใหม่", 429)
 
-    parent = existing_parent or create_mission({
-        "title": f"สภา AI Trade วิเคราะห์ {chart.get('symbol')} {chart.get('timeframe')}",
-        "prompt": (
-            f"Manager ประสานผลการวิเคราะห์แบบอ่านอย่างเดียวจาก Agent 3 ตัว "
-            f"โดยใช้ Snapshot {snapshot_id} เดียวกัน"
-        ),
-        "agentId": "manager",
-        "requester": "system_scheduler" if automation_packet else "human",
-        "toolId": "manager_mission",
-        "targetId": prop_id,
-        "risk": "low",
-        "reportType": "ai_trade_council_report",
-        "idempotencyKey": parent_idempotency,
-        "analysisContext": {
-            "kind": "ai_trade_council_parent",
+    with _council_mission_store_batch():
+        parent = existing_parent or create_mission({
+            "title": f"สภา AI Trade วิเคราะห์ {chart.get('symbol')} {chart.get('timeframe')}",
+            "prompt": (
+                f"Manager ประสานผลการวิเคราะห์แบบอ่านอย่างเดียวจาก Agent 3 ตัว "
+                f"โดยใช้ Snapshot {snapshot_id} เดียวกัน"
+            ),
+            "agentId": "manager",
+            "requester": "system_scheduler" if automation_packet else "human",
+            "toolId": "manager_mission",
+            "targetId": prop_id,
+            "risk": "low",
+            "reportType": "ai_trade_council_report",
+            "idempotencyKey": parent_idempotency,
+            "analysisContext": {
+                "kind": "ai_trade_council_parent",
+                "snapshotId": snapshot_id,
+                "snapshotArtifact": snapshot_artifact,
+                "snapshotArtifactDigest": snapshot_artifact_digest,
+                "propId": prop_id,
+                "referencePrice": reference_price,
+                "analysisQuote": analysis_quote_context,
+                "snapshotObservedAt": chart.get("observedAt"),
+                "horizonBars": horizon_bars,
+                "validUntilBarTime": valid_until_bar_time,
+                "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
+                "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
+                "roundStartedAt": council_quality_gate["roundStartedAt"],
+                "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
+                "qualityGate": council_quality_gate,
+                "requiredVotes": required_votes,
+                **analysis_context_metadata,
+                "readOnly": True,
+                "contractDigest": contract_digest,
+                **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
+                **({"automation": automation_packet} if automation_packet else {}),
+            },
+        }, status="running", allow_analysis_context=True)
+
+        subtasks = []
+        try:
+            for row, prompt in prepared_rows:
+                child_key = (
+                    f"ai-council-auto-{automation_packet['streamKey'][:18]}-"
+                    f"{automation_packet['closedBarTime']}-{contract_digest}-v{required_votes}-{row['roleId']}"
+                    if automation_packet
+                    else (
+                        f"ai-council-{snapshot_id[:24]}-{contract_digest}-"
+                        f"v{required_votes}{round_retry_suffix}-{row['roleId']}"
+                    )
+                )
+                existing_child = find_mission_by_idempotency(child_key)
+                child = existing_child or create_mission({
+                    "title": row["titleTh"],
+                    "prompt": prompt,
+                    "agentId": row["agentId"],
+                    "requester": "manager",
+                    "toolId": row["toolId"],
+                    "targetId": prop_id,
+                    "risk": "medium",
+                    "reportType": "ai_trade_council_vote",
+                    "parentMissionId": parent["id"],
+                    "idempotencyKey": child_key,
+                    "modelTier": row["modelTier"],
+                    "timeout": row["timeoutSeconds"],
+                    "budget": {
+                        "timeoutSeconds": row["timeoutSeconds"],
+                        "outputLimitChars": row["outputLimitChars"],
+                        "maxRuns": AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY["maximumRuns"],
+                    },
+                    "analysisContext": {
+                        "kind": "ai_trade_council_vote",
+                        "providerRetryPolicy": copy.deepcopy(AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY),
+                        "snapshotId": snapshot_id,
+                        "snapshotArtifact": snapshot_artifact,
+                        "snapshotArtifactDigest": snapshot_artifact_digest,
+                        "agentId": row["agentId"],
+                        "roleId": row["roleId"],
+                        "referencePrice": reference_price,
+                        "analysisQuote": analysis_quote_context,
+                        "horizonBars": horizon_bars,
+                        "validUntilBarTime": valid_until_bar_time,
+                        "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
+                        "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
+                        "volatilityState": (council_quality_gate.get("technical") or {}).get("volatilityState"),
+                        "qualityPolicy": quality_policy,
+                        "roundStartedAt": council_quality_gate["roundStartedAt"],
+                        "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
+                        "snapshotObservedAt": chart.get("observedAt"),
+                        "propId": prop_id,
+                        **analysis_context_metadata,
+                        "readOnly": True,
+                        "contractDigest": contract_digest,
+                        **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
+                        **({"automation": automation_packet} if automation_packet else {}),
+                    },
+                }, status="queued", allow_model_override=True, allow_budget_override=True, allow_analysis_context=True)
+                if (
+                    child.get("parentMissionId") != parent["id"]
+                    or child.get("autoEligible") is not True
+                    or child.get("executionMode") != "auto_guarded"
+                ):
+                    raise RequestError(f"งานของ Agent {row['agentId']} ไม่พร้อมรันอัตโนมัติ", 503)
+                subtasks.append(child)
+        except Exception:
+            failed_at = utc_now()
+            cancelled_subtasks = 0
+            with PARENT_MISSION_REFRESH_LOCK:
+                with MISSIONS_LOCK:
+                    missions = load_missions()
+                    stored_parent = next(
+                        (
+                            item
+                            for item in missions
+                            if item.get("id") == parent.get("id")
+                        ),
+                        parent,
+                    )
+                    stored_parent["status"] = "blocked"
+                    stored_parent["phase"] = "council_queue_incomplete"
+                    stored_parent["errorCode"] = "council_queue_incomplete"
+                    stored_parent["result"] = "สร้างงานวิเคราะห์ไม่ครบ 3 Agent ระบบจึงหยุดไว้โดยไม่ส่งคำสั่งไป Terminal"
+                    stored_parent["completedAt"] = failed_at
+                    stored_parent["updatedAt"] = failed_at
+                    for mission in missions:
+                        mission_context = (
+                            mission.get("analysisContext")
+                            if isinstance(mission.get("analysisContext"), dict)
+                            else {}
+                        )
+                        if (
+                            mission.get("parentMissionId") != parent.get("id")
+                            or mission_context.get("kind") != "ai_trade_council_vote"
+                            or mission.get("status")
+                            not in {"queued", "waiting_approval"}
+                        ):
+                            continue
+                        mission["status"] = "blocked"
+                        mission["phase"] = "council_queue_incomplete"
+                        mission["errorCode"] = "council_parent_queue_incomplete"
+                        mission["result"] = (
+                            "Council round assembly failed before all three votes were queued. "
+                            "No tool was started."
+                        )
+                        mission["completedAt"] = failed_at
+                        mission["updatedAt"] = failed_at
+                        approval = (
+                            mission.get("approval")
+                            if isinstance(mission.get("approval"), dict)
+                            else {}
+                        )
+                        if approval.get("state") == "approved":
+                            approval["state"] = "invalidated"
+                        mission["approval"] = approval
+                        execution = (
+                            mission.get("execution")
+                            if isinstance(mission.get("execution"), dict)
+                            else {}
+                        )
+                        execution["dispatchState"] = "blocked"
+                        execution["completedAt"] = failed_at
+                        mission["execution"] = execution
+                        cancelled_subtasks += 1
+                    save_missions(missions)
+                    parent = stored_parent
+            append_audit({
+                "type": "ai_trade_council.queue_failed",
+                "missionId": parent.get("id"),
+                "snapshotId": snapshot_id,
+                "createdSubtaskCount": len(subtasks),
+                "cancelledSubtaskCount": cancelled_subtasks,
+                **analysis_context_metadata,
+                "terminalActions": False,
+            })
+            raise
+
+        parent["subtaskIds"] = [item["id"] for item in subtasks]
+        parent["status"] = "queued" if all(item.get("status") == "queued" for item in subtasks) else "running"
+        parent["phase"] = "council_specialists_queued"
+        parent["result"] = "ส่ง Snapshot เดียวกันให้ Agent วิเคราะห์ครบ 3 บทบาทแล้ว"
+        parent["completedAt"] = None
+        parent["updatedAt"] = utc_now()
+        parent["delegation"] = {
+            "mode": "ai_trade_council_read_only",
+            "state": "specialists_queued",
             "snapshotId": snapshot_id,
-            "snapshotArtifact": snapshot_artifact,
-            "snapshotArtifactDigest": snapshot_artifact_digest,
-            "propId": prop_id,
-            "referencePrice": reference_price,
-            "analysisQuote": analysis_quote_context,
-            "snapshotObservedAt": chart.get("observedAt"),
+            "contractDigest": contract_digest,
+            "qualityGateSchema": "ai-trade-council-quality-gate-v2",
             "horizonBars": horizon_bars,
             "validUntilBarTime": valid_until_bar_time,
             "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
             "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
-            "roundStartedAt": council_quality_gate["roundStartedAt"],
-            "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
-            "qualityGate": council_quality_gate,
             "requiredVotes": required_votes,
+            "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
             **analysis_context_metadata,
-            "readOnly": True,
-            "contractDigest": contract_digest,
-            **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
-            **({"automation": automation_packet} if automation_packet else {}),
-        },
-    }, status="running", allow_analysis_context=True)
-
-    subtasks = []
-    try:
-        for row, prompt in prepared_rows:
-            child_key = (
-                f"ai-council-auto-{automation_packet['streamKey'][:18]}-"
-                f"{automation_packet['closedBarTime']}-{contract_digest}-v{required_votes}-{row['roleId']}"
-                if automation_packet
-                else (
-                    f"ai-council-{snapshot_id[:24]}-{contract_digest}-"
-                    f"v{required_votes}{round_retry_suffix}-{row['roleId']}"
-                )
-            )
-            existing_child = find_mission_by_idempotency(child_key)
-            child = existing_child or create_mission({
-                "title": row["titleTh"],
-                "prompt": prompt,
-                "agentId": row["agentId"],
-                "requester": "manager",
-                "toolId": row["toolId"],
-                "targetId": prop_id,
-                "risk": "medium",
-                "reportType": "ai_trade_council_vote",
-                "parentMissionId": parent["id"],
-                "idempotencyKey": child_key,
-                "modelTier": row["modelTier"],
-                "timeout": row["timeoutSeconds"],
-                "budget": {
-                    "timeoutSeconds": row["timeoutSeconds"],
-                    "outputLimitChars": row["outputLimitChars"],
-                    "maxRuns": AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY["maximumRuns"],
-                },
-                "analysisContext": {
-                    "kind": "ai_trade_council_vote",
-                    "providerRetryPolicy": copy.deepcopy(AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY),
-                    "snapshotId": snapshot_id,
-                    "snapshotArtifact": snapshot_artifact,
-                    "snapshotArtifactDigest": snapshot_artifact_digest,
-                    "agentId": row["agentId"],
-                    "roleId": row["roleId"],
-                    "referencePrice": reference_price,
-                    "analysisQuote": analysis_quote_context,
-                    "horizonBars": horizon_bars,
-                    "validUntilBarTime": valid_until_bar_time,
-                    "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
-                    "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
-                    "volatilityState": (council_quality_gate.get("technical") or {}).get("volatilityState"),
-                    "qualityPolicy": quality_policy,
-                    "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
-                    "snapshotObservedAt": chart.get("observedAt"),
-                    "propId": prop_id,
-                    **analysis_context_metadata,
-                    "readOnly": True,
-                    "contractDigest": contract_digest,
-                    **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
-                    **({"automation": automation_packet} if automation_packet else {}),
-                },
-            }, status="queued", allow_model_override=True, allow_budget_override=True, allow_analysis_context=True)
-            if (
-                child.get("parentMissionId") != parent["id"]
-                or child.get("autoEligible") is not True
-                or child.get("executionMode") != "auto_guarded"
-            ):
-                raise RequestError(f"งานของ Agent {row['agentId']} ไม่พร้อมรันอัตโนมัติ", 503)
-            subtasks.append(child)
-    except Exception:
-        failed_at = utc_now()
-        cancelled_subtasks = 0
-        with PARENT_MISSION_REFRESH_LOCK:
-            with MISSIONS_LOCK:
-                missions = load_missions()
-                stored_parent = next(
-                    (
-                        item
-                        for item in missions
-                        if item.get("id") == parent.get("id")
-                    ),
-                    parent,
-                )
-                stored_parent["status"] = "blocked"
-                stored_parent["phase"] = "council_queue_incomplete"
-                stored_parent["errorCode"] = "council_queue_incomplete"
-                stored_parent["result"] = "สร้างงานวิเคราะห์ไม่ครบ 3 Agent ระบบจึงหยุดไว้โดยไม่ส่งคำสั่งไป Terminal"
-                stored_parent["completedAt"] = failed_at
-                stored_parent["updatedAt"] = failed_at
-                for mission in missions:
-                    mission_context = (
-                        mission.get("analysisContext")
-                        if isinstance(mission.get("analysisContext"), dict)
-                        else {}
-                    )
-                    if (
-                        mission.get("parentMissionId") != parent.get("id")
-                        or mission_context.get("kind") != "ai_trade_council_vote"
-                        or mission.get("status")
-                        not in {"queued", "waiting_approval"}
-                    ):
-                        continue
-                    mission["status"] = "blocked"
-                    mission["phase"] = "council_queue_incomplete"
-                    mission["errorCode"] = "council_parent_queue_incomplete"
-                    mission["result"] = (
-                        "Council round assembly failed before all three votes were queued. "
-                        "No tool was started."
-                    )
-                    mission["completedAt"] = failed_at
-                    mission["updatedAt"] = failed_at
-                    approval = (
-                        mission.get("approval")
-                        if isinstance(mission.get("approval"), dict)
-                        else {}
-                    )
-                    if approval.get("state") == "approved":
-                        approval["state"] = "invalidated"
-                    mission["approval"] = approval
-                    execution = (
-                        mission.get("execution")
-                        if isinstance(mission.get("execution"), dict)
-                        else {}
-                    )
-                    execution["dispatchState"] = "blocked"
-                    execution["completedAt"] = failed_at
-                    mission["execution"] = execution
-                    cancelled_subtasks += 1
-                save_missions(missions)
-                parent = stored_parent
-        append_audit({
-            "type": "ai_trade_council.queue_failed",
-            "missionId": parent.get("id"),
-            "snapshotId": snapshot_id,
-            "createdSubtaskCount": len(subtasks),
-            "cancelledSubtaskCount": cancelled_subtasks,
-            **analysis_context_metadata,
+            "subtaskCount": 3,
+            "subtaskStatusCounts": summarize_missions(subtasks).get("byStatus", {}),
+            "summaryTargetId": prop_id,
+            "riskGuardAgentId": "risk_guard",
+            "riskGuardVoting": False,
             "terminalActions": False,
-        })
-        raise
-
-    parent["subtaskIds"] = [item["id"] for item in subtasks]
-    parent["status"] = "queued" if all(item.get("status") == "queued" for item in subtasks) else "running"
-    parent["phase"] = "council_specialists_queued"
-    parent["result"] = "ส่ง Snapshot เดียวกันให้ Agent วิเคราะห์ครบ 3 บทบาทแล้ว"
-    parent["completedAt"] = None
-    parent["updatedAt"] = utc_now()
-    parent["delegation"] = {
-        "mode": "ai_trade_council_read_only",
-        "state": "specialists_queued",
-        "snapshotId": snapshot_id,
-        "contractDigest": contract_digest,
-        "qualityGateSchema": "ai-trade-council-quality-gate-v2",
-        "horizonBars": horizon_bars,
-        "validUntilBarTime": valid_until_bar_time,
-        "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
-        "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
-        "requiredVotes": required_votes,
-        "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
-        **analysis_context_metadata,
-        "subtaskCount": 3,
-        "subtaskStatusCounts": summarize_missions(subtasks).get("byStatus", {}),
-        "summaryTargetId": prop_id,
-        "riskGuardAgentId": "risk_guard",
-        "riskGuardVoting": False,
-        "terminalActions": False,
-        "realToolExecuted": False,
-        "triggerMode": (
-            "auto_on_new_closed_bar"
-            if automation_packet
-            else "manual"
-        ),
-        **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
-        "delegatedAt": utc_now(),
-    }
-    replace_mission(parent)
+            "realToolExecuted": False,
+            "triggerMode": (
+                "auto_on_new_closed_bar"
+                if automation_packet
+                else "manual"
+            ),
+            **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
+            "delegatedAt": utc_now(),
+        }
+        replace_mission(parent)
     append_audit({
         "type": "ai_trade_council.queued",
         "missionId": parent["id"],
@@ -88836,7 +89000,10 @@ def ai_trade_council_automation_tick() -> dict:
                 "detectedAt": detected_at,
                 "triggerPolicy": "new_closed_bar_only_no_backfill",
                 "triggerStartupId": SERVER_STARTED_AT,
-                "triggerExpiresAt": (parse_iso(detected_at) + timedelta(seconds=60)).isoformat(),
+                "triggerExpiresAt": (
+                    parse_iso(detected_at)
+                    + timedelta(seconds=AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS)
+                ).isoformat(),
                 "quotaAdmittedAt": detected_at if current_record_status == "pending" else None,
                 "analysisStartPreflight": trigger_preflight,
                 "completedAt": (
@@ -89605,6 +89772,12 @@ def load_missions(*, shared_snapshot: bool = False) -> list[dict]:
     must never mutate it.
     """
 
+    batch = getattr(COUNCIL_MISSION_BATCH, "state", None)
+    if batch is not None:
+        # The batch owns an isolated copy under MISSIONS_LOCK. Copy only list
+        # membership here; exact lookup APIs still defensively copy records.
+        return list(batch["missions"])
+
     with MISSIONS_READ_CACHE_LOCK:
         signature = _mission_store_signature()
         cached_signature = MISSIONS_READ_CACHE.get("signature")
@@ -89636,7 +89809,60 @@ def load_missions(*, shared_snapshot: bool = False) -> list[dict]:
         return missions if shared_snapshot else copy.deepcopy(missions)
 
 
+@contextmanager
+def _council_mission_store_batch():
+    """Publish one complete Council cohort with one durable archive replacement.
+
+    Only round assembly uses this thread-local batch. Other readers/writers are
+    excluded by the existing store lock; the queue lock is already held by the
+    caller. Keep the normal parent -> store lock order and all authorization,
+    idempotency and audit calls in create_mission. No worker can see half a round.
+    """
+    with PARENT_MISSION_REFRESH_LOCK:
+        with MISSIONS_LOCK:
+            if getattr(COUNCIL_MISSION_BATCH, "state", None) is not None:
+                raise DataIntegrityError("Nested Council assembly is not supported.")
+            missions = load_missions()
+            original_ids = {row.get("id") for row in missions}
+            state = {"missions": missions, "dirty": False}
+            COUNCIL_MISSION_BATCH.state = state
+            try:
+                yield
+            except BaseException:
+                # Preserve failed assembly evidence, never publish runnable
+                # children after an unexpected error in parent finalization.
+                rows = state["missions"]
+                new_rows = [row for row in rows if row.get("id") not in original_ids]
+                new_ids = {row.get("id") for row in new_rows}
+                parent_ids = {row.get("parentMissionId") for row in new_rows}
+                now = utc_now()
+                for row in rows:
+                    if row.get("id") not in new_ids and row.get("id") not in parent_ids:
+                        continue
+                    context = row.get("analysisContext") if isinstance(row.get("analysisContext"), dict) else {}
+                    if (context.get("kind") not in {"ai_trade_council_parent", "ai_trade_council_vote"}
+                            or row.get("status") not in {"queued", "running", "waiting_approval"}):
+                        continue
+                    row.update(status="blocked", phase="council_queue_incomplete",
+                               errorCode="council_queue_incomplete", completedAt=now,
+                               updatedAt=now, result="Council cohort assembly failed before dispatch.")
+                    execution = row.get("execution")
+                    if isinstance(execution, dict):
+                        execution.update(dispatchState="blocked", completedAt=now,
+                                         processStarted=False, nextAttemptAt=None)
+                    state["dirty"] = True
+                raise
+            finally:
+                del COUNCIL_MISSION_BATCH.state
+                if state["dirty"]:
+                    save_missions(state["missions"])
+
+
 def save_missions(missions: list[dict]) -> None:
+    batch = getattr(COUNCIL_MISSION_BATCH, "state", None)
+    if batch is not None:
+        batch.update(missions=missions, dirty=True)
+        return
     with MISSIONS_LOCK:
         # Missions are an audit/history source for Mission Archivist. Do not
         # silently discard older records when the active queue grows.
@@ -101144,10 +101370,72 @@ def _release_manager_dispatch_reservation(mission_id: str, worker_id: str) -> No
 
 def claim_auto_mission(mission_id: str, worker_id: str) -> dict | None:
     with AI_TRADE_COUNCIL_QUEUE_LOCK:
-        if mission_id in MANAGER_READ_ONLY_COHORT.snapshot()["activeMissionIds"]:
-            with PARENT_MISSION_REFRESH_LOCK:
-                return _claim_auto_mission_unlocked(mission_id, worker_id)
-        return _claim_auto_mission_unlocked(mission_id, worker_id)
+        # Claim and the small in-memory parent progress update are one write.
+        # Exclude a concurrent full aggregation, without running synthesis here.
+        with PARENT_MISSION_REFRESH_LOCK:
+            return _claim_auto_mission_unlocked(mission_id, worker_id)
+
+
+def _council_preparation_deadline(mission: dict, timeout_seconds: int) -> datetime | None:
+    """Local preparation has its own fixed budget inside the automatic round."""
+    if not _council_automatic_vote(mission):
+        return None
+    context = mission.get("analysisContext") or {}
+    deadline = parse_iso(context.get("roundDeadlineAt"))
+    if deadline is None:
+        return datetime.now(timezone.utc)
+    # Keep the complete role timeout, 30s runner transport/shutdown allowance,
+    # and 5s finalization reserve. Heartbeats never move this boundary.
+    return deadline - timedelta(seconds=timeout_seconds + 35)
+
+
+def _begin_council_runner_lease(mission_id: str, lease_id: str, timeout_seconds: int) -> dict | None:
+    """Transition once, after preparation, without extending the shared round."""
+    with MISSIONS_LOCK:
+        missions = load_missions()
+        for mission in missions:
+            if mission.get("id") != mission_id:
+                continue
+            execution = mission.get("execution") or {}
+            now = datetime.now(timezone.utc)
+            preparation_deadline = parse_iso(execution.get("preparationDeadlineAt"))
+            deadline = parse_iso((mission.get("analysisContext") or {}).get("roundDeadlineAt"))
+            if (MISSION_WORKER_STOP.is_set() or not _council_automatic_vote(mission)
+                or mission.get("status") != "running"
+                or execution.get("dispatchState") != "running"
+                or execution.get("leaseId") != lease_id
+                or execution.get("leasePhase") != "preparing"
+                or execution.get("processStarted") is True
+                or preparation_deadline is None or now >= preparation_deadline
+                or deadline is None or now + timedelta(seconds=timeout_seconds + 35) >= deadline):
+                return None
+            started_at = now.isoformat()
+            execution.update({
+                "leasePhase": "executing",
+                "runnerStartedAt": started_at,
+                "timeoutAt": min(now + timedelta(seconds=timeout_seconds + 30),
+                                 deadline - timedelta(seconds=5)).isoformat(),
+                "heartbeatAt": started_at,
+            })
+            mission["execution"] = execution
+            mission["heartbeatAt"] = started_at
+            mission["updatedAt"] = started_at
+            save_missions(missions)
+            return mission
+    return None
+
+
+def _auto_mission_watchdog_deadline(mission: dict, grace_seconds: int) -> datetime | None:
+    execution = mission.get("execution") or {}
+    timeout_at = parse_iso(execution.get("timeoutAt"))
+    if timeout_at is None:
+        return None
+    if _council_automatic_vote(mission) and execution.get("leasePhase") in {"preparing", "executing"}:
+        # Council execution already includes transport/shutdown time. Adding the
+        # general worker grace here could outlive the fixed automatic round.
+        deadline = parse_iso((mission.get("analysisContext") or {}).get("roundDeadlineAt"))
+        return min(timeout_at, deadline - timedelta(seconds=5)) if deadline else timeout_at
+    return timeout_at + timedelta(seconds=grace_seconds)
 
 
 def _ea_factory_mission_dispatch_denied(mission: dict) -> bool:
@@ -101211,6 +101499,7 @@ def _claim_auto_mission_unlocked(
     invalid: tuple[str, str] | None = None
     metatrader_lock_deferred: dict | None = None
     manager_parallel_claim = False
+    council_parallel_claim = False
     with MISSIONS_LOCK:
         missions = load_missions()
         for mission in missions:
@@ -101252,6 +101541,7 @@ def _claim_auto_mission_unlocked(
                 mission_id in MANAGER_READ_ONLY_COHORT.snapshot()["activeMissionIds"]
                 and _manager_parallel_read_only_candidate(mission, missions)
             )
+            council_parallel_claim = _is_ai_trade_council_vote_mission(mission)
             now = utc_now()
             lease_id = safe_id(None, "lease")
             budget = mission.get("budget") if isinstance(mission.get("budget"), dict) else {}
@@ -101295,6 +101585,15 @@ def _claim_auto_mission_unlocked(
                 "nextAttemptAt": None,
                 "lastDeferredReason": None,
             })
+            preparation_deadline = _council_preparation_deadline(mission, timeout_seconds)
+            if preparation_deadline is not None:
+                execution.update({
+                    "leasePhase": "preparing",
+                    "preparationStartedAt": now,
+                    "preparationDeadlineAt": preparation_deadline.isoformat(),
+                    "runnerStartedAt": None,
+                    "timeoutAt": preparation_deadline.isoformat(),
+                })
             mission["execution"] = execution
             if manager_parallel_claim:
                 execution["concurrencyGroup"] = "manager_read_only_parallel_3"
@@ -101302,7 +101601,7 @@ def _claim_auto_mission_unlocked(
             parent_id = safe_reference(mission.get("parentMissionId"))
             break
         if claimed:
-            if manager_parallel_claim:
+            if manager_parallel_claim or council_parallel_claim:
                 _update_claimed_manager_parent_in_memory(parent_id, missions)
             save_missions(missions)
     if invalid:
@@ -101334,7 +101633,7 @@ def _claim_auto_mission_unlocked(
             (claimed.get("execution") or {}).get("authorizationPolicyVersion")
         ),
     })
-    if parent_id and not manager_parallel_claim:
+    if parent_id and not (manager_parallel_claim or council_parallel_claim):
         refresh_parent_mission(parent_id)
     return claimed
 
@@ -101342,8 +101641,9 @@ def _claim_auto_mission_unlocked(
 def _update_claimed_manager_parent_in_memory(parent_id: str, missions: list[dict]) -> None:
     """Publish active child counts in the same durable claim transaction.
 
-    Both Mission and parent locks are held. Final synthesis stays in the normal
-    Report-verified completion path; claiming creates no additional Report.
+    Both Mission and parent locks are held for Manager and Council claims. Final
+    synthesis stays in the normal Report-verified completion path; claiming
+    creates no additional Report, consensus, or trade dispatch.
     """
     parent = next(row for row in missions if row.get("id") == parent_id)
     children = [row for row in missions if row.get("parentMissionId") == parent_id]
@@ -101400,7 +101700,7 @@ def reconcile_timed_out_running_missions() -> int:
     candidates: list[tuple[str, str]] = []
     for mission in load_missions():
         execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
-        timeout_at = parse_iso(execution.get("timeoutAt"))
+        timeout_at = _auto_mission_watchdog_deadline(mission, config["timeoutWatchdogGraceSeconds"])
         if (
             mission.get("status") != "running"
             or mission.get("executionMode") != "auto_guarded"
@@ -101408,7 +101708,7 @@ def reconcile_timed_out_running_missions() -> int:
             or execution.get("dispatchState") != "running"
             or not execution.get("leaseId")
             or not timeout_at
-            or now < timeout_at + timedelta(seconds=config["timeoutWatchdogGraceSeconds"])
+            or now < timeout_at
         ):
             continue
         candidates.append((str(mission.get("id") or ""), str(execution.get("leaseId") or "")))
@@ -101419,43 +101719,37 @@ def reconcile_timed_out_running_missions() -> int:
             continue
         tree_terminated: bool | None = None
         process_was_started = False
-        with MISSION_WORKER_PROCESS_LOCK:
-            tracked = MISSION_WORKER_PROCESSES.get(mission_id)
-            active_process = (
-                tracked.get("process")
-                if isinstance(tracked, dict)
-                else None
-            )
-            active_job_holder = (
-                tracked.get("jobHolder")
-                if isinstance(tracked, dict)
-                else None
-            )
-        if isinstance(active_process, subprocess.Popen):
-            process_was_started = True
-            if active_process.poll() is None:
-                tree_terminated = _terminate_command_process_tree(
-                    active_process,
-                    active_job_holder if isinstance(active_job_holder, dict) else None,
-                )
-
+        active_process = None
+        active_job_holder = None
         failed = None
         parent_id = None
         with MISSIONS_LOCK:
             missions = load_missions()
             for mission in missions:
                 execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
-                timeout_at = parse_iso(execution.get("timeoutAt"))
+                timeout_at = _auto_mission_watchdog_deadline(mission, config["timeoutWatchdogGraceSeconds"])
                 if (
                     mission.get("id") != mission_id
                     or mission.get("status") != "running"
                     or execution.get("leaseId") != lease_id
                     or execution.get("dispatchState") != "running"
                     or not timeout_at
-                    or datetime.now(timezone.utc)
-                    < timeout_at + timedelta(seconds=config["timeoutWatchdogGraceSeconds"])
+                    or datetime.now(timezone.utc) < timeout_at
                 ):
                     continue
+                # A candidate may have transitioned from preparation to its
+                # execution lease since the scan. Recheck before touching its
+                # process, under the same lock used by the launch boundary.
+                with MISSION_WORKER_PROCESS_LOCK:
+                    tracked = MISSION_WORKER_PROCESSES.get(mission_id)
+                    if (_council_automatic_vote(mission)
+                        and execution.get("leasePhase") in {"preparing", "executing"}
+                        and (not isinstance(tracked, dict) or tracked.get("leaseId") != lease_id)):
+                        tracked = None
+                    active_process = tracked.get("process") if isinstance(tracked, dict) else None
+                    active_job_holder = tracked.get("jobHolder") if isinstance(tracked, dict) else None
+                if isinstance(active_process, subprocess.Popen):
+                    process_was_started = True
                 failed_at = utc_now()
                 mission["status"] = "failed"
                 mission["phase"] = "auto_worker_timeout_watchdog"
@@ -101485,6 +101779,28 @@ def reconcile_timed_out_running_missions() -> int:
                 save_missions(missions)
         if not failed:
             continue
+
+        # The exact lease is now durably terminal, so it cannot launch/restart.
+        # Terminate only the captured process outside the store lock; Windows
+        # fallback shutdown can take seconds and must not stall peer workers.
+        if isinstance(active_process, subprocess.Popen):
+            tree_terminated = _terminate_command_process_tree(
+                active_process,
+                active_job_holder if isinstance(active_job_holder, dict) else None,
+            )
+            with MISSIONS_LOCK:
+                missions = load_missions()
+                for mission in missions:
+                    execution = mission.get("execution") or {}
+                    if (mission.get("id") == mission_id
+                        and mission.get("status") == "failed"
+                        and mission.get("errorCode") == "auto_worker_timeout"
+                        and execution.get("leaseId") == lease_id):
+                        execution["processTreeTerminated"] = bool(tree_terminated)
+                        mission["execution"] = execution
+                        failed = mission
+                        save_missions(missions)
+                        break
 
         try:
             report = create_report({
@@ -104956,6 +105272,16 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                     expected_lease_id=lease_id,
                 )
                 return
+            automatic_council_run = is_council_vote and _council_automatic_vote(claimed)
+            if automatic_council_run:
+                started_claim = _begin_council_runner_lease(mission_id, lease_id, timeout_seconds)
+                if started_claim is None:
+                    _expire_ai_trade_council_vote_mission(
+                        mission_id, "council_round_deadline_insufficient",
+                        expected_status="running", expected_lease_id=lease_id,
+                    )
+                    return
+                claimed = started_claim
             runner = ({"ok": False, "exitCode": "cancelled", "processStarted": False,
                        "output": json.dumps({"ok": False, "status": "bridge_shutdown_cancelled",
                                              "message": "Bridge shutdown cancelled this Mission before process start."})}
@@ -104968,6 +105294,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                 cancel_event=MISSION_WORKER_STOP,
                 tracking_key=mission_id,
                 **({"factory_start_lease": lease_id} if isinstance(ea_factory_worker_sandbox, dict) else {}),
+                **({"council_start_lease": lease_id} if automatic_council_run else {}),
                 structured_json_output=True,
             ))
         finally:
@@ -111776,12 +112103,11 @@ def _council_new_bar_start_error(mission: dict) -> str | None:
     ):
         return "council_new_bar_historical_snapshot_skipped"
     admitted_at = parse_iso(str(automation.get("quotaAdmittedAt") or ""))
-    expires_at = parse_iso(str(automation.get("triggerExpiresAt") or ""))
+    expires_at = _ai_trade_council_automatic_deadline(automation)
     now = datetime.now(timezone.utc)
     if (
         admitted_at is None or expires_at is None
         or admitted_at > now or expires_at <= admitted_at
-        or (expires_at - admitted_at).total_seconds() > 60
     ):
         return "council_new_bar_admission_invalid"
     if now >= expires_at:

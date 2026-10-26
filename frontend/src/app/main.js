@@ -14821,22 +14821,56 @@ function signalRoundHealthModel(report = {}, automation = signalCouncilAutomatio
   const reserveAvailable = state.codexRate?.reserveAuthoritative
     || Object.prototype.hasOwnProperty.call(automationConfig, "minRemainingPercent")
     || Object.prototype.hasOwnProperty.call(suppliedAutomation, "minRemainingPercent");
-  const createdAt = run.parent?.createdAt ? new Date(run.parent.createdAt).getTime() : null;
-  const explicitDeadline = run.parent?.deadlineAt
-    || run.parent?.expiresAt
-    || run.parent?.delegation?.deadlineAt
-    || null;
+  const parentContext = run.parent?.analysisContext || {};
+  const delegation = run.parent?.delegation || {};
+  const firstTimestamp = (...values) => {
+    const times = values.map((value) => typeof value === "string" && value.trim()
+      ? new Date(value).getTime()
+      : NaN);
+    return times.find(Number.isFinite) ?? null;
+  };
+  const createdAt = firstTimestamp(run.parent?.createdAt);
+  let recordedStart = firstTimestamp(parentContext.roundStartedAt, delegation.roundStartedAt, run.parent?.roundStartedAt);
+  let recordedDeadline = firstTimestamp(parentContext.roundDeadlineAt, delegation.roundDeadlineAt, run.parent?.roundDeadlineAt);
+  let timingSource = delegation.roundTimingSource || "recorded_round";
+  if (recordedStart === null && recordedDeadline === null) {
+    // Preserve old admission windows only when actual round timestamps are
+    // absent. Never replace a historical 240s round with its 60s launch window.
+    recordedStart = firstTimestamp(parentContext.automation?.quotaAdmittedAt);
+    recordedDeadline = firstTimestamp(parentContext.automation?.triggerExpiresAt);
+    timingSource = "legacy_admission_window";
+  }
+  const roundStartedAt = recordedStart ?? createdAt;
+  const explicitDeadline = recordedDeadline ?? firstTimestamp(
+    run.parent?.deadlineAt,
+    run.parent?.expiresAt,
+    delegation.deadlineAt,
+  );
+  const automaticRound = delegation.triggerMode === "auto_on_new_closed_bar"
+    || Boolean(parentContext.automation && typeof parentContext.automation === "object");
   const roundDeadlineSeconds = firstFiniteSignalNumber(
-    run.parent?.delegation?.roundDeadlineSeconds,
+    delegation.roundDeadlineSeconds,
     qualityPolicy.roundDeadlineSeconds,
   );
-  const derivedDeadline = !explicitDeadline && createdAt && roundDeadlineSeconds !== null
-    ? new Date(createdAt + (roundDeadlineSeconds * 1000)).toISOString()
-    : explicitDeadline;
-  const completedAt = run.parent?.completedAt || (run.state === "completed" || run.state === "blocked" ? run.parent?.updatedAt : null);
-  const completedTime = completedAt ? new Date(completedAt).getTime() : null;
-  const roundAgeSeconds = createdAt
-    ? Math.max(0, Math.round(((Number.isFinite(completedTime) ? completedTime : Date.now()) - createdAt) / 1000))
+  const legacyDerivedDeadline = explicitDeadline === null && !automaticRound
+    && roundStartedAt !== null && roundDeadlineSeconds > 0
+      ? roundStartedAt + (roundDeadlineSeconds * 1000)
+      : null;
+  const deadlineTime = explicitDeadline ?? legacyDerivedDeadline;
+  const derivedDeadline = deadlineTime !== null && Number.isFinite(deadlineTime)
+    ? new Date(deadlineTime).toISOString()
+    : null;
+  const actualBudgetSeconds = recordedStart !== null && explicitDeadline !== null && explicitDeadline >= recordedStart
+    ? Math.round((explicitDeadline - recordedStart) / 1000)
+    : null;
+  const deadlineDetail = actualBudgetSeconds !== null
+    ? `${timingSource === "legacy_admission_window" ? "กรอบเริ่มงานเดิม" : "กรอบเวลารอบ"} ${actualBudgetSeconds} วินาที • Backend`
+    : legacyDerivedDeadline !== null
+      ? `นโยบาย ${roundDeadlineSeconds} วินาที • ข้อมูลรุ่นเดิม`
+      : explicitDeadline !== null ? "เวลาที่บันทึกจาก Backend" : "ไม่สร้างเวลาเส้นตายใน Frontend";
+  const completedTime = firstTimestamp(run.parent?.completedAt, run.state === "completed" || run.state === "blocked" ? run.parent?.updatedAt : null);
+  const roundAgeSeconds = roundStartedAt !== null
+    ? Math.max(0, Math.round(((completedTime ?? Date.now()) - roundStartedAt) / 1000))
     : null;
   const remainingPercent = firstFiniteSignalNumber(state.codexRate.snapshot?.primary?.remainingPercent);
   return {
@@ -14845,13 +14879,13 @@ function signalRoundHealthModel(report = {}, automation = signalCouncilAutomatio
         label: "Lag ของรอบ",
         state: run.parent ? (run.state === "blocked" ? "blocked" : run.state === "running" ? "waiting" : "complete") : "unavailable",
         value: roundAgeSeconds === null ? "ยังไม่มีรอบจาก Backend" : `${roundAgeSeconds} วินาที`,
-        detail: run.parent ? run.statusLabel : "เริ่มนับเมื่อ Backend สร้าง Mission",
+        detail: run.parent ? run.statusLabel : "เริ่มนับจากเวลาเริ่มรอบที่ Backend บันทึก",
       },
       {
         label: "Deadline",
-        state: derivedDeadline ? (Date.now() > new Date(derivedDeadline).getTime() && run.state === "running" ? "blocked" : "complete") : "unavailable",
+        state: derivedDeadline ? (Date.now() >= deadlineTime && run.state === "running" ? "blocked" : "complete") : "unavailable",
         value: derivedDeadline ? formatThaiDateTime(derivedDeadline) : "ยังไม่มี Deadline จาก Backend",
-        detail: roundDeadlineSeconds === null ? "ไม่สร้างเวลาเส้นตายใน Frontend" : `นโยบาย ${roundDeadlineSeconds} วินาที`,
+        detail: deadlineDetail,
       },
       {
         label: "รอบวิเคราะห์แท่งปิด",
