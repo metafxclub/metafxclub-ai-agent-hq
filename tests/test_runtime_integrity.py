@@ -6301,6 +6301,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "check_rate_limit": self.bridge.check_rate_limit,
             "run_safe_command": self.bridge.run_safe_command,
             "REAL_RUN_SEMAPHORE": self.bridge.REAL_RUN_SEMAPHORE,
+            "AI_TRADE_COUNCIL_RUN_SEMAPHORE": self.bridge.AI_TRADE_COUNCIL_RUN_SEMAPHORE,
+            "AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS": self.bridge.AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS,
+            "MISSION_WORKER_STOP": self.bridge.MISSION_WORKER_STOP,
+            "MISSION_WORKER_WAKE": self.bridge.MISSION_WORKER_WAKE,
         }
         runner_calls = []
 
@@ -6367,6 +6371,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.check_rate_limit = lambda *args, **kwargs: (True, 0)
                 self.bridge.run_safe_command = fake_command
                 self.bridge.REAL_RUN_SEMAPHORE = threading.BoundedSemaphore(value=1)
+                self.bridge.AI_TRADE_COUNCIL_RUN_SEMAPHORE = threading.BoundedSemaphore(value=3)
+                self.bridge.AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS = {}
+                self.bridge.MISSION_WORKER_STOP = threading.Event()
+                self.bridge.MISSION_WORKER_WAKE = threading.Event()
                 self.bridge.RATE_LIMIT_STATE.clear()
                 self.assertTrue(
                     self.bridge.set_operator_mode({"mode": "auto_guarded"})["ok"]
@@ -6438,6 +6446,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     "status": "queued",
                     "phase": "council_specialists_queued",
                     "subtaskIds": child_ids,
+                    # Real Council parents carry delegation state. The atomic
+                    # claim updates this object before persisting parent/child.
+                    "delegation": {"state": "council_specialists_queued"},
                     "analysisContext": {
                         "kind": "ai_trade_council_parent",
                         "snapshotId": snapshot_id,
@@ -6446,7 +6457,15 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 }
                 self.bridge.save_missions([parent, mission, *siblings])
                 self.assertTrue(mission["autoEligible"])
-                self.bridge.process_auto_mission("council-worker-test", mission)
+                worker_id = "council-worker-test"
+                reserved = self.bridge._reserve_next_ai_trade_council_mission(worker_id)
+                self.assertIsNotNone(reserved)
+                self.assertEqual(reserved["id"], mission["id"])
+                try:
+                    self.bridge.process_auto_mission(worker_id, reserved)
+                finally:
+                    self.bridge._release_ai_trade_council_dispatch_reservation(mission["id"], worker_id)
+                self.assertEqual(self.bridge.AI_TRADE_COUNCIL_DISPATCH_RESERVATIONS, {})
                 finished = self.bridge.find_mission(mission["id"])
             finally:
                 for name, value in originals.items():
