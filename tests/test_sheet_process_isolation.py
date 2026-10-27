@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+import venv
 from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
@@ -166,6 +168,166 @@ for line in sys.stdin.buffer:
             self.call()
         self.assertEqual(caught.exception.code, "sheet_worker_closed")
         self.assertTrue(self.executor.status()["closed"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows venv redirector contract")
+    def test_windows_venv_launch_uses_base_interpreter_and_child_only_environment(self) -> None:
+        base = str(Path(sys._base_executable).resolve())
+        virtual = str(Path(self.temp.name) / "venv" / "Scripts" / "python.exe")
+        command = [virtual, "-I", "-B", "-u", "fixture-worker.py"]
+        with (
+            mock.patch.object(self.module.sys, "executable", virtual),
+            mock.patch.object(self.module.sys, "_base_executable", base),
+            mock.patch.dict(os.environ, {"__PYVENV_LAUNCHER__": "fixture-parent-value", "SHEET_FIXTURE_INHERITED": "preserved"}),
+        ):
+            selected, environment = self.module._direct_worker_launch(command)
+            self.assertEqual(selected, [base, *command[1:]])
+            self.assertEqual(command[0], virtual, "Do not mutate the caller's command")
+            self.assertEqual(environment["__PYVENV_LAUNCHER__"], virtual)
+            self.assertEqual(environment["SHEET_FIXTURE_INHERITED"], "preserved")
+            self.assertEqual(os.environ["__PYVENV_LAUNCHER__"], "fixture-parent-value")
+            environment["SHEET_FIXTURE_INHERITED"] = "child-only"
+            self.assertEqual(os.environ["SHEET_FIXTURE_INHERITED"], "preserved")
+
+    @unittest.skipUnless(os.name == "nt", "Windows venv redirector contract")
+    def test_base_interpreter_and_explicit_fixture_executable_keep_original_launch(self) -> None:
+        base = str(Path(sys._base_executable).resolve())
+        with mock.patch.object(self.module.sys, "executable", base), mock.patch.object(self.module.sys, "_base_executable", base):
+            command = [base, "-I", "fixture.py"]
+            self.assertEqual(self.module._direct_worker_launch(command), (command, None))
+        virtual = str(Path(self.temp.name) / "venv" / "Scripts" / "python.exe")
+        with mock.patch.object(self.module.sys, "executable", virtual), mock.patch.object(self.module.sys, "_base_executable", base):
+            command = [base, "-I", "explicit-fixture.py"]
+            self.assertEqual(self.module._direct_worker_launch(command), (command, None))
+
+    @unittest.skipUnless(os.name == "nt", "Windows venv redirector contract")
+    def test_invalid_base_interpreter_never_falls_back_to_venv_launcher(self) -> None:
+        virtual = str(Path(self.temp.name) / "venv" / "Scripts" / "python.exe")
+        for invalid in (None, "", str(Path(self.temp.name) / "missing-python.exe"), self.temp.name):
+            with (
+                self.subTest(base=invalid),
+                mock.patch.object(self.module.sys, "executable", virtual),
+                mock.patch.object(self.module.sys, "_base_executable", invalid),
+                mock.patch.object(self.module.subprocess, "Popen", side_effect=AssertionError("Unsafe launcher fallback")) as launch,
+            ):
+                with self.assertRaises(self.module.SheetExecutorError) as caught:
+                    self.call()
+                self.assertEqual(caught.exception.code, "sheet_worker_start_failed")
+                launch.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Exercises the actual Windows venv redirector")
+    def test_windows_venv_worker_is_direct_child_and_exits_during_projection_on_owner_death(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        project = Path(self.temp.name) / "venv-owner-checkout"
+        runner = project / "backend" / "local-runner"
+        runner.mkdir(parents=True)
+        source_package = ROOT / "backend" / "local-runner" / "hq_backend"
+        for source in source_package.rglob("*.py"):
+            target = runner / "hq_backend" / source.relative_to(source_package)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        (runner / "bridge_server.py").write_text("""import ctypes, os, sys, time
+from ctypes import wintypes
+def _load_dashboard_workflow_settings_read_only(): return {}
+def _research_sheet_report_items(report, revision, **kwargs):
+    if report.get('stallEvent'):
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenEventW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel.OpenEventW.restype = wintypes.HANDLE
+        kernel.SetEvent.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        event = kernel.OpenEventW(2, False, report['stallEvent'])
+        if not event: raise RuntimeError('fixture event unavailable')
+        kernel.SetEvent(event)
+        kernel.CloseHandle(event)
+        time.sleep(10)
+    return [{'pid': os.getpid(), 'parentPid': os.getppid(),
+             'executable': sys.executable, 'prefix': sys.prefix}]
+""", encoding="utf-8")
+        virtual_root = project / "fixture-venv"
+        venv.EnvBuilder(with_pip=False).create(virtual_root)
+        virtual = str(virtual_root / "Scripts" / "python.exe")
+        base = str(Path(sys._base_executable).resolve())
+        parent_script = project / "fixture_bridge.py"
+        parent_script.write_text("""import importlib.util, json, os, pathlib, sys, threading
+root = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fixture_sheet_executor', root / 'backend/local-runner/hq_backend/research/sheet_executor.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+executor = module.SheetExecutor(root)
+result = executor.call('projection.report_items', [{}, 3], {}, timeout_seconds=10)[0]
+print(json.dumps({'ownerPid': os.getpid(), 'ownedPid': executor._process.pid,
+                  'ownerExecutable': sys.executable, 'ownerPrefix': sys.prefix, 'worker': result}), flush=True)
+sys.stdin.readline()
+def stall():
+    executor.call('projection.report_items', [{'stallEvent': sys.argv[2]}, 3], {}, timeout_seconds=15)
+threading.Thread(target=stall, daemon=True).start()
+sys.stdin.readline()
+executor.close()
+""", encoding="utf-8")
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateEventW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel.CreateEventW.restype = wintypes.HANDLE
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        event_name = "Local\\MetafxSheetFixture-" + Path(self.temp.name).name
+        event = kernel.CreateEventW(None, True, False, event_name)
+        self.assertTrue(event)
+        self.addCleanup(kernel.CloseHandle, event)
+        environment = os.environ.copy()
+        environment.update({"__PYVENV_LAUNCHER__": virtual,
+                            "LOCALAPPDATA": str(project / "fixture-local-appdata"),
+                            "APPDATA": str(project / "fixture-roaming-appdata"),
+                            "CODEX_HOME": str(project / "fixture-codex")})
+        for name in list(environment):
+            if name.startswith("METAFX_GOOGLE_"):
+                del environment[name]
+        parent = subprocess.Popen([base, "-I", "-B", "-u", str(parent_script), str(project), event_name],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  text=True, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
+        owned_handles = {}
+        lines = queue.Queue()
+        reader = threading.Thread(target=lambda: lines.put(parent.stdout.readline()), daemon=True)
+        reader.start()
+        try:
+            line = lines.get(timeout=15)
+            self.assertTrue(line, "Fixture Bridge exited before the worker responded")
+            facts = json.loads(line)
+            self.assertEqual(facts["ownerPid"], parent.pid)
+            for pid in {facts["ownedPid"], facts["worker"]["pid"]}:
+                handle = kernel.OpenProcess(0x00100000 | 0x0001, False, pid)
+                self.assertTrue(handle, "Fixture worker must still be alive")
+                owned_handles[pid] = handle
+            self.assertEqual(Path(facts["ownerExecutable"]), Path(virtual))
+            self.assertEqual(Path(facts["ownerPrefix"]), virtual_root)
+            self.assertEqual(Path(facts["worker"]["executable"]), Path(virtual))
+            self.assertEqual(Path(facts["worker"]["prefix"]), virtual_root)
+            parent.stdin.write("stall\n")
+            parent.stdin.flush()
+            self.assertEqual(kernel.WaitForSingleObject(event, 5000), 0, "The actual worker must enter its slow projection")
+            parent.kill()  # Only the owned temporary Bridge fixture.
+            parent.wait(timeout=3)
+            worker_exit = kernel.WaitForSingleObject(owned_handles[facts["worker"]["pid"]], 4000)
+            self.assertEqual(worker_exit, 0, "Worker survived owner death inside a 10-second projection")
+            self.assertEqual(facts["ownedPid"], facts["worker"]["pid"], "Popen must own the real worker, not a venv redirector")
+            self.assertEqual(facts["worker"]["parentPid"], parent.pid, "Worker must monitor the Bridge directly")
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait(timeout=3)
+            for handle in owned_handles.values():
+                if kernel.WaitForSingleObject(handle, 0) == 258:
+                    kernel.TerminateProcess(handle, 1)
+                self.assertEqual(kernel.WaitForSingleObject(handle, 3000), 0, "Temporary fixture process cleanup failed")
+                kernel.CloseHandle(handle)
+            parent.stdin.close()
+            parent.stdout.close()
+            reader.join(timeout=1)
 
     def test_worker_guard_blocks_shared_mutations_network_and_processes_for_projection(self) -> None:
         guard = self.module._WorkerGuard(Path(self.temp.name) / "credential-store")

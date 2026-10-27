@@ -105,6 +105,37 @@ def _decode_frame(data: bytes) -> dict:
     return value
 
 
+def _direct_worker_launch(command: list[str]) -> tuple[list[str], dict | None]:
+    """Bypass the Windows venv redirector while retaining its environment.
+
+    CPython's multiprocessing launcher uses the same base-executable/child-env
+    pair. The owned Popen handle then identifies the actual interpreter, whose
+    parent-death monitor observes the Bridge rather than an intermediate exe.
+    Commands supplied by a fixture subclass retain their chosen executable.
+    """
+    selected = list(command)
+    if (os.name != "nt" or not selected
+            or os.path.normcase(os.path.abspath(selected[0]))
+            != os.path.normcase(os.path.abspath(sys.executable))):
+        return selected, None
+    base_executable = getattr(sys, "_base_executable", None)
+    if not isinstance(base_executable, str) or not base_executable:
+        raise SheetExecutorError("sheet_worker_start_failed")
+    try:
+        base_path = Path(base_executable).resolve(strict=True)
+        valid_base = base_path.is_file()
+    except (OSError, ValueError, RuntimeError):
+        raise SheetExecutorError("sheet_worker_start_failed") from None
+    if not valid_base:
+        raise SheetExecutorError("sheet_worker_start_failed")
+    if os.path.normcase(str(base_path)) == os.path.normcase(os.path.abspath(sys.executable)):
+        return selected, None
+    selected[0] = str(base_path)
+    environment = os.environ.copy()
+    environment["__PYVENV_LAUNCHER__"] = sys.executable
+    return selected, environment
+
+
 class SheetExecutor:
     """Serialize bounded calls to one owned child, without waiting in status()."""
 
@@ -239,7 +270,10 @@ class SheetExecutor:
         if os.name == "nt":
             options["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
-            process = subprocess.Popen(self._worker_command(), **options)
+            command, environment = _direct_worker_launch(self._worker_command())
+            if environment is not None:
+                options["env"] = environment
+            process = subprocess.Popen(command, **options)
         except (OSError, ValueError) as error:
             raise SheetExecutorError("sheet_worker_start_failed") from error
         self._process = process
