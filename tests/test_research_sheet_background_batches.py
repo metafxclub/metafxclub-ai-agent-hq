@@ -423,6 +423,61 @@ class ResearchSheetBackgroundBatchTests(unittest.TestCase):
         self.assertEqual(self.queued_ids(), [f"report-{i:03d}" for i in range(3)])
         self.build_index.assert_not_called()
 
+    def test_deferred_projection_integrity_error_rotates_marker_and_preserves_report(self) -> None:
+        self.seed_deferred(2)
+        bad_path = self.reports / "report-000.json"
+        original_bytes = bad_path.read_bytes()
+
+        def project(report, **kwargs):
+            if report["id"] == "report-000":
+                raise self.bridge.DataIntegrityError("synthetic oversized projection")
+            return {"queued": 1}
+
+        self.queue.side_effect = project
+        first = self.real_drain(max_reports=1, max_scanned=1, deadline_monotonic=self.clock + 8)
+        self.assertEqual((first["scanned"], first["drained"], first["recoveryDeferred"]), (1, 0, 1))
+        marker = next(row for row in self.bridge._load_research_sheet_outbox_unlocked()["deferredReports"] if row["reportId"] == "report-000")
+        self.assertEqual(marker["recoveryAttemptCount"], 1)
+        self.assertEqual(marker["lastErrorCode"], "deferred_report_projection_integrity_failed")
+        self.assertEqual(bad_path.read_bytes(), original_bytes)
+        second = self.real_drain(max_reports=1, max_scanned=1, deadline_monotonic=self.clock + 8)
+        self.assertEqual((second["drained"], second["queued"]), (1, 1))
+        self.assertEqual(self.queued_ids(), ["report-000", "report-001"])
+        self.flush.assert_not_called()
+        self.build_index.assert_not_called()
+
+    def test_manual_deferred_drain_continues_after_projection_integrity_failure(self) -> None:
+        self.seed_deferred(3)
+
+        def project(report, **kwargs):
+            if report["id"] == "report-000":
+                raise self.bridge.DataIntegrityError("synthetic invalid projection")
+            return {"queued": 1}
+
+        self.queue.side_effect = project
+        result = self.real_drain(max_reports=3)
+        self.assertEqual((result["scanned"], result["drained"], result["recoveryDeferred"]), (3, 2, 1))
+        self.assertEqual(self.queued_ids(), ["report-000", "report-001", "report-002"])
+        self.assertTrue((self.reports / "report-000.json").is_file())
+        self.flush.assert_not_called()
+        self.build_index.assert_not_called()
+
+    def test_corrupt_outbox_during_deferred_projection_still_raises_without_overwrite(self) -> None:
+        self.seed_deferred(2)
+        outbox_path = self.runtime / "outbox.json"
+        damaged_bytes = b'{"synthetic_corrupt_store":'
+
+        def projection_with_corrupt_shared_store(report, **kwargs):
+            outbox_path.write_bytes(damaged_bytes)
+            raise self.bridge.DataIntegrityError("synthetic corrupt shared outbox")
+
+        self.queue.side_effect = projection_with_corrupt_shared_store
+        with self.assertRaises(self.bridge.DataIntegrityError):
+            self.real_drain(max_reports=1, max_scanned=1, deadline_monotonic=self.clock + 8)
+        self.assertEqual(outbox_path.read_bytes(), damaged_bytes)
+        self.assertEqual(self.queued_ids(), ["report-000"])
+        self.flush.assert_not_called()
+
     def seed_pending_row(self) -> None:
         self.write_report(0)
         self.install_synthetic_row_projection()

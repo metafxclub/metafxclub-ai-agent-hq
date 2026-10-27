@@ -65676,12 +65676,26 @@ def _research_sheet_drain_deferred_reports(
             or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set()
         ):
             break
-        result = _research_sheet_queue_report(
-            report,
-            flush=False,
-            allowed_consumer_ids={consumer_id},
-            deep_version_index=None,
-        )
+        try:
+            result = _research_sheet_queue_report(
+                report,
+                flush=False,
+                allowed_consumer_ids={consumer_id},
+                deep_version_index=None,
+            )
+        except DataIntegrityError:
+            # Keep an unprojectable report and its durable marker, but rotate
+            # it behind untouched work. Otherwise a one-marker background
+            # batch would retry the same poison report forever. This update
+            # must itself succeed: a corrupt/unwritable outbox still raises,
+            # and OSError from queue persistence is deliberately not caught.
+            _research_sheet_mark_deferred_recovery(
+                report_id,
+                revision,
+                "deferred_report_projection_integrity_failed",
+            )
+            recovery_deferred += 1
+            continue
         if result.get("reason") == "outbox_capacity_reached":
             capacity_deferred += 1
             continue
