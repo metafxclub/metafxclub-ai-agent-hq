@@ -1,5 +1,7 @@
 # Prompt ติดตั้งด้วย Codex จาก GitHub Clone พร้อม OAuth Client กลาง
 
+ใช้สำหรับเครื่องใหม่เท่านั้น ถ้ามี HQ อยู่แล้ว ให้ใช้ [Prompt อัปเดตโดยเก็บค่าตั้งเดิม](update-github-preserve-settings-th.md) ของ tag เดียวกัน
+
 Prompt นี้ใช้สำหรับให้นักเรียนวางใน Codex บน Windows เพียงครั้งเดียว Codex จะตรวจและติดตั้งเฉพาะ Git/Python ที่ขาดแบบ current-user, Clone Source รุ่นที่ล็อกไว้จาก GitHub, ตรวจ Tag/Version, ดาวน์โหลดและตรวจ Release ZIP + `.sha256`, extract เฉพาะ OAuth native/installed-app client configuration กลางที่ถูก inject ตอน build, เรียก Installer, ตรวจ Runtime และเปิด Agent HQ ให้เอง นักเรียนไม่ต้องติดตั้ง Git/Python ล่วงหน้า ไม่ต้องดาวน์โหลด ZIP เอง และไม่ต้องกดไฟล์ BAT
 
 ก่อนส่งให้นักเรียน อาจารย์ล็อกค่า `GITHUB_REPOSITORY`, `GITHUB_TAG` และ `EXPECTED_VERSION` ไว้แล้ว นักเรียนวาง Prompt ได้ทันทีโดยไม่ต้องสร้าง Google Cloud Project/OAuth Client, เพิ่ม Test users, ดาวน์โหลด JSON หรือกรอก/แก้ Client ID กลาง:
@@ -12,6 +14,8 @@ Prompt นี้ใช้สำหรับให้นักเรียนว�
 GITHUB_REPOSITORY = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
 GITHUB_TAG = "v0.9.27"
 EXPECTED_VERSION = "0.9.27"
+
+ก่อนทำขั้นตอนอื่น ตรวจว่า %LOCALAPPDATA%\Metafxclub\AI-Agent-HQ มีอยู่หรือไม่ด้วย metadata เท่านั้น หากมีโฟลเดอร์อยู่แล้ว ไม่ว่าจะเปิดหรือหยุดโปรแกรมอยู่ ให้หยุดเส้นทางติดตั้งใหม่นี้ก่อนเปลี่ยนไฟล์/บริการ/บัญชี แล้วใช้ docs/prompts/update-github-preserve-settings-th.md จาก tag v0.9.27 แทน ห้ามใช้ -ResetGoogleOAuthToCentralRelease กับโปรแกรมเดิม หรือทำให้เครื่องเหมือนติดตั้งใหม่ด้วยการลบ/ย้ายข้อมูลเดิม
 
 ข้อความนี้เป็นการยืนยันล่วงหน้าให้ Codex ใช้ Local endpoint มาตรฐาน `http://127.0.0.1:4186/` และส่งพอร์ต 4186 เข้า Installer ด้วย `-EndpointConfirmed` ได้ ไม่ต้องถามฉันให้เลือก Port หรือกดไฟล์ BAT ซ้ำ ห้ามใช้ 0.0.0.0, LAN IP หรือ Public IP
 
