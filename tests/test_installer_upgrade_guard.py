@@ -241,6 +241,55 @@ Enter-UpgradeMaintenanceLease; Exit-UpgradeMaintenanceLease
         self.assertNotIn("Stop-ScheduledTask", suspend)
         self.assertIn("finally {\n        Exit-UpgradeMaintenanceLease", main)
 
+    def test_owner_stopping_after_old_probe_remains_offline_after_rollback(self):
+        self.run_fixture(r"""
+$source=$ast.Extent.Text
+$mainStart=$source.IndexOf('$bridgeTaskWasEnabled = $false')
+$preludeStart=$source.IndexOf('Enter-UpgradeMaintenanceLease', $mainStart)
+$preludeEnd=$source.IndexOf('Suspend-SentimentForUpdate', $preludeStart)
+$prelude=$source.Substring($preludeStart,$preludeEnd-$preludeStart)
+$recoveryStart=$source.IndexOf('if ($rollbackRestored -and $previousBridgeWasRunning)', $preludeEnd)
+$recoveryEnd=$source.IndexOf('}', $recoveryStart)+1
+$recovery=$source.Substring($recoveryStart,$recoveryEnd-$recoveryStart)
+$previousBridgeWasRunning=$true
+$script:previousBridgeWasStopped=$true
+$script:restarts=0
+function Assert-OfflineUpgradeReady { }
+function Start-PreviousBridgeAfterRollback {
+ if ($script:upgradeMaintenanceLease) { throw 'Recovery tried to start under its own maintenance lease' }
+ $script:restarts++; return $true
+}
+try {
+ Invoke-Expression $prelude
+ if ($previousBridgeWasRunning -or $script:previousBridgeWasStopped) { throw 'Old probe was not superseded by the stopped baseline' }
+ $rollbackRestored=$true
+ Invoke-Expression $recovery
+ if ($script:restarts -ne 0) { throw 'Rollback revived an intentionally stopped HQ' }
+ if (-not $script:upgradeMaintenanceLease) { throw 'Offline rollback lost its publication lease too early' }
+} finally { Exit-UpgradeMaintenanceLease }
+""")
+
+    def test_any_legacy_recovery_start_releases_the_maintenance_lease_first(self):
+        self.run_fixture(r"""
+$source=$ast.Extent.Text
+$mainStart=$source.IndexOf('$bridgeTaskWasEnabled = $false')
+$first=$source.IndexOf('if ($rollbackRestored -and $previousBridgeWasRunning)', $mainStart)
+$second=$source.IndexOf('elseif ($script:previousBridgeWasStopped -and $previousBridgeWasRunning)', $first)
+$script:restarts=0
+function Start-PreviousBridgeAfterRollback {
+ if ($script:upgradeMaintenanceLease) { throw 'Start still holds the maintenance lease' }
+ $script:restarts++; return $true
+}
+foreach ($offset in @($first,$second)) {
+ $begin=$source.IndexOf('{',$offset)+1
+ $end=$source.IndexOf('}',$begin)
+ Enter-UpgradeMaintenanceLease
+ try { Invoke-Expression $source.Substring($begin,$end-$begin) }
+ finally { Exit-UpgradeMaintenanceLease }
+}
+if ($script:restarts -ne 2) { throw 'Recovery fixture did not exercise both branches' }
+""")
+
 
 if __name__ == "__main__":
     unittest.main()

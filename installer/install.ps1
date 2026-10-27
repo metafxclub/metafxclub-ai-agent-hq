@@ -3451,6 +3451,11 @@ try {
     try {
         Enter-UpgradeMaintenanceLease
         Assert-OfflineUpgradeReady
+        # The verified maintenance baseline supersedes the earlier endpoint
+        # probe: the owner may have intentionally stopped HQ in between. A
+        # failed upgrade must preserve that stopped state, not revive HQ.
+        $previousBridgeWasRunning = $false
+        $script:previousBridgeWasStopped = $false
         Suspend-SentimentForUpdate
         $bridgeTaskWasEnabled = Suspend-BridgeScheduledTask
         if (
@@ -3645,6 +3650,7 @@ try {
                 }
             }
             if ($rollbackRestored -and $previousBridgeWasRunning) {
+                Exit-UpgradeMaintenanceLease
                 $previousBridgeRestored = [bool](Start-PreviousBridgeAfterRollback)
             }
         }
@@ -3652,6 +3658,7 @@ try {
             # Port races and snapshot/pre-publish failures occur before any
             # application mutation, but the verified old Bridge was already
             # stopped. Restore its service independently of file rollback.
+            Exit-UpgradeMaintenanceLease
             $previousBridgeRestored = [bool](Start-PreviousBridgeAfterRollback)
         }
         throw $installError
