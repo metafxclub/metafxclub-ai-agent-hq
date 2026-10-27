@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -164,12 +165,34 @@ class OfflineUpgradeStateTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows maintenance lease")
 class OfflineUpgradeLeaseTests(unittest.TestCase):
-    def run_fixture(self, body):
+    def run_fixture(self, body, *, short_parent=False):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "isolated-hq"
+            parent = Path(temporary)
+            if short_parent:
+                # GitHub's Windows TEMP can contain RUNNER~1. Force the same
+                # 8.3 alias case locally; no production directory is touched.
+                import ctypes
+                from ctypes import wintypes
+                parent = parent / "Maintenance Lease Long Parent"
+                parent.mkdir()
+                get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+                get_short.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+                get_short.restype = wintypes.DWORD
+                buffer = ctypes.create_unicode_buffer(32768)
+                result = get_short(str(parent), buffer, len(buffer))
+                if not result or result >= len(buffer):
+                    self.fail("Unable to obtain the isolated Windows 8.3 fixture path")
+                if buffer.value.lower() == str(parent).lower():
+                    self.skipTest("The fixture volume has 8.3 names disabled")
+                parent = Path(buffer.value)
+            root = parent / "isolated-hq"
+            # Independent production Bridge derivation: PROJECT_ROOT is a
+            # pathlib-resolved path, not the raw possibly-short TEMP spelling.
+            bridge_digest = hashlib.sha256(str(root.resolve()).lower().encode("utf-8")).hexdigest()[:16]
             script = f"""
 $ErrorActionPreference='Stop'
 $installRoot='{str(root).replace("'", "''")}'
+$bridgeDigest='{bridge_digest}'
 $upgradeMaintenanceLease=$null
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile('{str(ROOT / 'installer/install.ps1').replace("'", "''")}',[ref]$tokens,[ref]$errors)
@@ -185,21 +208,25 @@ function Get-CimInstance {{ @() }}
             result = subprocess.run(["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", command], capture_output=True, text=True, timeout=20)
             self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_same_bridge_namespace_is_held_and_released(self):
+    def assert_bridge_namespace_held(self, *, short_parent=False):
         self.run_fixture(r"""
 Enter-UpgradeMaintenanceLease
 try {
- $sha=[Security.Cryptography.SHA256]::Create()
- $digest=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($installRoot.ToLowerInvariant())))).Replace('-','').ToLowerInvariant().Substring(0,16)
- $sha.Dispose(); $created=$false
+ $digest=$bridgeDigest; $created=$false
  $competitor=[Threading.Mutex]::new($false,('Local\MetafxAgentHQBridge-'+$digest),[ref]$created)
- if ($created) { throw 'Bridge could enter during upgrade' }
+ if ($created) { throw ('Bridge could enter during upgrade: raw=' + $installRoot + '; canonical=' + [IO.Path]::GetFullPath($installRoot) + '; expected=' + $bridgeDigest) }
  $competitor.Dispose()
 } finally { Exit-UpgradeMaintenanceLease }
 $created=$false
 $next=[Threading.Mutex]::new($false,('Local\MetafxAgentHQBridge-'+$digest),[ref]$created)
 if (-not $created) { throw 'Maintenance lease leaked' }; $next.Dispose()
-""")
+""", short_parent=short_parent)
+
+    def test_same_bridge_namespace_is_held_and_released(self):
+        self.assert_bridge_namespace_held()
+
+    def test_short_temp_alias_uses_the_actual_bridge_canonical_namespace(self):
+        self.assert_bridge_namespace_held(short_parent=True)
 
     def test_existing_owner_refuses_without_releasing_its_lease(self):
         self.run_fixture(r"""

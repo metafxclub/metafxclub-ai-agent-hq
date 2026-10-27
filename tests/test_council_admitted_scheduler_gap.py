@@ -1,6 +1,7 @@
 """An admitted current bar keeps its original budget after slow local capture."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import unittest
 from unittest import mock
@@ -24,8 +25,11 @@ class CouncilAdmittedSchedulerGapTests(unittest.TestCase):
             def now(cls, tz=None):
                 return cls.instant.astimezone(tz) if tz else cls.instant.replace(tzinfo=None)
 
-        self.enterContext(mock.patch.object(b, "datetime", Clock))
-        self.enterContext(mock.patch.object(fixtures, "datetime", Clock))
+        # TestCase.enterContext was added in 3.11; the runtime also supports 3.10.
+        clock_patches = ExitStack()
+        self.addCleanup(clock_patches.close)
+        clock_patches.enter_context(mock.patch.object(b, "datetime", Clock))
+        clock_patches.enter_context(mock.patch.object(fixtures, "datetime", Clock))
         return fixture, b, Clock, start
 
     def pending(self, fixture, b):

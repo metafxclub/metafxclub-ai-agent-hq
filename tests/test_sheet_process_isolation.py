@@ -389,30 +389,54 @@ module._release_worker_lease(lease)
 
     def test_parent_death_exits_only_the_fixture_worker_and_releases_its_pipe(self) -> None:
         child_script = Path(self.temp.name) / "monitored_child.py"
-        child_script.write_text("""import importlib.util, sys, time
+        child_script.write_text("""import importlib.util, json, os, sys, time
 spec = importlib.util.spec_from_file_location('fixture_monitor_module', sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 monitor = module._ParentDeathMonitor()
 if not monitor.start(): raise SystemExit(3)
-print('monitor-ready', flush=True)
+print(json.dumps({'kind': 'worker', 'pid': os.getpid(), 'parentPid': monitor.parent_pid,
+                  'executable': sys.executable}), flush=True)
 time.sleep(8)
 monitor.close()
 """, encoding="utf-8")
         parent_script = Path(self.temp.name) / "fixture_parent.py"
-        parent_script.write_text("""import os, subprocess, sys
+        parent_script.write_text("""import importlib.util, json, os, subprocess, sys
+spec = importlib.util.spec_from_file_location('fixture_launcher_module', sys.argv[2])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
 options = {'stdin': subprocess.DEVNULL, 'stdout': sys.stdout, 'stderr': subprocess.DEVNULL}
 if os.name == 'nt': options['creationflags'] = subprocess.CREATE_NO_WINDOW
-child = subprocess.Popen([sys.executable, '-I', '-B', '-u', sys.argv[1], sys.argv[2]], **options)
+command, environment = module._direct_worker_launch([sys.executable, '-I', '-B', '-u', sys.argv[1], sys.argv[2]])
+child = subprocess.Popen(command, env=environment, **options)
+print(json.dumps({'kind': 'owner', 'pid': os.getpid(), 'childPid': child.pid,
+                  'executable': sys.executable}), flush=True)
 sys.stdin.readline()
 os._exit(0)
 """, encoding="utf-8")
         options = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL, "text": True}
         if os.name == "nt":
             options["creationflags"] = subprocess.CREATE_NO_WINDOW
-        parent = subprocess.Popen([sys.executable, "-I", "-B", "-u", str(parent_script), str(child_script), str(EXECUTOR_PATH)], **options)
+        # Match production at both edges. A Windows venv redirector waits for
+        # its child and is not the owner whose death the monitor must observe.
+        command, environment = self.module._direct_worker_launch(
+            [sys.executable, "-I", "-B", "-u", str(parent_script), str(child_script), str(EXECUTOR_PATH)])
+        parent = subprocess.Popen(command, env=environment, **options)
+        ready = queue.Queue()
+        def read_ready():
+            for _ in range(2):
+                ready.put(parent.stdout.readline())
+        reader = threading.Thread(target=read_ready, daemon=True)
+        reader.start()
         try:
-            self.assertEqual(parent.stdout.readline().strip(), "monitor-ready")
+            facts = [json.loads(ready.get(timeout=10)) for _ in range(2)]
+            owner = next(row for row in facts if row["kind"] == "owner")
+            worker = next(row for row in facts if row["kind"] == "worker")
+            self.assertEqual(owner["pid"], parent.pid, "Popen must own the actual fixture parent")
+            self.assertEqual(worker["pid"], owner["childPid"], "Worker handle must not identify a venv redirector")
+            self.assertEqual(worker["parentPid"], parent.pid, "Monitor must observe the real fixture owner")
+            for row in facts:
+                self.assertEqual(Path(row["executable"]).resolve(), Path(sys.executable).resolve())
             # The grandchild inherits this pipe. EOF proves that the orphan
             # monitor exited it, rather than merely letting its parent exit.
             parent.communicate(input="exit\n", timeout=4)
@@ -425,6 +449,7 @@ os._exit(0)
                 parent.stdin.close()
             if parent.stdout:
                 parent.stdout.close()
+            reader.join(timeout=1)
 
     def test_real_projection_child_imports_without_mutating_runtime_or_using_credentials(self) -> None:
         project = Path(self.temp.name) / "projection-checkout"

@@ -117,6 +117,24 @@ function Enter-UpgradeMaintenanceLease {
         }
         $part = Split-Path -Parent $part
     }
+    # GetFullPath can expand only the first 8.3 component when a later leaf
+    # does not exist. Bridge uses pathlib.Path.resolve(), so resolve every
+    # existing component natively before appending the absent suffix.
+    $existing = $normalized
+    $suffix = New-Object 'System.Collections.Generic.List[string]'
+    while (-not (Test-Path -LiteralPath $existing)) {
+        $suffix.Insert(0, [IO.Path]::GetFileName($existing))
+        $existing = Split-Path -Parent $existing
+        if (-not $existing) { throw 'Offline upgrade refused: cannot resolve the installation root.' }
+    }
+    if (-not ('Metafxclub.Installer.UpgradeCanonicalPathV1' -as [type])) {
+        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; namespace Metafxclub.Installer { public static class UpgradeCanonicalPathV1 { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] public static extern uint GetLongPathNameW(string path, StringBuilder output, uint capacity); } }'
+    }
+    $canonical = [Text.StringBuilder]::new(32768)
+    $length = [Metafxclub.Installer.UpgradeCanonicalPathV1]::GetLongPathNameW($existing, $canonical, [uint32]$canonical.Capacity)
+    if ($length -eq 0 -or $length -ge $canonical.Capacity) { throw 'Offline upgrade refused: cannot establish the canonical Bridge lease identity.' }
+    $normalized = $canonical.ToString().TrimEnd('\')
+    foreach ($leaf in $suffix) { $normalized = Join-Path $normalized $leaf }
     # Same existing Bridge guard: prevents watchdog/manual starts during copy.
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized.ToLowerInvariant())))).Replace('-', '').ToLowerInvariant().Substring(0, 16) }
