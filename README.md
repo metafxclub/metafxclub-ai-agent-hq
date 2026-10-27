@@ -50,7 +50,7 @@ Prompt ต้องล็อก Git Tag และ `EXPECTED_VERSION` ให้�
 
 Repository หลัก: `https://github.com/metafxclub/metafxclub-ai-agent-hq`
 
-ส่วนนี้มีไว้เก็บ Source เพื่ออ่าน เรียน GitHub แก้โค้ด และรันชุดทดสอบเท่านั้น ไม่ใช่เส้นทางติดตั้งสำหรับห้องเรียนและไม่ได้รับสถานะ `verified_remote_git_tag` แบบ Prompt อัตโนมัติ Public Git Source จงใจไม่มีไฟล์ Client กลางจาก Release ดังนั้น **ห้ามคาดหวังว่า Plain clone แล้วเปิด `1-INSTALL-HQ.bat` หรือ `UPDATE-HQ.bat` จะติดตั้ง Runtime ห้องเรียนพร้อม Google ได้** เครื่องใหม่ใช้ [Prompt ติดตั้งใหม่](docs/prompts/install-github-google-auto-th.md) ส่วนเครื่องที่มี HQ แล้วใช้ [Prompt อัปเดตโดยเก็บค่าตั้งเดิม](docs/prompts/update-github-preserve-settings-th.md) ทั้งสองเส้นทางต้องล็อก Tag/Version และตรวจ Release Asset + hash ส่วน Advanced/Recovery custom override สงวนไว้สำหรับผู้ดูแลระบบที่ควบคุม OAuth Project ของตนเอง ห้ามคัดลอก Client จาก Runtime กลับมา commit
+ส่วนนี้มีไว้เก็บ Source เพื่ออ่าน เรียน GitHub แก้โค้ด และรันชุดทดสอบเท่านั้น ไม่ใช่เส้นทางติดตั้งสำหรับห้องเรียนและไม่ได้รับสถานะ `verified_remote_git_tag` แบบ Prompt อัตโนมัติ Public Git Source จงใจไม่มีไฟล์ Client กลางจาก Release ดังนั้น **ห้ามคาดหวังว่า Plain clone แล้วเปิด `1-INSTALL-HQ.bat` หรือ `UPDATE-HQ.bat` จะติดตั้ง Runtime ห้องเรียนพร้อม Google ได้** เครื่องใหม่ใช้ [Prompt หลักสำหรับติดตั้งใหม่](docs/prompts/install-github-google-auto-th.md) ส่วนเครื่องที่มี HQ แล้วใช้ [Prompt อัปเดตโดยเก็บค่าตั้งเดิม](docs/prompts/update-github-preserve-settings-th.md) ทั้งสองเส้นทางต้องล็อก Tag/Version และตรวจ Release Asset + hash ส่วน Advanced/Recovery custom override สงวนไว้สำหรับผู้ดูแลระบบที่ควบคุม OAuth Project ของตนเอง ห้ามคัดลอก Client จาก Runtime กลับมา commit
 
 ```powershell
 git clone https://github.com/metafxclub/metafxclub-ai-agent-hq.git
