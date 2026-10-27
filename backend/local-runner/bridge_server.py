@@ -160,7 +160,7 @@ from hq_backend.ea.ea_factory_optimization import (  # noqa: E402 - durable guar
     EaFactoryOptimizationService,
     OptimizationDomainError,
 )
-from hq_backend.research import fx_news_direct, fx_trend  # noqa: E402 - pure research models
+from hq_backend.research import fx_news_direct, fx_trend, sentiment_news_ai, sentiment_news_daily  # noqa: E402 - pure research models
 from hq_backend.google import google_sheet_hub  # noqa: E402 - backend-only authenticated Sheets adapter
 from hq_backend.trading.mt4_market_watch import (  # noqa: E402 - selected MT4 Market Watch read model
     MAX_MARKET_WATCH_SYMBOLS,
@@ -3456,6 +3456,9 @@ def mission_payload_digest(mission: dict) -> str:
     }
     if mission.get("managerAnalysisContext") is not None:
         packet["managerAnalysisContext"] = mission["managerAnalysisContext"]
+    if mission.get("sentimentNewsContext") is not None:
+        packet["sentimentNewsContext"] = mission["sentimentNewsContext"]
+        packet["newsRequester"] = mission.get("requester")
     if mission.get("councilProviderRetry") is not None:
         packet["councilProviderRetry"] = mission["councilProviderRetry"]
     scheduled_completion_retry = mission.get("scheduledCompletionRetry")
@@ -9430,10 +9433,24 @@ DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION = (
 )
 
 
+class _SentimentNewsHost:
+    def __getattr__(self, name):
+        return globals()[name]
+
+
+_SENTIMENT_NEWS_DAILY = sentiment_news_daily.DailyNews(_SentimentNewsHost())
+
+
+def _sentiment_news_service():
+    return _SENTIMENT_NEWS_DAILY
+
+
 def _mission_output_limit_hard_cap(mission: object) -> int:
     """Keep the larger result budget exclusive to the bound Deep Research action."""
 
     row = mission if isinstance(mission, dict) else {}
+    if sentiment_news_daily.context(row):
+        return sentiment_news_ai.MAX_OUTPUT_CHARS
     context = row.get("workflowContext") if isinstance(row.get("workflowContext"), dict) else {}
     return (
         TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS
@@ -66481,10 +66498,12 @@ def _research_sheet_backfill_background_step(
 
 
 def _research_sheet_background_cache_step(state: dict) -> dict:
-    """Refresh one stale consumer after durable deliveries, including restart.
+    """Refresh one stale consumer after delivery or before its cache expires.
 
     The existing synced ledger is the durable refresh hint; losing this cursor
-    cannot lose a delivered update. A failed consumer rotates behind its peers.
+    cannot lose a delivered update. A daily refresh also covers quiet periods
+    and verified Sheets without deliveries. A failed consumer rotates behind
+    its peers; only a successful read advances that consumer's observed time.
     """
 
     deadline = time.monotonic() + RESEARCH_SHEET_BACKGROUND_IO_BUDGET_SECONDS
@@ -66505,9 +66524,10 @@ def _research_sheet_background_cache_step(state: dict) -> dict:
     synced_at = [parsed for item in store.get("syncedLedger") or []
                  if isinstance(item, dict) and item.get("configRevision") == revision
                  and (parsed := parse_iso(str(item.get("syncedAt") or ""))) is not None]
-    if not synced_at:
-        return {"refreshed": 0, "more": False, "reason": "no_deliveries"}
-    latest_synced_at = max(synced_at)
+    latest_synced_at = max(synced_at, default=None)
+    # Readers expire at 26 hours. Refresh at 24 hours even if no report was
+    # delivered, leaving headroom for bounded provider retries and rotation.
+    refresh_before = datetime.now(timezone.utc) - timedelta(hours=24)
     with RESEARCH_SHEET_CACHE_LOCK:
         cache = _load_research_sheet_cache_unlocked()
     cached_consumers = (cache.get("consumers") or {}) if (
@@ -66522,7 +66542,8 @@ def _research_sheet_background_cache_step(state: dict) -> dict:
             continue
         consumer = cached_consumers.get(consumer_id) or {}
         observed_at = parse_iso(str(consumer.get("observedAt") or cache.get("updatedAt") or ""))
-        if not consumer or observed_at is None or observed_at < latest_synced_at:
+        if (not consumer or observed_at is None or observed_at <= refresh_before
+                or (latest_synced_at is not None and observed_at < latest_synced_at)):
             pending.append(consumer_id)
     if not pending:
         return {"refreshed": 0, "more": False, "reason": "cache_current"}
@@ -99156,6 +99177,7 @@ def create_mission(
     _trusted_deep_research_prompt: str | None = None,
     _trusted_manager_analysis: dict | None = None,
     _trusted_optimization_publication_staging: dict | None = None,
+    _trusted_sentiment_news: dict | None = None,
 ) -> dict:
     raw_prompt = str(payload.get("prompt") or payload.get("detail") or payload.get("title") or "Review mission packet.").strip()
     if contains_potential_secret(raw_prompt):
@@ -99470,6 +99492,8 @@ def create_mission(
                 raise DataIntegrityError(
                     "Meeting implementation Mission idempotency record lost its private prompt invariant."
                 )
+            if _trusted_sentiment_news is not None and existing.get("sentimentNewsContext") != _trusted_sentiment_news:
+                raise DataIntegrityError("Daily news idempotency marker changed.")
             return existing
         raise RequestError("Idempotency key is already used by a different mission scope.", 409)
 
@@ -99499,6 +99523,16 @@ def create_mission(
         "updatedAt": now,
         "completedAt": None,
     }
+    if _trusted_sentiment_news is not None:
+        mission["sentimentNewsContext"] = copy.deepcopy(_trusted_sentiment_news)
+        if (not sentiment_news_daily.context(mission) or status != "queued"
+                or safe_workflow_context or analysis_context or parent_mission_id
+                or target_id != "left_signal_cube" or report_type != "sentiment_news_daily_report"
+                or model_tier != "specialist_fast" or risk == "high"):
+            raise DataIntegrityError("Daily news escaped its private read-only constructor.")
+        _sentiment_news_service().assignment(mission)
+        mission["budget"].update({"timeoutSeconds": sentiment_news_daily.TIMEOUT_SECONDS,
+                                 "outputLimitChars": sentiment_news_ai.MAX_OUTPUT_CHARS, "maxRuns": 1})
     if _trusted_manager_analysis is not None:
         if (requester != "manager" or tool_id != "codex_cli_task"
             or _trusted_manager_analysis.get("ownerAgentId") != agent_id
@@ -102776,6 +102810,21 @@ def _portal_evidence_open_failure_probe(
 
 
 def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: dict) -> dict | None:
+    news_mission = find_mission(mission_id) or {}
+    if sentiment_news_daily.context(news_mission):
+        if result.get("ok") is True:
+            try:
+                if runner.get("ok") is not True or runner.get("processStarted") is not True:
+                    raise ValueError("Daily news requires a completed real process receipt")
+                assignment = _sentiment_news_service().assignment(news_mission)
+                sentiment_news_ai.validate_result(result.get("newsAnalysis"), assignment)
+            except (ValueError, TypeError, OSError):
+                result = {"ok": False, "workStatus": "failed", "status": "news_analysis_invalid",
+                          "finalMessage": "Daily news output failed full event and source validation."}
+        finished = _finish_auto_mission(mission_id, lease_id, runner, result)
+        if finished is not None:
+            _sentiment_news_service().complete(news_mission, runner, result, finished)
+        return finished
     if (mission_id in MANAGER_READ_ONLY_COHORT.snapshot()["activeMissionIds"]
         or (find_mission(mission_id) or {}).get("managerAnalysisContext")):
         # Publish each child's terminal state and Report while excluding parent
@@ -105015,6 +105064,15 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
     agent_id = str(mission.get("owner") or "manager")
     tool_id = str(mission.get("toolId") or "")
     config = mission_worker_config()
+    is_daily_news = sentiment_news_daily.context(mission) is not None
+    if is_daily_news:
+        reason = _sentiment_news_service().preflight(mission)
+        if reason in {"council_busy", "council_window"}:
+            _defer_auto_mission_with_round_deadline(mission, reason, 30)
+            return
+        if reason:
+            block_auto_mission(mission_id, reason)
+            return
     new_bar_error = _council_new_bar_start_error(mission)
     if new_bar_error:
         _expire_ai_trade_council_vote_mission(
@@ -105433,6 +105491,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                                 {"ok": False, "workStatus": "blocked", "status": "manager_assignment_invalid", "blockedCapability": "manager_assignment_invalid"})
             return
         worker_result_profile = (
+            sentiment_news_ai.RESULT_PROFILE if is_daily_news else
             manager_analysis.RESULT_PROFILE if manager_context else
             fx_trend.RESULT_PROFILE
             if claimed_workflow_action_id == fx_trend.ACTION_ID
@@ -105485,6 +105544,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             is_council_vote
             or is_manager_parallel
             or bool(manager_context)
+            or is_daily_news
             or is_public_web_read_only
             or ea_factory_read_only
             or worker_result_profile == fx_trend.RESULT_PROFILE
@@ -105941,7 +106001,9 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                 if worker_result_profile == "trading_system_research"
                 else max(40000, output_limit + 10000)
             )
-            worker_prompt = fx_trend_worker_prompt if fx_trend_worker_prompt is not None else manager_analysis.render_prompt(manager_context) if manager_context else radar_worker_prompt
+            worker_prompt = (sentiment_news_ai.render_prompt(_sentiment_news_service().assignment(claimed))
+                             if is_daily_news else fx_trend_worker_prompt if fx_trend_worker_prompt is not None
+                             else manager_analysis.render_prompt(manager_context) if manager_context else radar_worker_prompt)
             if isinstance(ea_factory_source_review_transport, dict):
                 worker_prompt += str(
                     ea_factory_source_review_transport.get("promptBlock") or ""
@@ -105966,7 +106028,9 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             runner = ({"ok": False, "exitCode": "cancelled", "processStarted": False,
                        "output": json.dumps({"ok": False, "status": "bridge_shutdown_cancelled",
                                              "message": "Bridge shutdown cancelled this Mission before process start."})}
-                      if MISSION_WORKER_STOP.is_set() else run_safe_command(
+                      if MISSION_WORKER_STOP.is_set() else (
+                (lambda command, **kwargs: _sentiment_news_service().run(claimed, command, **kwargs))
+                if is_daily_news else run_safe_command)(
                 runner_command,
                 timeout=timeout_seconds + 30,
                 output_limit=runner_transport_limit,
@@ -106064,6 +106128,10 @@ def mission_worker_loop(worker_id: str) -> None:
                 MISSION_WORKER_WAKE.wait(config["idlePollSeconds"])
                 MISSION_WORKER_WAKE.clear()
                 continue
+            try:
+                _sentiment_news_service().tick()
+            except (ValueError, TypeError, OSError, DataIntegrityError):
+                append_audit({"type": "sentiment_news.daily_admission_blocked", "reason": "invalid_local_input"})
             mission = find_next_auto_mission(council_only=False, manager_parallel_only=False)
             if mission:
                 process_auto_mission(worker_id, mission)

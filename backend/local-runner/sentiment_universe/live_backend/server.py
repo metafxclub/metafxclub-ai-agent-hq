@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, unquote
 
 from .secure_store import SecretStore
 from .public_snapshot import public_snapshot
+from .news_ai_overlay import overlay_news
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,7 +32,7 @@ def atomic_json(path, value):
 
 
 class MarketService:
-    def __init__(self, state_dir, public_mirror=None):
+    def __init__(self, state_dir, public_mirror=None, *, news_ai_dir=None):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.secrets = SecretStore(self.state_dir / 'private')
@@ -40,6 +41,7 @@ class MarketService:
         self.lock = threading.RLock()
         self.auth_lock = threading.RLock()
         self.public_mirror = Path(public_mirror) if public_mirror else None
+        self.news_ai_dir = Path(news_ai_dir) if news_ai_dir is not None else None
         self.mirror_error = False
         self.mt5_setup = None
         self.selection_epoch = 0
@@ -64,7 +66,7 @@ class MarketService:
         if self.public_mirror:
             with self.lock:
                 try:
-                    atomic_json(self.public_mirror, public_snapshot(self.snapshot, utc_now()))
+                    atomic_json(self.public_mirror, public_snapshot(self.read(), utc_now()))
                     self.mirror_error = False
                 except (OSError, ValueError, TypeError):
                     # Preserve the last complete mirror. Its heartbeat will expire.
@@ -77,7 +79,9 @@ class MarketService:
 
     def read(self):
         with self.lock:
-            return json.loads(json.dumps(self.snapshot, allow_nan=False))
+            snapshot = json.loads(json.dumps(self.snapshot, allow_nan=False))
+        snapshot['news'] = overlay_news(snapshot.get('news', {}), self.news_ai_dir)
+        return snapshot
 
     def save_credentials(self, email, password):
         # A prior login must finish before replacing its encrypted session.

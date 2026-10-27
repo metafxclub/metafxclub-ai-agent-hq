@@ -49,15 +49,48 @@ export function getNewsForSymbol(symbol,day=thaiDay()){
  const pair=CATALOG.get(symbol), currencies=pair?.assetClass==='forex'?[symbol.slice(0,3),symbol.slice(3)]:['USD'];
  return all.filter(event=>(event.dayThai||thaiDay(event.time))===day&&(!symbol||currencies.includes(event.currency)||event.currency==='ALL')).sort((a,b)=>(a.time||'9999').localeCompare(b.time||'9999')||a.id.localeCompare(b.id));
 }
+const AI_STATUSES=new Set(['pending','queued','running','ready','failed','blocked','interrupted','stale','empty']);
+const AI_DIRECTIONS=new Set(['up','down','mixed','unknown']);
+const boundedText=(value,max)=>typeof value==='string'&&value.trim().length>0&&value.length<=max;
+const explicitStamp=value=>typeof value==='string'&&/(Z|[+-]\d{2}:\d{2})$/.test(value)&&Number.isFinite(Date.parse(value));
+export function getNewsAiState(source=snapshot.news,day=thaiDay(),now=Date.now()){
+ const batch=source?.aiAnalysis;
+ let status=AI_STATUSES.has(batch?.status)?batch.status:'pending';
+ if(day!==thaiDay(new Date(now).toISOString())||(batch?.dayThai&&batch.dayThai!==day))status='stale';
+ if(status==='ready'&&(batch.dayThai!==day||!/^[a-f0-9]{64}$/.test(batch?.inputDigest||'')||!explicitStamp(batch?.generatedAt)||thaiDay(batch.generatedAt)!==day||Date.parse(batch.generatedAt)>now+30000))status='stale';
+ const label=({pending:'รอ AI รายวัน',queued:'AI รายวันอยู่ในคิว',running:'AI กำลังวิเคราะห์ข่าววันนี้',ready:'AI รายวันพร้อม',failed:'AI รายวันไม่สำเร็จ',blocked:'AI รายวันรอความพร้อม',interrupted:'AI รายวันถูกขัดจังหวะ',stale:'ยังไม่มี AI ที่ตรงกับวันที่เลือก',empty:'วันนี้ไม่มีข่าวให้ AI วิเคราะห์'})[status];
+ const reason=({quota_unavailable:'รอข้อมูลโควต้า',quota_below_reserve:'โควต้ายังไม่พร้อม',council_busy:'รอสภา AI ทำงานเสร็จ',council_window:'รอพ้นรอบสภา AI',waiting_calendar:'รอปฏิทินข่าว',calendar_stale:'ปฏิทินยังไม่เป็นปัจจุบัน',calendar_changed:'ปฏิทินเปลี่ยนหลังวิเคราะห์',result_invalid:'ผลวิเคราะห์ยังไม่ผ่านการตรวจ',day_expired:'พ้นวันที่วิเคราะห์แล้ว'})[batch?.reason]||'';
+ return {status,label,reason,generatedAt:status==='ready'?batch.generatedAt:null};
+}
+// The server validates the result against the complete calendar input. The view
+// also requires that exact batch binding so stale/mixed mirrors stay educational.
+export function getEventAi(event,source=snapshot.news,now=Date.now()){
+ const ai=event?.ai,day=event?.dayThai||(explicitStamp(event?.time)?thaiDay(event.time):''),batch=source?.aiAnalysis;
+ if(!event||getNewsAiState(source,day,now).status!=='ready'||ai?.status!=='ready'||ai.eventId!==event.id||ai.dayThai!==day||ai.inputDigest!==batch?.inputDigest||ai.generatedAt!==batch?.generatedAt)return null;
+ if(!boundedText(ai.summaryTh,400)||!Array.isArray(ai.explanationTh)||ai.explanationTh.length<1||ai.explanationTh.length>4||!ai.explanationTh.every(line=>boundedText(line,180))||!boundedText(ai.caveatTh,240))return null;
+ if(!['short','medium','long'].every(key=>boundedText(ai.horizonNotesTh?.[key],160)))return null;
+ if(!Array.isArray(ai.sourceRefs)||ai.sourceRefs.length<1||ai.sourceRefs.length>4||!ai.sourceRefs.every(ref=>boundedText(ref?.name,240)&&safeUrl(ref?.url)))return null;
+ if(!ai.scenarios||!['currency','XAUUSD','XAGUSD'].every(key=>ai.scenarios[key]===null||['below','inline','above'].every(which=>AI_DIRECTIONS.has(ai.scenarios[key]?.[which]?.direction)&&boundedText(ai.scenarios[key]?.[which]?.textTh,280))))return null;
+ return {...ai,explanationTh:[...ai.explanationTh],sourceRefs:ai.sourceRefs.map(ref=>({name:ref.name,url:safeUrl(ref.url)}))};
+}
 export function getEventScenarios(event,symbol){
  const pair=CATALOG.get(symbol);
- if(!pair||pair.assetClass!=='forex'||!['activity','employment','unemployment','inflation','confidence','growth','rates','retail'].includes(event.metric)||!Number.isFinite(event.forecastValue)||!event.numeric)return [];
+ if(!pair||!Number.isFinite(event.forecastValue)||!event.numeric)return [];
  const side=event.currency===symbol.slice(0,3)?1:event.currency===symbol.slice(3)?-1:0;
- if(!side)return [];
+ const ai=getEventAi(event),cases=ai?.scenarios?.[pair.assetClass==='forex'?'currency':symbol];
+ if(ai){
+  if(!cases||(pair.assetClass==='forex'?!side:pair.assetClass!=='metals'||event.currency!=='USD'))return [];
+  return [['below','ต่ำกว่าคาด'],['inline','ใกล้เคียงคาด'],['above','สูงกว่าคาด']].map(([key,label])=>{
+   const item=cases[key],direction=pair.assetClass==='forex'&&side===-1?({up:'down',down:'up'}[item.direction]||item.direction):item.direction;
+   const effect=direction==='up'?`อาจหนุน ${symbol} ↑`:direction==='down'?`อาจกดดัน ${symbol} ↓`:direction==='mixed'?'แรงหนุนและแรงกดดันอาจหักล้างกัน':'ยังไม่ระบุทิศทาง';
+   return {key,label,direction,summary:effect,detail:item.textTh,note:ai.caveatTh,origin:'ai'};
+  });
+ }
+ if(pair.assetClass!=='forex'||!side||!['activity','employment','unemployment','inflation','confidence','growth','rates','retail'].includes(event.metric))return [];
  const polarity=event.metric==='unemployment'?-1:1;
  return [{key:'below',label:'ต่ำกว่าคาด',delta:-1},{key:'inline',label:'ใกล้เคียงคาด',delta:0},{key:'above',label:'สูงกว่าคาด',delta:1}].map(({delta,...item})=>{
   const direction=delta*polarity*side;
-  return {...item,direction:direction>0?'up':direction<0?'down':'neutral',summary:direction>0?`อาจหนุน ${symbol} ↑`:direction<0?`อาจกดดัน ${symbol} ↓`:'ยังไม่ชี้ทิศ ต้องดูรายละเอียดและข่าวอื่นร่วมด้วย',note:event.metric==='inflation'?'ขึ้นกับการปรับคาดการณ์ดอกเบี้ย ไม่ใช่ผลตายตัว':'ฉากทัศน์พื้นฐานตามเงื่อนไข ไม่ใช่คำแนะนำซื้อขาย'};
+  return {...item,direction:direction>0?'up':direction<0?'down':'neutral',summary:direction>0?`อาจหนุน ${symbol} ↑`:direction<0?`อาจกดดัน ${symbol} ↓`:'ยังไม่ชี้ทิศ ต้องดูรายละเอียดและข่าวอื่นร่วมด้วย',note:event.metric==='inflation'?'ขึ้นกับการปรับคาดการณ์ดอกเบี้ย ไม่ใช่ผลตายตัว':'ฉากทัศน์พื้นฐานตามเงื่อนไข ไม่ใช่คำแนะนำซื้อขาย',origin:'dictionary'};
  });
 }
 export function sourceStatus(source){const status=source?.status;return ({loading:'กำลังเชื่อมต่อ',ready:'พร้อม',ok:'พร้อม',fresh:'พร้อม',empty:'ไม่มีข่าววันนี้ในปฏิทิน',partial:'ข้อมูลบางส่วน',stale:'ข้อมูลเก่า',error:'เชื่อมต่อไม่สำเร็จ',needs_configuration:'รอเชื่อมบัญชี',auth_error:'ตรวจบัญชีอีกครั้ง',auth_failed:'ตรวจบัญชีอีกครั้ง',authentication_failed:'ตรวจบัญชีอีกครั้ง',rate_limited:'รอรอบโควต้า',provider_unavailable:'แหล่งข้อมูลยังไม่พร้อม',unavailable:'ยังไม่มีข้อมูล',market_closed:'ตลาดปิด',not_covered:'วันที่อยู่นอกช่วงข้อมูล',cached:'ข้อมูลจากรอบล่าสุด'})[status]||status||'ยังไม่มีข้อมูล';}

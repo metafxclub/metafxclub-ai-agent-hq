@@ -21,6 +21,47 @@ def rows(value, names, limit):
     return [scalar_fields(row, names) for row in value[:limit] if isinstance(row, dict)] if isinstance(value, list) else []
 
 
+AI_METADATA = 'status reason dayThai generatedAt inputDigest profile eventCount missionId updatedAt attempted'
+
+
+def event_ai(value):
+    if not isinstance(value, dict) or value.get('status') != 'ready':
+        return None
+    result = scalar_fields(value, AI_METADATA + ' eventId summaryTh caveatTh')
+    result['explanationTh'] = [line[:180] for line in value.get('explanationTh', [])[:4] if isinstance(line, str)] if isinstance(value.get('explanationTh'), list) else []
+    result['horizonNotesTh'] = scalar_fields(value.get('horizonNotesTh'), 'short medium long')
+    result['sourceIds'] = [ref[:160] for ref in value.get('sourceIds', [])[:4] if isinstance(ref, str)] if isinstance(value.get('sourceIds'), list) else []
+    result['sourceRefs'] = rows(value.get('sourceRefs'), 'name url', 4)
+    result['scenarios'] = {}
+    scenarios = value.get('scenarios') if isinstance(value.get('scenarios'), dict) else {}
+    for asset in ('currency', 'XAUUSD', 'XAGUSD'):
+        group = scenarios.get(asset)
+        if not isinstance(group, dict):
+            result['scenarios'][asset] = None
+            continue
+        projected = {}
+        for case in ('below', 'inline', 'above'):
+            row = scalar_fields(group.get(case), 'direction textTh')
+            if row.get('direction') not in {'up', 'down', 'mixed', 'unknown'}:
+                row['direction'] = 'unknown'
+            projected[case] = row
+        result['scenarios'][asset] = projected
+    return result
+
+
+def news_events(value):
+    result = []
+    for event in value[:5000] if isinstance(value, list) else []:
+        if not isinstance(event, dict):
+            continue
+        row = scalar_fields(event, EVENT)
+        analysis = event_ai(event.get('ai'))
+        if analysis is not None:
+            row['ai'] = analysis
+        result.append(row)
+    return result
+
+
 COMMON = 'status source lastSuccessAt lastAttemptAt nextAttemptAt checkedAt errorCode reason'
 EVENT = ('id sourceEventId idStability currency time dayThai timeLabel timeKind timePrecision sourceTime sourceTimeZone '
          'sourceDate originalTitle title titleLanguage metric summary summaryOrigin impact impactLabel kind numeric '
@@ -46,8 +87,9 @@ def public_snapshot(snapshot, published_at):
     c['coverage'] = scalar_fields(correlations.get('coverage'), 'available total')
     c['clock'] = scalar_fields(correlations.get('clock'), 'basis historicalClockApproximation')
     n = scalar_fields(news, COMMON + ' sourceUrl provider dayThai timeZone mock supportsActual snapshotOnly updatePolicy actualNotice aiStatus summaryOrigin migrationPending recoveredFromSavedExport warning error rightsNote')
+    n['aiAnalysis'] = scalar_fields(news.get('aiAnalysis'), AI_METADATA)
     for key in ('events', 'calendarEvents'):
-        n[key] = rows(news.get(key), EVENT, 5000)
+        n[key] = news_events(news.get(key))
     n['availableDays'] = rows(news.get('availableDays'), 'dayThai count fullyCovered', 100)
     n['attribution'] = scalar_fields(news.get('attribution'), 'text url')
     coverage = news.get('coverage', {})

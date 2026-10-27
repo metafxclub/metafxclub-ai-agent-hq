@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from contextlib import ExitStack
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 from urllib.request import Request
@@ -699,6 +700,105 @@ class ResearchSheetBackgroundBatchTests(unittest.TestCase):
             result = self.bridge._research_sheet_background_cache_step({})
         self.assertEqual(result["consumerId"], "deepResearch")
         refresh.assert_called_once()
+
+    def test_expired_cache_refreshes_without_new_delivery_and_restores_reader_rows(self) -> None:
+        previous = self.seed_cache()
+        now = datetime(2026, 10, 2, 3, tzinfo=timezone.utc)
+        self.internal["consumerChecks"] = {name: {"readReady": True, "configRevision": 3} for name in previous["consumers"]}
+        store = self.bridge._research_sheet_outbox_default()
+        store["syncedLedger"] = [{"id": "older-receipt", "configRevision": 3,
+                                  "syncedAt": "2026-09-30T23:00:00Z", "payloadDigest": "fixture"}]
+        self.bridge._save_research_sheet_outbox_unlocked(store)
+        with (
+            mock.patch.object(self.bridge, "datetime", wraps=datetime) as dates,
+            mock.patch.object(self.bridge, "utc_now", return_value=now.isoformat()),
+            mock.patch.object(self.bridge.google_sheet_hub, "credential_status", return_value={"configured": True}),
+            mock.patch.object(self.bridge.google_sheet_hub, "read_values", side_effect=[[["record_id"]], [["fresh"]], [["fresh"]]]) as read,
+        ):
+            dates.now.return_value = now
+            self.assertEqual(self.bridge._research_sheet_cached_rows("deepResearch"), [])
+            result = self.bridge._research_sheet_background_cache_step({})
+            self.assertEqual(result["refreshed"], 1)
+            self.assertEqual(result["consumerId"], "deepResearch")
+            self.assertTrue(result["more"])
+            self.assertEqual(self.bridge._research_sheet_cached_rows("deepResearch"), [{"record_id": "fresh"}])
+            self.assertEqual(self.bridge._research_sheet_cached_rows("worldSystem"), [])
+        self.assertEqual([call.args[1] for call in read.call_args_list], ["Deep_Research"] * 3)
+        after = json.loads((self.runtime / "cache.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(after["consumers"]["worldSystem"], previous["consumers"]["worldSystem"])
+        self.assertEqual(after["updatedAt"], previous["updatedAt"], "A partial refresh must not make untouched data look fresh")
+        self.assertEqual(after["consumers"]["deepResearch"]["observedAt"], now.isoformat())
+
+    def test_verified_sheet_without_deliveries_refreshes_at_24_hours_not_before(self) -> None:
+        previous = self.seed_cache()
+        now = datetime(2026, 10, 2, 3, tzinfo=timezone.utc)
+        self.internal["consumerChecks"] = {"deepResearch": {"readReady": True, "configRevision": 3}}
+        self.bridge._save_research_sheet_outbox_unlocked(self.bridge._research_sheet_outbox_default())
+        for age, expected in ((timedelta(hours=23, minutes=59), 0), (timedelta(hours=24), 1), (timedelta(hours=27), 1)):
+            with self.subTest(age=age):
+                cache = copy.deepcopy(previous)
+                cache["consumers"]["deepResearch"]["observedAt"] = (now - age).isoformat()
+                (self.runtime / "cache.json").write_text(json.dumps(cache), encoding="utf-8")
+                with mock.patch.object(self.bridge, "datetime", wraps=datetime) as dates, mock.patch.object(self.bridge, "_refresh_research_sheet_cache") as refresh:
+                    dates.now.return_value = now
+                    result = self.bridge._research_sheet_background_cache_step({})
+                self.assertEqual(result["refreshed"], expected)
+                self.assertEqual(refresh.call_count, expected)
+                if expected:
+                    self.assertEqual(refresh.call_args.kwargs["allowed_consumer_ids"], {"deepResearch"})
+                    self.assertTrue(refresh.call_args.kwargs["merge_existing"])
+
+    def test_missing_cache_without_deliveries_rebuilds_only_active_verified_consumers(self) -> None:
+        self.seed_cache()
+        (self.runtime / "cache.json").unlink()
+        self.bridge._save_research_sheet_outbox_unlocked(self.bridge._research_sheet_outbox_default())
+        with mock.patch.object(self.bridge, "_refresh_research_sheet_cache") as refresh:
+            self.assertEqual(self.bridge._research_sheet_background_cache_step({})["refreshed"], 0)
+            refresh.assert_not_called()
+            self.internal["consumerChecks"] = {"deepResearch": {"readReady": True, "configRevision": 2}}
+            self.assertEqual(self.bridge._research_sheet_background_cache_step({})["refreshed"], 0)
+            refresh.assert_not_called()
+            self.internal["consumerChecks"]["deepResearch"]["configRevision"] = 3
+            self.internal["active"] = False
+            self.assertEqual(self.bridge._research_sheet_background_cache_step({})["reason"], "activation_required")
+            refresh.assert_not_called()
+            self.internal["active"] = True
+            result = self.bridge._research_sheet_background_cache_step({})
+        self.assertEqual(result["refreshed"], 1)
+        self.assertEqual(result["consumerId"], "deepResearch")
+        refresh.assert_called_once()
+
+    def test_daily_cache_failure_rotates_and_stop_or_budget_never_publish_freshness(self) -> None:
+        previous = self.seed_cache()
+        now = datetime(2026, 10, 2, 3, tzinfo=timezone.utc)
+        self.internal["consumerChecks"] = {name: {"readReady": True, "configRevision": 3} for name in previous["consumers"]}
+        self.bridge._save_research_sheet_outbox_unlocked(self.bridge._research_sheet_outbox_default())
+        before = (self.runtime / "cache.json").read_bytes()
+        cursor = {}
+        with (
+            mock.patch.object(self.bridge, "datetime", wraps=datetime) as dates,
+            mock.patch.object(self.bridge, "_refresh_research_sheet_cache", side_effect=RuntimeError("fixture provider unavailable")) as refresh,
+        ):
+            dates.now.return_value = now
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "fixture provider unavailable"):
+                    self.bridge._research_sheet_background_cache_step(cursor)
+            self.assertEqual([call.kwargs["allowed_consumer_ids"] for call in refresh.call_args_list], [{"deepResearch"}, {"worldSystem"}])
+            self.assertEqual((self.runtime / "cache.json").read_bytes(), before)
+            self.stop.set()
+            self.assertEqual(self.bridge._research_sheet_background_cache_step(cursor)["reason"], "budget_exhausted")
+            self.stop.clear()
+            original_read = self.bridge.read_json.side_effect
+            def slow_cache_read(path, fallback):
+                result = original_read(path, fallback)
+                if Path(path) == self.bridge.RESEARCH_SHEET_CACHE_PATH:
+                    self.clock += self.bridge.RESEARCH_SHEET_BACKGROUND_IO_BUDGET_SECONDS + 1
+                return result
+            with mock.patch.object(self.bridge, "read_json", side_effect=slow_cache_read):
+                result = self.bridge._research_sheet_background_cache_step(cursor)
+            self.assertEqual(result["reason"], "budget_exhausted")
+            self.assertEqual(refresh.call_count, 2)
+        self.assertEqual((self.runtime / "cache.json").read_bytes(), before)
 
     def test_slow_report_read_rechecks_deadline_before_projection_and_retains_cursor(self) -> None:
         self.write_report(0)
