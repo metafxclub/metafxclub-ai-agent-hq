@@ -2651,6 +2651,9 @@ RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT = 100
 # to be created.
 RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS = 30
 RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS = 5 * 60
+RESEARCH_SHEET_BACKGROUND_REPORT_BATCH_LIMIT = 2
+RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS = 8.0
+RESEARCH_SHEET_BACKGROUND_IO_BUDGET_SECONDS = 40.0
 RESEARCH_SHEET_OUTBOX_RETRY_BASE_SECONDS = 60
 RESEARCH_SHEET_OUTBOX_RETRY_MAX_SECONDS = 60 * 60
 RESEARCH_SHEET_AUTO_SYNC_ENABLED = __name__ in {"__main__", "bridge_server"}
@@ -18969,7 +18972,11 @@ def _research_sheet_cached_rows(consumer_id: str) -> list[dict]:
     consumer_check = checks.get(consumer_id) if isinstance(checks.get(consumer_id), dict) else {}
     with RESEARCH_SHEET_CACHE_LOCK:
         cache = _load_research_sheet_cache_unlocked()
-    cached_at = parse_iso(str(cache.get("updatedAt") or ""))
+    consumer = (cache.get("consumers") or {}).get(consumer_id)
+    cached_at = parse_iso(str(
+        (consumer.get("observedAt") if isinstance(consumer, dict) else None)
+        or cache.get("updatedAt") or ""
+    ))
     cache_age_seconds = (
         max(0.0, (datetime.now(timezone.utc) - cached_at.astimezone(timezone.utc)).total_seconds())
         if cached_at is not None
@@ -18987,7 +18994,6 @@ def _research_sheet_cached_rows(consumer_id: str) -> list[dict]:
         or cache_age_seconds > RESEARCH_SHEET_CACHE_MAX_AGE_SECONDS
     ):
         return []
-    consumer = (cache.get("consumers") or {}).get(consumer_id)
     rows = consumer.get("rows") if isinstance(consumer, dict) and isinstance(consumer.get("rows"), list) else []
     return [
         copy.deepcopy(row)
@@ -19017,10 +19023,17 @@ def _refresh_research_sheet_cache(
     consumer_checks: object | None = None,
     *,
     persist: bool = True,
+    allowed_consumer_ids: set[str] | None = None,
+    merge_existing: bool = False,
+    open_url=None,
 ) -> dict:
+    refresh_started_at = utc_now()
     consumers: dict[str, dict] = {}
     checks = consumer_checks if isinstance(consumer_checks, dict) else None
+    request_options = {"open_url": open_url} if open_url is not None else {}
     for consumer_id, contract in _research_sheet_tab_contracts().items():
+        if allowed_consumer_ids is not None and consumer_id not in allowed_consumer_ids:
+            continue
         if checks is not None:
             check = checks.get(consumer_id)
             if not isinstance(check, dict) or check.get("readReady") is not True:
@@ -19029,6 +19042,7 @@ def _refresh_research_sheet_cache(
             sheet_id,
             str(contract.get("tabName") or ""),
             "1:1",
+            **request_options,
         )
         headers = [
             google_sheet_hub.canonical_header(value)
@@ -19046,6 +19060,7 @@ def _refresh_research_sheet_cache(
             sheet_id,
             str(contract.get("tabName") or ""),
             f"{key_column}2:{key_column}{RESEARCH_SHEET_CACHE_SCAN_MAX_ROW}",
+            **request_options,
         )
         keyed_row_numbers = [
             row_number
@@ -19066,6 +19081,7 @@ def _refresh_research_sheet_cache(
                 sheet_id,
                 str(contract.get("tabName") or ""),
                 f"A{first_row_number}:{end_column}{last_row_number}",
+                **request_options,
             )
         rows: list[dict] = []
         row_numbers: list[int] = []
@@ -19110,12 +19126,38 @@ def _refresh_research_sheet_cache(
         "updatedAt": utc_now(),
     }
     if persist:
-        with RESEARCH_SHEET_CACHE_LOCK:
-            write_json(
-                RESEARCH_SHEET_CACHE_PATH,
-                cache,
-                keep_backup=RESEARCH_SHEET_CACHE_PATH.exists(),
-            )
+        # Keep the established settings -> cache lock order, with no network
+        # work under either lock. The active revision cannot change between
+        # its recheck and this background compare-and-merge publication.
+        with (DASHBOARD_WORKFLOW_SETTINGS_LOCK if merge_existing else nullcontext()):
+            if merge_existing:
+                current = _research_sheet_hub_internal()
+                if (str(current.get("sheetId") or "") != sheet_id
+                        or current.get("configRevision") != config_revision
+                        or current.get("activeConfigRevision") != config_revision
+                        or current.get("active") is not True):
+                    return cache
+            with RESEARCH_SHEET_CACHE_LOCK:
+                if merge_existing:
+                    previous = _load_research_sheet_cache_unlocked()
+                    if (previous.get("sheetDigest") == cache["sheetDigest"]
+                            and previous.get("configRevision") == config_revision):
+                        merged = dict(previous.get("consumers") or {})
+                        for consumer_id, consumer in consumers.items():
+                            old = merged.get(consumer_id) or {}
+                            old_observed = parse_iso(str(old.get("observedAt") or ""))
+                            if old_observed is None or old_observed <= parse_iso(refresh_started_at):
+                                merged[consumer_id] = consumer
+                        cache["consumers"] = merged
+                        # A partial refresh never rejuvenates another consumer.
+                        observed = [str(item.get("observedAt") or previous.get("updatedAt") or "")
+                                    for item in merged.values() if isinstance(item, dict)]
+                        cache["updatedAt"] = min(observed) if observed else cache["updatedAt"]
+                write_json(
+                    RESEARCH_SHEET_CACHE_PATH,
+                    cache,
+                    keep_backup=RESEARCH_SHEET_CACHE_PATH.exists(),
+                )
     return cache
 
 
@@ -65521,6 +65563,8 @@ def _research_sheet_drain_deferred_reports(
     *,
     max_reports: int = RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
     allowed_consumer_ids: set[str] | None = None,
+    max_scanned: int = RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Materialize a bounded oldest durable capacity backlog into row work."""
 
@@ -65575,17 +65619,20 @@ def _research_sheet_drain_deferred_reports(
     ))
     scan_limit = min(
         len(eligible),
-        RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+        clamp_int(max_scanned, RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+                  1, RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT),
     )
     scanned = 0
     drained = 0
     queued = 0
     capacity_deferred = 0
     recovery_deferred = 0
-    deep_version_index: dict[tuple[str, str], dict] | None = None
-    deep_version_index_unavailable = False
     for marker in eligible[:scan_limit]:
-        if drained >= limit:
+        if drained >= limit or (
+            deadline_monotonic is not None
+            and (time.monotonic() >= deadline_monotonic
+                 or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set())
+        ):
             break
         scanned += 1
         report_id = safe_reference(marker.get("reportId"))
@@ -65620,30 +65667,20 @@ def _research_sheet_drain_deferred_reports(
                 error_code,
             )
             continue
-        if report_type == "trading_system_research_report":
-            if deep_version_index_unavailable:
-                error_code = "deferred_deep_version_index_unavailable"
-            elif deep_version_index is None:
-                try:
-                    deep_version_index = _research_sheet_runtime_deep_version_index(
-                        report
-                    )
-                except (OSError, ValueError, TypeError, DataIntegrityError):
-                    deep_version_index_unavailable = True
-                    error_code = "deferred_deep_version_index_unavailable"
-        if error_code is not None:
-            recovery_deferred += 1
-            _research_sheet_mark_deferred_recovery(
-                report_id,
-                revision,
-                error_code,
-            )
-            continue
+        # The compact A-J projection deliberately ignores version_index. Its
+        # confirmation and source-receipt checks remain in queue_report; an
+        # unrelated historical file must not turn one recovery into a full
+        # report archive traversal.
+        if deadline_monotonic is not None and (
+            time.monotonic() >= deadline_monotonic
+            or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set()
+        ):
+            break
         result = _research_sheet_queue_report(
             report,
             flush=False,
             allowed_consumer_ids={consumer_id},
-            deep_version_index=deep_version_index,
+            deep_version_index=None,
         )
         if result.get("reason") == "outbox_capacity_reached":
             capacity_deferred += 1
@@ -65690,7 +65727,8 @@ def _research_sheet_drain_deferred_reports(
         "eligibleDeferredCount": eligible_deferred,
         "capacityDeferredCount": capacity_deferred,
         "recoveryDeferredCount": recovery_deferred,
-        "scanLimit": RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+        "scanLimit": clamp_int(max_scanned, RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+                              1, RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT),
         "batchLimit": limit,
         "credentialsIncluded": False,
     })
@@ -65728,17 +65766,57 @@ def _research_sheet_mark_write_verified(config_revision: int, consumer_id: str) 
     _mutate_dashboard_workflow_settings(mutate)
 
 
+def _research_sheet_background_opener(deadline_monotonic: float):
+    """Share one network budget across OAuth, the write and its read-back.
+
+    Existing authorization transactions still run in the adapter. A budget
+    exhaustion is retryable, and becomes write_unknown after any Sheets write
+    attempt, so a later idempotent retry must verify the same record key.
+    """
+
+    sheet_write_attempted = False
+
+    def open_with_budget(request, *, timeout=20):
+        nonlocal sheet_write_attempted
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= 0 or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+            raise google_sheet_hub.GoogleSheetHubError(
+                "background_budget_exhausted", "Background Sheet work yielded for the next tick.",
+                503, sheet_write_attempted,
+            )
+        url = str(getattr(request, "full_url", request))
+        method = request.get_method() if hasattr(request, "get_method") else "GET"
+        if url.startswith(google_sheet_hub.GOOGLE_API_ROOT + "/") and method not in {"GET", "HEAD"}:
+            sheet_write_attempted = True
+        try:
+            return urlopen(request, timeout=min(float(timeout), remaining))
+        except HTTPError:
+            # A definite provider rejection remains an auth/schema/permission
+            # result even if its response arrives at the deadline boundary.
+            raise
+        except (TimeoutError, OSError) as error:
+            if time.monotonic() >= deadline_monotonic:
+                raise google_sheet_hub.GoogleSheetHubError(
+                    "background_budget_exhausted", "Background Sheet request exhausted its budget.",
+                    503, sheet_write_attempted,
+                ) from error
+            raise
+
+    return open_with_budget
+
+
 def _flush_research_sheet_outbox(
     *,
     max_items: int = 20,
     allowed_item_ids: set[str] | None = None,
+    background: bool = False,
 ) -> dict:
     if not RESEARCH_SHEET_FLUSH_LOCK.acquire(blocking=False):
         return {"processed": 0, "synced": 0, "reason": "flush_in_progress"}
     try:
+        options = {"background": True} if background else {}
         return _flush_research_sheet_outbox_locked(
-            max_items=max_items,
-            allowed_item_ids=allowed_item_ids,
+            max_items=max_items, allowed_item_ids=allowed_item_ids, **options,
         )
     finally:
         RESEARCH_SHEET_FLUSH_LOCK.release()
@@ -65782,11 +65860,15 @@ def _flush_research_sheet_outbox_locked(
     *,
     max_items: int = 20,
     allowed_item_ids: set[str] | None = None,
+    background: bool = False,
 ) -> dict:
+    deadline = (time.monotonic() + RESEARCH_SHEET_BACKGROUND_IO_BUDGET_SECONDS
+                if background else None)
+    request_options = ({"open_url": _research_sheet_background_opener(deadline)}
+                       if deadline is not None else {})
     internal = _research_sheet_hub_internal()
     sheet_id = str(internal.get("sheetId") or "")
     revision = int(internal.get("configRevision") or 0)
-    auth = google_sheet_hub.credential_status()
     if not sheet_id:
         return {"processed": 0, "synced": 0, "reason": "not_configured"}
     if (
@@ -65794,8 +65876,6 @@ def _flush_research_sheet_outbox_locked(
         or internal.get("activeConfigRevision") != revision
     ):
         return {"processed": 0, "synced": 0, "reason": "activation_required"}
-    if not auth.get("configured"):
-        return {"processed": 0, "synced": 0, "reason": "auth_required" if sheet_id else "not_configured"}
     allowed_ids = (
         None
         if allowed_item_ids is None
@@ -65830,10 +65910,21 @@ def _flush_research_sheet_outbox_locked(
             key=lambda item: clamp_int(item.get("attemptCount"), 0, 0, 9999)
         )
         candidates = candidates[:clamp_int(max_items, 20, 1, 50)]
+    if not candidates:
+        return {"processed": 0, "synced": 0, "deferred": 0, "reason": None,
+                **({"syncedConsumerIds": [], "configRevision": revision} if background else {})}
+    # An idle/synced outbox needs neither OAuth status nor a provider request.
+    auth = google_sheet_hub.credential_status()
+    if not auth.get("configured"):
+        return {"processed": 0, "synced": 0, "reason": "auth_required"}
     processed = 0
     synced = 0
     synced_consumer_ids: set[str] = set()
     for candidate in candidates:
+        if deadline is not None and (
+            time.monotonic() >= deadline or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set()
+        ):
+            break
         processed += 1
         status = "failed"
         error_code = None
@@ -65855,13 +65946,21 @@ def _flush_research_sheet_outbox_locked(
                 exact_headers=tuple(
                     candidate_contract.get("exactHeaders") or []
                 ),
+                **request_options,
             )
             status = "synced"
         except google_sheet_hub.GoogleSheetHubError as error:
             error_code = error.code
             if error.write_unknown:
                 status = "write_unknown"
-            elif error.code in {"rate_limited", "google_api_unavailable"}:
+            elif (deadline is not None and time.monotonic() >= deadline
+                  and error.code in {"auth_unavailable", "google_api_unavailable"}):
+                # A socket can time out in response.read(), after the bounded
+                # opener has returned. Preserve an exhausted transient OAuth
+                # read as retryable; explicit auth/schema denials stay terminal.
+                status = "retry_pending"
+                error_code = "background_budget_exhausted"
+            elif error.code in {"rate_limited", "google_api_unavailable", "background_budget_exhausted"}:
                 status = "retry_pending"
             else:
                 # Auth/permission failures require an operator correction and
@@ -65939,27 +66038,34 @@ def _flush_research_sheet_outbox_locked(
     if synced:
         for consumer_id in sorted(synced_consumer_ids):
             _research_sheet_mark_write_verified(revision, consumer_id)
-        try:
-            _refresh_research_sheet_cache(sheet_id, revision)
-        except google_sheet_hub.GoogleSheetHubError:
-            # The row already has a verified per-write read-back receipt. A
-            # cache refresh failure is surfaced on the next explicit verify,
-            # not rewritten as a false write failure.
-            pass
+        if not background:
+            try:
+                _refresh_research_sheet_cache(sheet_id, revision)
+            except google_sheet_hub.GoogleSheetHubError:
+                # The row already has a verified per-write read-back receipt.
+                pass
     return {
         "processed": processed,
         "synced": synced,
         "deferred": max(0, len(candidates) - processed),
         "reason": None,
+        **({"syncedConsumerIds": sorted(synced_consumer_ids), "configRevision": revision}
+           if background else {}),
     }
 
 
 def _research_sheet_backfill_recent_reports(
     allowed_consumer_ids: set[str] | None = None,
+    *,
+    _report_batch: list[dict] | None = None,
+    _deliver: bool = True,
 ) -> dict:
     queued = 0
     quarantined = 0
-    recent_reports = list(reversed(load_runtime_reports(limit=240)))
+    recent_reports = (
+        list(reversed(load_runtime_reports(limit=240)))
+        if _report_batch is None else _report_batch
+    )
     allowed = (
         None
         if allowed_consumer_ids is None
@@ -66043,10 +66149,16 @@ def _research_sheet_backfill_recent_reports(
                 quarantined += 1
             continue
         queued += int(queue_result.get("queued") or 0)
-    flush_result = _flush_research_sheet_outbox(max_items=50)
-    deferred_drain = _research_sheet_drain_deferred_reports(
-        max_reports=RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
-        allowed_consumer_ids=allowed_consumer_ids,
+    flush_result = (
+        _flush_research_sheet_outbox(max_items=50)
+        if _deliver else {"processed": 0, "synced": 0, "reason": "separate_background_phase"}
+    )
+    deferred_drain = (
+        _research_sheet_drain_deferred_reports(
+            max_reports=RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
+            allowed_consumer_ids=allowed_consumer_ids,
+        )
+        if _deliver else {"queued": 0, "eligibleDeferred": 0}
     )
     deferred_queued = clamp_int(
         deferred_drain.get("queued"),
@@ -66067,6 +66179,167 @@ def _research_sheet_backfill_recent_reports(
             RESEARCH_SHEET_DEFERRED_REPORT_LIMIT,
         ),
     }
+
+
+def _research_sheet_backfill_background_step(
+    state: dict,
+    *,
+    max_reports: int = RESEARCH_SHEET_BACKGROUND_REPORT_BATCH_LIMIT,
+    budget_seconds: float = RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS,
+) -> dict:
+    """Resume one cooperative local projection batch, without network delivery.
+
+    The scheduler owns this disposable cursor. The reports and the outbox are
+    the durable sources of truth: restart reconstructs the scan and the existing
+    payload/revision receipts prevent duplicate delivery. A fixed manifest
+    avoids perpetually revisiting the first reports as newer files arrive.
+    """
+
+    deadline = time.monotonic() + max(0.0, min(float(budget_seconds), 30.0))
+    limit = clamp_int(max_reports, RESEARCH_SHEET_BACKGROUND_REPORT_BATCH_LIMIT, 1, 10)
+    internal = _research_sheet_hub_internal()
+    revision = clamp_int(internal.get("configRevision"), -1, -1, 999999)
+    result = {"queued": 0, "recentQueued": 0, "quarantinedReports": 0,
+              "processedReports": 0, "scannedReports": 0, "more": False,
+              "reason": None, "configRevision": revision}
+    if (revision < 0 or internal.get("active") is not True
+            or internal.get("activeConfigRevision") != revision):
+        state.clear()
+        result["reason"] = "activation_required"
+        return result
+    sheet_digest = payload_digest("research-sheet-id-v1", str(internal.get("sheetId") or ""))
+    if state.get("configRevision") != revision or state.get("sheetDigest") != sheet_digest:
+        state.clear()
+    if "entries" not in state:
+        paths = []
+        for path in RUNTIME_REPORTS_DIR.glob("*.json"):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            paths.append((stat.st_mtime_ns, path.name, str(path), stat.st_size))
+        # Match the existing newest-240 scope, but process oldest first.
+        selected = list(reversed(sorted(paths, reverse=True)[:240]))
+        state.update({"configRevision": revision, "sheetDigest": sheet_digest, "cursor": 0,
+                      "entries": [item[2] for item in selected],
+                      "fingerprints": {item[2]: (item[0], item[3]) for item in selected}})
+    entries = state["entries"]
+    cursor = int(state.get("cursor") or 0)
+    fingerprints = state["fingerprints"]
+    pending = set(entries[cursor:])
+    # An edited report behind the cursor joins the tail instead of resetting
+    # the scan and starving untouched reports. Never persist a projection of
+    # the manifest's old bytes: the file is read again immediately below.
+    for path_text in list(dict.fromkeys(entries[:cursor])):
+        if time.monotonic() >= deadline or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+            break
+        try:
+            stat = Path(path_text).stat()
+        except FileNotFoundError:
+            continue
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+        if fingerprint != fingerprints.get(path_text):
+            fingerprints[path_text] = fingerprint
+            if path_text not in pending:
+                entries.append(path_text)
+                pending.add(path_text)
+    while cursor < len(entries) and result["processedReports"] < limit:
+        if DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+            result["reason"] = "stopped"
+            break
+        if time.monotonic() >= deadline:
+            result["reason"] = "budget_exhausted"
+            break
+        path = Path(entries[cursor])
+        # Advance only after an atomic report has succeeded or been safely
+        # quarantined. Unexpected store errors remain retryable at this cursor.
+        try:
+            report = read_json(path, None)
+        except DataIntegrityError:
+            # The normal whole-scan reader also fails closed on malformed JSON.
+            # Rotate this path once so later valid files can still progress;
+            # the durable file is retried during the next sweep.
+            cursor += 1
+            state["cursor"] = cursor
+            raise
+        result["scannedReports"] += 1
+        if isinstance(report, dict) and report.get("type") in RESEARCH_SHEET_SYNC_REPORT_TYPES:
+            if time.monotonic() >= deadline or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+                result["reason"] = ("stopped" if DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set()
+                                    else "budget_exhausted")
+                break
+            batch = _research_sheet_backfill_recent_reports(
+                _report_batch=[report], _deliver=False,
+            )
+            result["processedReports"] += 1
+            for key in ("queued", "recentQueued", "quarantinedReports"):
+                result[key] += int(batch.get(key) or 0)
+        cursor += 1
+        state["cursor"] = cursor
+    result["more"] = cursor < len(entries)
+    if not result["more"]:
+        state.clear()
+    return result
+
+
+def _research_sheet_background_cache_step(state: dict) -> dict:
+    """Refresh one stale consumer after durable deliveries, including restart.
+
+    The existing synced ledger is the durable refresh hint; losing this cursor
+    cannot lose a delivered update. A failed consumer rotates behind its peers.
+    """
+
+    deadline = time.monotonic() + RESEARCH_SHEET_BACKGROUND_IO_BUDGET_SECONDS
+    internal = _research_sheet_hub_internal()
+    revision = clamp_int(internal.get("configRevision"), -1, -1, 999999)
+    sheet_id = str(internal.get("sheetId") or "")
+    if (not sheet_id or revision < 0 or internal.get("active") is not True
+            or internal.get("activeConfigRevision") != revision):
+        state.clear()
+        return {"refreshed": 0, "more": False, "reason": "activation_required"}
+    identity = (payload_digest("research-sheet-id-v1", sheet_id), revision)
+    if state.get("identity") != identity:
+        state.clear()
+        state["identity"] = identity
+        state["cursor"] = 0
+    with RESEARCH_SHEET_OUTBOX_LOCK:
+        store = _load_research_sheet_outbox_unlocked()
+    synced_at = [parsed for item in store.get("syncedLedger") or []
+                 if isinstance(item, dict) and item.get("configRevision") == revision
+                 and (parsed := parse_iso(str(item.get("syncedAt") or ""))) is not None]
+    if not synced_at:
+        return {"refreshed": 0, "more": False, "reason": "no_deliveries"}
+    latest_synced_at = max(synced_at)
+    with RESEARCH_SHEET_CACHE_LOCK:
+        cache = _load_research_sheet_cache_unlocked()
+    cached_consumers = (cache.get("consumers") or {}) if (
+        cache.get("sheetDigest") == identity[0] and cache.get("configRevision") == revision
+    ) else {}
+    checks = internal.get("consumerChecks") or {}
+    consumer_ids = list(_research_sheet_tab_contracts())
+    pending = []
+    for consumer_id in consumer_ids:
+        check = checks.get(consumer_id) or {}
+        if check.get("readReady") is not True or check.get("configRevision") != revision:
+            continue
+        consumer = cached_consumers.get(consumer_id) or {}
+        observed_at = parse_iso(str(consumer.get("observedAt") or cache.get("updatedAt") or ""))
+        if not consumer or observed_at is None or observed_at < latest_synced_at:
+            pending.append(consumer_id)
+    if not pending:
+        return {"refreshed": 0, "more": False, "reason": "cache_current"}
+    if DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set() or time.monotonic() >= deadline:
+        return {"refreshed": 0, "more": True, "reason": "budget_exhausted"}
+    start = int(state.get("cursor") or 0) % len(consumer_ids)
+    ordered = consumer_ids[start:] + consumer_ids[:start]
+    consumer_id = next(value for value in ordered if value in pending)
+    state["cursor"] = (consumer_ids.index(consumer_id) + 1) % len(consumer_ids)
+    _refresh_research_sheet_cache(
+        sheet_id, revision, checks, allowed_consumer_ids={consumer_id},
+        merge_existing=True, open_url=_research_sheet_background_opener(deadline),
+    )
+    return {"refreshed": 1, "consumerId": consumer_id,
+            "more": len(pending) > 1, "reason": None}
 
 
 def _deep_research_confirmation_failure(
@@ -71226,8 +71499,10 @@ def _record_dashboard_workflow_scheduler_tick_result(result: object) -> None:
 
 def dashboard_workflow_scheduler_loop() -> None:
     started_at = utc_now()
-    next_sheet_outbox_maintenance = 0.0
-    next_sheet_backfill_maintenance = 0.0
+    sheet_due = {"sheet_flush": 0.0, "sheet_backfill": 0.0,
+                 "sheet_deferred": 0.0, "sheet_cache": 0.0}
+    sheet_backfill_state: dict = {}
+    sheet_cache_state: dict = {}
     _dashboard_workflow_scheduler_runtime_update(
         status="running",
         phase="starting",
@@ -71292,47 +71567,49 @@ def dashboard_workflow_scheduler_loop() -> None:
                 lastTickKind="scheduler_exception",
                 lastTickMessage=redact_text(f"{type(error).__name__}: {error}", 160),
             )
-        if (
-            RESEARCH_SHEET_AUTO_SYNC_ENABLED
-            and time.monotonic() >= next_sheet_outbox_maintenance
-        ):
-            next_sheet_outbox_maintenance = (
-                time.monotonic() + RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
-            )
-            try:
-                _dashboard_workflow_scheduler_runtime_update(phase="sheet_flush")
-                _flush_research_sheet_outbox(max_items=20)
-            except Exception as error:
-                # Sheet delivery is downstream of the durable local report.
-                # Keep the daily scheduler alive and leave the item in the
-                # outbox for the next bounded retry.
+        if RESEARCH_SHEET_AUTO_SYNC_ENABLED and not DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+            now_monotonic = time.monotonic()
+            due = [phase for phase, due_at in sheet_due.items() if due_at <= now_monotonic]
+            # Only one maintenance phase per scheduler tick. Earliest-due
+            # selection gives backfill, recovery and cache their turn even
+            # while the outbox has continuous delivery work.
+            if due:
+                phase = min(due, key=lambda value: sheet_due[value])
+                interval = RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
                 try:
-                    append_audit({
-                        "type": "research_sheet_hub.background_flush_failed",
-                        "errorCode": type(error).__name__,
-                        "credentialsIncluded": False,
-                    })
-                except Exception:
-                    pass
-        if (
-            RESEARCH_SHEET_AUTO_SYNC_ENABLED
-            and time.monotonic() >= next_sheet_backfill_maintenance
-        ):
-            next_sheet_backfill_maintenance = (
-                time.monotonic() + RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
-            )
-            try:
-                _dashboard_workflow_scheduler_runtime_update(phase="sheet_backfill")
-                _research_sheet_backfill_recent_reports()
-            except Exception as error:
-                try:
-                    append_audit({
-                        "type": "research_sheet_hub.background_backfill_failed",
-                        "errorCode": type(error).__name__,
-                        "credentialsIncluded": False,
-                    })
-                except Exception:
-                    pass
+                    _dashboard_workflow_scheduler_runtime_update(phase=phase)
+                    if phase == "sheet_flush":
+                        outcome = _flush_research_sheet_outbox(max_items=1, background=True)
+                        if outcome.get("synced"):
+                            sheet_due["sheet_cache"] = min(sheet_due["sheet_cache"], now_monotonic)
+                    elif phase == "sheet_backfill":
+                        outcome = _research_sheet_backfill_background_step(sheet_backfill_state)
+                        if not outcome.get("more"):
+                            interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                    elif phase == "sheet_deferred":
+                        outcome = _research_sheet_drain_deferred_reports(
+                            max_reports=1, max_scanned=1,
+                            deadline_monotonic=time.monotonic() + RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS,
+                        )
+                        if not outcome.get("eligibleDeferred"):
+                            interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                    else:
+                        outcome = _research_sheet_background_cache_step(sheet_cache_state)
+                        if not outcome.get("more"):
+                            interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                except Exception as error:
+                    # The report/outbox remain durable. Rotate past a failed
+                    # phase instead of letting it monopolize every tick.
+                    try:
+                        append_audit({
+                            "type": f"research_sheet_hub.background_{phase.removeprefix('sheet_')}_failed",
+                            "errorCode": type(error).__name__,
+                            "credentialsIncluded": False,
+                        })
+                    except Exception:
+                        pass
+                finally:
+                    sheet_due[phase] = time.monotonic() + interval
         _dashboard_workflow_scheduler_runtime_update(phase="waiting")
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.wait(DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS)
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.clear()
