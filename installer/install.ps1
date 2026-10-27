@@ -1023,6 +1023,7 @@ function Assert-SafeSource {
         "backend\local-runner\hq_backend\research\radar_image_adapter.py",
         "backend\local-runner\hq_backend\research\radar_prompt.py",
         "backend\local-runner\hq_backend\research\radar_publication.py",
+        "backend\local-runner\hq_backend\research\sheet_executor.py",
         "contracts\research\radar-website-source-policy-v1.json",
         "contracts\research\radar-website-tool-compatibility-v1.json",
         "contracts\reports\report-contract.json",

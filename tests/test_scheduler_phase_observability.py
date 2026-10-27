@@ -92,7 +92,7 @@ class SchedulerPhaseObservabilityTests(unittest.TestCase):
         self.assertEqual(state["runtime"]["phaseElapsedSeconds"], 196.0)
         self.assertEqual(state["runtime"]["lastHeartbeatAt"], heartbeat)
 
-    def test_existing_loop_exposes_each_inflight_phase_and_preserves_call_order(self) -> None:
+    def test_core_loop_exposes_tick_and_wait_without_any_sheet_maintenance(self) -> None:
         observed = []
 
         def capture(phase: str) -> None:
@@ -111,28 +111,6 @@ class SchedulerPhaseObservabilityTests(unittest.TestCase):
             capture("scheduler_tick")
             return {"ok": True, "kind": "scheduler_idle"}
 
-        def flush(*, max_items: int, background: bool) -> dict:
-            self.assertEqual(max_items, 1)
-            self.assertTrue(background)
-            capture("sheet_flush")
-            return {"synced": 1}
-
-        def backfill(state: dict) -> dict:
-            capture("sheet_backfill")
-            self.assertIsInstance(state, dict)
-            return {"more": True}
-
-        def deferred(*, max_reports: int, max_scanned: int, deadline_monotonic: float) -> dict:
-            self.assertEqual((max_reports, max_scanned), (1, 1))
-            self.assertEqual(deadline_monotonic, self.clock + self.bridge.RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS)
-            capture("sheet_deferred")
-            return {"eligibleDeferred": 1}
-
-        def cache(state: dict) -> dict:
-            capture("sheet_cache")
-            self.assertIsInstance(state, dict)
-            return {"more": True}
-
         def wait(timeout: float) -> None:
             capture("waiting")
             self.assertEqual(timeout, self.bridge.DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS)
@@ -144,19 +122,17 @@ class SchedulerPhaseObservabilityTests(unittest.TestCase):
         with (
             mock.patch.object(self.bridge, "RESEARCH_SHEET_AUTO_SYNC_ENABLED", True),
             mock.patch.object(self.bridge, "dashboard_workflow_scheduler_tick", side_effect=tick) as tick_mock,
-            mock.patch.object(self.bridge, "_flush_research_sheet_outbox", side_effect=flush) as flush_mock,
-            mock.patch.object(self.bridge, "_research_sheet_backfill_background_step", side_effect=backfill) as backfill_mock,
-            mock.patch.object(self.bridge, "_research_sheet_drain_deferred_reports", side_effect=deferred) as deferred_mock,
-            mock.patch.object(self.bridge, "_research_sheet_background_cache_step", side_effect=cache) as cache_mock,
+            mock.patch.object(self.bridge, "_flush_research_sheet_outbox", side_effect=AssertionError("Sheet delivery entered core loop")) as flush_mock,
+            mock.patch.object(self.bridge, "_research_sheet_backfill_background_step", side_effect=AssertionError("Sheet projection entered core loop")) as backfill_mock,
+            mock.patch.object(self.bridge, "_research_sheet_drain_deferred_reports", side_effect=AssertionError("Sheet recovery entered core loop")) as deferred_mock,
+            mock.patch.object(self.bridge, "_research_sheet_background_cache_step", side_effect=AssertionError("Sheet cache entered core loop")) as cache_mock,
             mock.patch.object(self.bridge, "_research_sheet_backfill_recent_reports", side_effect=AssertionError("Full manual scan forbidden in scheduler")),
         ):
             self.bridge.dashboard_workflow_scheduler_loop()
-        expected_phases = ["sheet_flush", "sheet_backfill", "sheet_deferred", "sheet_cache"] * 2
-        self.assertEqual(observed, [part for phase in expected_phases for part in ("scheduler_tick", phase, "waiting")])
+        self.assertEqual(observed, ["scheduler_tick", "waiting"] * 8)
         self.assertEqual(tick_mock.call_args_list, [mock.call(refresh_quota=True)] * 8)
-        self.assertEqual(flush_mock.call_args_list, [mock.call(max_items=1, background=True)] * 2)
-        self.assertEqual((backfill_mock.call_count, deferred_mock.call_count, cache_mock.call_count), (2, 2, 2))
-        self.assertIs(backfill_mock.call_args_list[0].args[0], backfill_mock.call_args_list[1].args[0])
+        for operation in (flush_mock, backfill_mock, deferred_mock, cache_mock):
+            operation.assert_not_called()
         self.assertEqual(self.wake.clear.call_count, 8)
         self.clock += 500
         state = self._state()
@@ -166,10 +142,6 @@ class SchedulerPhaseObservabilityTests(unittest.TestCase):
         cases = [
             ("scheduler_tick", RuntimeError("tick fixture"), "scheduler_exception"),
             ("scheduler_tick", self.bridge.DataIntegrityError("fixture"), "data_integrity_error"),
-            ("sheet_flush", RuntimeError("flush fixture"), "scheduler_idle"),
-            ("sheet_backfill", RuntimeError("backfill fixture"), "scheduler_idle"),
-            ("sheet_deferred", RuntimeError("deferred fixture"), "scheduler_idle"),
-            ("sheet_cache", RuntimeError("cache fixture"), "scheduler_idle"),
         ]
         for failed_phase, error, expected_kind in cases:
             with self.subTest(phase=failed_phase, error=type(error).__name__):
@@ -206,8 +178,7 @@ class SchedulerPhaseObservabilityTests(unittest.TestCase):
                 self.assertEqual(state["phase"], "stopped")
                 self.assertEqual(state["phaseElapsedSeconds"], 0.0)
                 self.assertEqual(state["lastTickKind"], expected_kind)
-                self.assertEqual([phase for phase in observed if phase != "scheduler_tick"],
-                                 ["sheet_flush", "sheet_backfill", "sheet_deferred", "sheet_cache"])
+                self.assertEqual(observed, ["scheduler_tick"] * 4)
 
     def test_stop_keeps_inflight_phase_until_thread_has_stopped(self) -> None:
         self.bridge._dashboard_workflow_scheduler_runtime_update(status="running", phase="sheet_flush")
@@ -225,7 +196,7 @@ class SchedulerPhaseObservabilityTests(unittest.TestCase):
         self.assertEqual((state["status"], state["phase"], state["phaseElapsedSeconds"]), ("stopped", "stopped", 0.0))
         self.assertFalse(state["operational"])
 
-    def test_capability_matches_flag_without_loading_or_authorizing_configuration(self) -> None:
+    def test_core_declares_no_sheet_writes_even_when_sheet_service_enabled(self) -> None:
         for enabled in (False, True):
             with (
                 self.subTest(enabled=enabled),
@@ -234,9 +205,10 @@ class SchedulerPhaseObservabilityTests(unittest.TestCase):
                 mock.patch.object(self.bridge, "_research_sheet_backfill_background_step") as backfill,
             ):
                 state = self._state()
-                self.assertEqual(state["externalWrites"], enabled)
-                self.assertEqual(state["googleSheetExternalWritesEnabled"], enabled)
-                self.assertEqual(state["externalWriteScopes"], ["google_sheets"] if enabled else [])
+                self.assertFalse(state["externalWrites"])
+                self.assertFalse(state["googleSheetExternalWritesEnabled"])
+                self.assertEqual(state["externalWriteScopes"], [])
+                self.assertEqual(state["sheetServiceOwner"], "isolated_sheet_service")
                 self.assertTrue(state["googleSheetExternalWritesRequireActiveConfiguration"])
                 self.assertFalse(state["otherExternalWrites"])
                 self.assertFalse(state["metaTraderActions"])

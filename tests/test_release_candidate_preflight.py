@@ -55,6 +55,7 @@ REQUIRED_BACKEND_PACKAGE_FILES = (
     "backend/local-runner/hq_backend/research/radar_image_adapter.py",
     "backend/local-runner/hq_backend/research/radar_prompt.py",
     "backend/local-runner/hq_backend/research/radar_publication.py",
+    "backend/local-runner/hq_backend/research/sheet_executor.py",
     "backend/local-runner/hq_backend/runtime/__init__.py",
     "backend/local-runner/hq_backend/runtime/codex_quota.py",
     "backend/local-runner/hq_backend/runtime/manager_parallel.py",

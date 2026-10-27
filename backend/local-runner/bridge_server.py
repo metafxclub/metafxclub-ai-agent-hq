@@ -315,6 +315,20 @@ RESEARCH_SHEET_OUTBOX_LOCK = threading.RLock()
 RESEARCH_SHEET_CACHE_LOCK = threading.RLock()
 RESEARCH_SHEET_FLUSH_LOCK = threading.RLock()
 RESEARCH_SHEET_PREVIEW_LOCK = threading.RLock()
+RESEARCH_SHEET_ISOLATION_ENABLED = False
+RESEARCH_SHEET_EXECUTOR = None
+RESEARCH_SHEET_PROXY_ORIGINALS: dict = {}
+RESEARCH_SHEET_SERVICE_LOCK = threading.RLock()
+RESEARCH_SHEET_SERVICE_STOP = threading.Event()
+RESEARCH_SHEET_SERVICE_WAKE = threading.Event()
+RESEARCH_SHEET_SERVICE_THREAD = None
+RESEARCH_SHEET_SERVICE_RUNTIME = {
+    "status": "stopped", "phase": "stopped", "lastHeartbeatAt": None,
+    "lastError": None, "lastErrorAt": None, "lastSuccessAt": None,
+}
+RESEARCH_SHEET_INTENT_LOCK = threading.RLock()
+RESEARCH_SHEET_INTENTS_DIR = RUNTIME_DIR / "research-sheet-intents"
+RESEARCH_SHEET_INTENT_RETRY_AT: dict[str, float] = {}
 DEEP_RESEARCH_CONFIRMATION_LOCK = threading.RLock()
 EA_FACTORY_DEEP_RESEARCH_CATALOG_CACHE_LOCK = threading.RLock()
 EA_FACTORY_DEEP_RESEARCH_CATALOG_CACHE_CONDITION = threading.Condition(
@@ -2645,10 +2659,8 @@ RESEARCH_SHEET_OUTBOX_REQUEUE_SCAN_LIMIT = 500
 # Keeping a bounded tail prevents hundreds of terminal failures from evicting
 # new reports forever; every dropped failure still has a durable audit event.
 RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT = 100
-# The scheduler is already a durable always-on Backend loop.  Use it to wake
-# the Sheet outbox as well so a temporary Google/API outage cannot leave a
-# daily report stranded until somebody opens the UI or another report happens
-# to be created.
+# The optional Sheet coordinator owns the durable outbox maintenance loop;
+# provider work runs in a separately supervised process, outside core health.
 RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS = 30
 RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS = 5 * 60
 RESEARCH_SHEET_BACKGROUND_REPORT_BATCH_LIMIT = 2
@@ -15607,7 +15619,11 @@ def create_report(
         and research_save_confirmed
     ):
         try:
-            queue_result = _research_sheet_queue_report(report)
+            queue_result = (
+                _enqueue_research_sheet_report_intent(report)
+                if RESEARCH_SHEET_ISOLATION_ENABLED
+                else _research_sheet_queue_report(report)
+            )
             if (
                 queue_result.get("reason") == "outbox_capacity_reached"
                 or clamp_int(queue_result.get("rejected"), 0, 0, 1000) > 0
@@ -18787,14 +18803,14 @@ def dashboard_workflow_scheduler_read_model() -> dict:
         "timezone": "Asia/Bangkok",
         "pollSeconds": DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS,
         "readOnlyAutomaticActions": True,
-        # Capability only: delivery still requires the active, authorized Sheet
-        # configuration checked by the existing outbox/backfill implementation.
-        "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+        # The critical scheduler does not perform Sheet provider work.
+        "externalWrites": False,
         "externalWriteScopes": (
-            ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else []
+            []
         ),
-        "googleSheetExternalWritesEnabled": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+        "googleSheetExternalWritesEnabled": False,
         "googleSheetExternalWritesRequireActiveConfiguration": True,
+        "sheetServiceOwner": "isolated_sheet_service",
         "otherExternalWrites": False,
         "metaTraderActions": False,
     }
@@ -19984,237 +20000,342 @@ def _research_sheet_requeue_failed_current_revision(
         }
     )
     with RESEARCH_SHEET_OUTBOX_LOCK:
-        store = _load_research_sheet_outbox_unlocked()
-        stored_items = [
-            item for item in (store.get("items") or []) if isinstance(item, dict)
-        ]
-        item_by_id = {
-            safe_reference(item.get("id")): item
-            for item in stored_items
-            if safe_reference(item.get("id"))
-        }
-        eligible: list[tuple[str, dict, bool]] = []
-        for item in stored_items:
-            if not isinstance(item, dict) or item.get("status") != "failed":
-                continue
-            if (
-                allowed_ids is not None
-                and safe_reference(item.get("id")) not in allowed_ids
-            ):
-                continue
-            item_revision = clamp_int(
-                item.get("configRevision"),
-                -2,
-                -2,
-                999999,
-            )
-            if item_revision != revision:
-                stale_ignored += 1
-                continue
-            requeue_count = clamp_int(item.get("requeueCount"), 0, 0, 9999)
-            error_code = str(item.get("lastErrorCode") or "").strip().lower()
-            live_reopen_exhausted = bool(
-                live_verification_reason
-                and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
-                and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
-            )
-            if (
-                live_verification_reason
-                and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
-            ):
-                live_verification_ineligible += 1
-                if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
-                    exhausted += 1
-                continue
-            if (
-                requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
-                and not live_reopen_exhausted
-            ):
+        store = copy.deepcopy(_load_research_sheet_outbox_unlocked())
+    # Reconstruct immutable candidates without holding Bridge store locks.
+    stored_items = [
+        item for item in (store.get("items") or []) if isinstance(item, dict)
+    ]
+    item_by_id = {
+        safe_reference(item.get("id")): item
+        for item in stored_items
+        if safe_reference(item.get("id"))
+    }
+    eligible: list[tuple[str, dict, bool]] = []
+    for item in stored_items:
+        if not isinstance(item, dict) or item.get("status") != "failed":
+            continue
+        if (
+            allowed_ids is not None
+            and safe_reference(item.get("id")) not in allowed_ids
+        ):
+            continue
+        item_revision = clamp_int(
+            item.get("configRevision"),
+            -2,
+            -2,
+            999999,
+        )
+        if item_revision != revision:
+            stale_ignored += 1
+            continue
+        requeue_count = clamp_int(item.get("requeueCount"), 0, 0, 9999)
+        error_code = str(item.get("lastErrorCode") or "").strip().lower()
+        live_reopen_exhausted = bool(
+            live_verification_reason
+            and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+            and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        )
+        if (
+            live_verification_reason
+            and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+        ):
+            live_verification_ineligible += 1
+            if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
                 exhausted += 1
-                continue
-            eligible.append(("item", item, live_reopen_exhausted))
-        for entry in store.get("failedLedger") or []:
-            if not isinstance(entry, dict):
-                continue
-            entry_id = safe_reference(entry.get("id"))
-            # Every retained failed item also has a ledger marker. Process the
-            # full payload once and use the ledger only for pruned failures.
-            if not entry_id or entry_id in item_by_id:
-                continue
-            if allowed_ids is not None and entry_id not in allowed_ids:
-                continue
-            entry_revision = clamp_int(
-                entry.get("configRevision"),
-                -2,
-                -2,
-                999999,
-            )
-            if entry_revision != revision:
-                stale_ignored += 1
-                continue
-            requeue_count = clamp_int(entry.get("requeueCount"), 0, 0, 9999)
-            error_code = str(entry.get("lastErrorCode") or "").strip().lower()
-            live_reopen_exhausted = bool(
-                live_verification_reason
-                and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
-                and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
-            )
-            if (
-                live_verification_reason
-                and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
-            ):
-                live_verification_ineligible += 1
-                if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
-                    exhausted += 1
-                continue
-            if (
-                requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
-                and not live_reopen_exhausted
-            ):
+            continue
+        if (
+            requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+            and not live_reopen_exhausted
+        ):
+            exhausted += 1
+            continue
+        eligible.append(("item", item, live_reopen_exhausted))
+    for entry in store.get("failedLedger") or []:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = safe_reference(entry.get("id"))
+        # Every retained failed item also has a ledger marker. Process the
+        # full payload once and use the ledger only for pruned failures.
+        if not entry_id or entry_id in item_by_id:
+            continue
+        if allowed_ids is not None and entry_id not in allowed_ids:
+            continue
+        entry_revision = clamp_int(
+            entry.get("configRevision"),
+            -2,
+            -2,
+            999999,
+        )
+        if entry_revision != revision:
+            stale_ignored += 1
+            continue
+        requeue_count = clamp_int(entry.get("requeueCount"), 0, 0, 9999)
+        error_code = str(entry.get("lastErrorCode") or "").strip().lower()
+        live_reopen_exhausted = bool(
+            live_verification_reason
+            and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+            and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        )
+        if (
+            live_verification_reason
+            and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+        ):
+            live_verification_ineligible += 1
+            if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
                 exhausted += 1
-                continue
-            eligible.append(("ledger", entry, live_reopen_exhausted))
-        eligible.sort(key=lambda candidate: (
-            clamp_int(candidate[1].get("requeueCount"), 0, 0, 9999),
-            str(
-                candidate[1].get("updatedAt")
-                or candidate[1].get("createdAt")
-                or candidate[1].get("failedAt")
-                or ""
-            ),
-            safe_reference(candidate[1].get("id")) or "",
-        ))
-        delivery_statuses = {"pending", "retry_pending", "write_unknown"}
-        delivery_count = sum(
-            1 for item in stored_items if item.get("status") in delivery_statuses
-        )
-        available_delivery_slots = max(
-            0,
-            RESEARCH_SHEET_OUTBOX_LIMIT - delivery_count,
-        )
-        selected_limit = min(limit, available_delivery_slots)
-        capacity_deferred = max(
-            0,
-            min(len(eligible), limit) - selected_limit,
-        )
-        requeued_at = utc_now()
-        scan_limit = min(
-            len(eligible),
-            RESEARCH_SHEET_OUTBOX_REQUEUE_SCAN_LIMIT,
-        )
-        scanned = 0
-        store_changed = False
-        deep_version_index: dict[tuple[str, str], dict] | None = None
-        deep_version_index_unavailable = False
-        for source_kind, candidate, live_reopen_exhausted in eligible[:scan_limit]:
-            if requeued >= selected_limit:
-                break
-            scanned += 1
-            item = candidate
-            if source_kind == "ledger":
-                report_id = safe_reference(candidate.get("reportId"))
-                report = None
-                if report_id:
-                    report_path = (
-                        RUNTIME_REPORTS_DIR / f"{report_id}.json"
-                    ).resolve(strict=False)
-                    try:
-                        report_path.relative_to(
-                            RUNTIME_REPORTS_DIR.resolve(strict=False)
-                        )
-                        report = read_json(report_path, None)
-                    except (ValueError, DataIntegrityError):
-                        report = None
-                if not isinstance(report, dict):
-                    reconstruction_missing += 1
-                    candidate["requeueCount"] = (
-                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
-                    )
-                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
-                    store_changed = True
-                    continue
+            continue
+        if (
+            requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+            and not live_reopen_exhausted
+        ):
+            exhausted += 1
+            continue
+        eligible.append(("ledger", entry, live_reopen_exhausted))
+    eligible.sort(key=lambda candidate: (
+        clamp_int(candidate[1].get("requeueCount"), 0, 0, 9999),
+        str(
+            candidate[1].get("updatedAt")
+            or candidate[1].get("createdAt")
+            or candidate[1].get("failedAt")
+            or ""
+        ),
+        safe_reference(candidate[1].get("id")) or "",
+    ))
+    delivery_statuses = {"pending", "retry_pending", "write_unknown"}
+    delivery_count = sum(
+        1 for item in stored_items if item.get("status") in delivery_statuses
+    )
+    available_delivery_slots = max(
+        0,
+        RESEARCH_SHEET_OUTBOX_LIMIT - delivery_count,
+    )
+    selected_limit = min(limit, available_delivery_slots)
+    capacity_deferred = max(
+        0,
+        min(len(eligible), limit) - selected_limit,
+    )
+    requeued_at = utc_now()
+    scan_limit = min(
+        len(eligible),
+        RESEARCH_SHEET_OUTBOX_REQUEUE_SCAN_LIMIT,
+    )
+    scanned = 0
+    plans = []
+    original_candidates = {
+        (kind, safe_reference(candidate.get("id"))): copy.deepcopy(candidate)
+        for kind, candidate, _ in eligible
+    }
+    store_changed = False
+    deep_version_index: dict[tuple[str, str], dict] | None = None
+    deep_version_index_unavailable = False
+    for source_kind, candidate, live_reopen_exhausted in eligible[:scan_limit]:
+        if requeued >= selected_limit:
+            break
+        scanned += 1
+        item = candidate
+        report_version = None
+        if source_kind == "ledger":
+            report_id = safe_reference(candidate.get("reportId"))
+            report = None
+            if report_id:
+                report_path = (
+                    RUNTIME_REPORTS_DIR / f"{report_id}.json"
+                ).resolve(strict=False)
                 try:
-                    if report.get("type") == "trading_system_research_report":
-                        if deep_version_index_unavailable:
-                            raise DataIntegrityError(
-                                "Deep Research version index is unavailable."
-                            )
-                        if deep_version_index is None:
-                            try:
-                                deep_version_index = (
-                                    _research_sheet_runtime_deep_version_index(report)
-                                )
-                            except (OSError, ValueError, TypeError, DataIntegrityError):
-                                deep_version_index_unavailable = True
-                                raise
-                    projected = _research_sheet_report_items(
-                        report,
-                        revision,
-                        deep_version_index=deep_version_index,
+                    report_path.relative_to(
+                        RUNTIME_REPORTS_DIR.resolve(strict=False)
                     )
-                except (OSError, ValueError, TypeError, DataIntegrityError):
-                    reconstruction_missing += 1
-                    candidate["requeueCount"] = (
-                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
-                    )
-                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
-                    store_changed = True
-                    continue
-                matching = [
-                    projected_item
-                    for projected_item in projected
-                    if safe_reference(projected_item.get("id"))
-                    == safe_reference(candidate.get("id"))
-                ]
-                if len(matching) != 1:
-                    reconstruction_missing += 1
-                    candidate["requeueCount"] = (
-                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
-                    )
-                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
-                    store_changed = True
-                    continue
-                item = matching[0]
-                if item.get("payloadDigest") != candidate.get("payloadDigest"):
-                    reconstruction_digest_mismatch += 1
-                    candidate["requeueCount"] = (
-                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
-                    )
-                    candidate["lastErrorCode"] = "requeue_payload_digest_mismatch"
-                    store_changed = True
-                    continue
-                item["requeueCount"] = clamp_int(
-                    candidate.get("requeueCount"),
-                    0,
-                    0,
-                    9999,
+                    report = read_json(report_path, None)
+                except (ValueError, DataIntegrityError):
+                    report = None
+            report_version = _report_snapshot_digest(report) if isinstance(report, dict) else None
+            if not isinstance(report, dict):
+                reconstruction_missing += 1
+                candidate["requeueCount"] = (
+                    clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
                 )
-                stored_items.append(item)
+                candidate["lastErrorCode"] = "requeue_reconstruction_missing"
                 store_changed = True
-            if live_reopen_exhausted:
-                # Preserve the exhausted retry history. The successful live
-                # verification is the bounded authorization to make one more
-                # delivery attempt, not a reset of the manual retry budget.
-                item["requeueCount"] = RESEARCH_SHEET_OUTBOX_MAX_REQUEUES - 1
-            item["status"] = "pending"
-            item["attemptCount"] = 0
-            item["nextAttemptAt"] = None
-            item["lastErrorCode"] = None
-            item["receipt"] = None
-            item["requeueCount"] = (
-                clamp_int(item.get("requeueCount"), 0, 0, 9999) + 1
+                plans.append((
+                    source_kind,
+                    original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+                    copy.deepcopy(candidate), report_version, False, live_reopen_exhausted,
+                ))
+                continue
+            try:
+                if report.get("type") == "trading_system_research_report":
+                    if deep_version_index_unavailable:
+                        raise DataIntegrityError(
+                            "Deep Research version index is unavailable."
+                        )
+                    if deep_version_index is None:
+                        try:
+                            deep_version_index = (
+                                _research_sheet_runtime_deep_version_index(report)
+                            )
+                        except (OSError, ValueError, TypeError, DataIntegrityError):
+                            deep_version_index_unavailable = True
+                            raise
+                projected = _research_sheet_report_items(
+                    report,
+                    revision,
+                    deep_version_index=deep_version_index,
+                )
+            except (OSError, ValueError, TypeError, DataIntegrityError):
+                reconstruction_missing += 1
+                candidate["requeueCount"] = (
+                    clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                )
+                candidate["lastErrorCode"] = "requeue_reconstruction_missing"
+                store_changed = True
+                plans.append((
+                    source_kind,
+                    original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+                    copy.deepcopy(candidate), report_version, False, live_reopen_exhausted,
+                ))
+                continue
+            matching = [
+                projected_item
+                for projected_item in projected
+                if safe_reference(projected_item.get("id"))
+                == safe_reference(candidate.get("id"))
+            ]
+            if len(matching) != 1:
+                reconstruction_missing += 1
+                candidate["requeueCount"] = (
+                    clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                )
+                candidate["lastErrorCode"] = "requeue_reconstruction_missing"
+                store_changed = True
+                plans.append((
+                    source_kind,
+                    original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+                    copy.deepcopy(candidate), report_version, False, live_reopen_exhausted,
+                ))
+                continue
+            item = matching[0]
+            if item.get("payloadDigest") != candidate.get("payloadDigest"):
+                reconstruction_digest_mismatch += 1
+                candidate["requeueCount"] = (
+                    clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                )
+                candidate["lastErrorCode"] = "requeue_payload_digest_mismatch"
+                store_changed = True
+                plans.append((
+                    source_kind,
+                    original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+                    copy.deepcopy(candidate), report_version, False, live_reopen_exhausted,
+                ))
+                continue
+            item["requeueCount"] = clamp_int(
+                candidate.get("requeueCount"),
+                0,
+                0,
+                9999,
             )
-            item["lastRequeuedAt"] = requeued_at
-            item["lastRequeueReason"] = reason
-            item["updatedAt"] = requeued_at
-            requeued += 1
-            if live_reopen_exhausted:
-                live_verification_reopened_exhausted += 1
+            stored_items.append(item)
             store_changed = True
-        eligible_deferred = max(0, len(eligible) - scanned)
-        if store_changed:
-            store["items"] = stored_items
-            _save_research_sheet_outbox_unlocked(store)
+        if live_reopen_exhausted:
+            # Preserve the exhausted retry history. The successful live
+            # verification is the bounded authorization to make one more
+            # delivery attempt, not a reset of the manual retry budget.
+            item["requeueCount"] = RESEARCH_SHEET_OUTBOX_MAX_REQUEUES - 1
+        item["status"] = "pending"
+        item["attemptCount"] = 0
+        item["nextAttemptAt"] = None
+        item["lastErrorCode"] = None
+        item["receipt"] = None
+        item["requeueCount"] = (
+            clamp_int(item.get("requeueCount"), 0, 0, 9999) + 1
+        )
+        item["lastRequeuedAt"] = requeued_at
+        item["lastRequeueReason"] = reason
+        item["updatedAt"] = requeued_at
+        requeued += 1
+        if live_reopen_exhausted:
+            live_verification_reopened_exhausted += 1
+        store_changed = True
+        plans.append((
+            source_kind,
+            original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+            copy.deepcopy(item), report_version, True, live_reopen_exhausted,
+        ))
+    eligible_deferred = max(0, len(eligible) - scanned)
+    # Only committed transitions count as requeues/reconstruction failures.
+    # Another retry, a report edit or an activation can finish during IPC.
+    requeued = 0
+    reconstruction_missing = 0
+    reconstruction_digest_mismatch = 0
+    live_verification_reopened_exhausted = 0
+    result_reason = reason
+    if store_changed:
+        with (
+            REPORTS_LOCK if any(plan[0] == "ledger" for plan in plans) else nullcontext()
+        ), DASHBOARD_WORKFLOW_SETTINGS_LOCK, RESEARCH_SHEET_OUTBOX_LOCK:
+            current_internal = _research_sheet_hub_internal()
+            if (current_internal.get("sheetId") != internal.get("sheetId")
+                    or current_internal.get("configRevision") != revision
+                    or current_internal.get("activeConfigRevision") != revision
+                    or current_internal.get("active") is not True):
+                stale_ignored += len(plans)
+                result_reason = "sheet_configuration_changed"
+            else:
+                current_store = _load_research_sheet_outbox_unlocked()
+                current_items = [row for row in current_store.get("items") or [] if isinstance(row, dict)]
+                current_ledger = [row for row in current_store.get("failedLedger") or [] if isinstance(row, dict)]
+                current_item_by_id = {safe_reference(row.get("id")): row for row in current_items}
+                current_ledger_by_id = {safe_reference(row.get("id")): row for row in current_ledger}
+                delivery_count = sum(row.get("status") in delivery_statuses for row in current_items)
+                committed = False
+                for source_kind, before, after, report_version, succeeded, live_reopen_exhausted in plans:
+                    item_id = safe_reference(before.get("id"))
+                    current_candidate = (
+                        current_item_by_id if source_kind == "item" else current_ledger_by_id
+                    ).get(item_id)
+                    if (current_candidate != before
+                            or (source_kind == "ledger" and item_id in current_item_by_id)):
+                        stale_ignored += 1
+                        continue
+                    if source_kind == "ledger":
+                        report_id = safe_reference(before.get("reportId"))
+                        try:
+                            latest_report = (
+                                read_json(RUNTIME_REPORTS_DIR / f"{report_id}.json", None)
+                                if report_id else None
+                            )
+                            latest_version = _report_snapshot_digest(latest_report) if isinstance(latest_report, dict) else None
+                        except DataIntegrityError:
+                            stale_ignored += 1
+                            continue
+                        if latest_version != report_version:
+                            stale_ignored += 1
+                            continue
+                    if succeeded:
+                        if delivery_count >= RESEARCH_SHEET_OUTBOX_LIMIT:
+                            capacity_deferred += 1
+                            continue
+                        if source_kind == "ledger":
+                            current_items.append(after)
+                            current_item_by_id[item_id] = after
+                        else:
+                            current_candidate.clear()
+                            current_candidate.update(after)
+                        delivery_count += 1
+                        requeued += 1
+                        if live_reopen_exhausted:
+                            live_verification_reopened_exhausted += 1
+                    else:
+                        current_candidate.clear()
+                        current_candidate.update(after)
+                        if after.get("lastErrorCode") == "requeue_payload_digest_mismatch":
+                            reconstruction_digest_mismatch += 1
+                        else:
+                            reconstruction_missing += 1
+                    committed = True
+                if committed:
+                    current_store["items"] = current_items
+                    current_store["failedLedger"] = current_ledger
+                    _save_research_sheet_outbox_unlocked(current_store)
     result = {
         "requeued": requeued,
         "exhausted": exhausted,
@@ -20225,7 +20346,7 @@ def _research_sheet_requeue_failed_current_revision(
         "reconstructionDigestMismatch": reconstruction_digest_mismatch,
         "liveVerificationReopenedExhausted": live_verification_reopened_exhausted,
         "liveVerificationIneligible": live_verification_ineligible,
-        "reason": reason,
+        "reason": result_reason,
         "configRevision": revision,
     }
     append_audit({
@@ -65162,6 +65283,29 @@ def _research_sheet_report_items(
     *,
     deep_version_index: dict[tuple[str, str], dict] | None = None,
 ) -> list[dict]:
+    if RESEARCH_SHEET_ISOLATION_ENABLED:
+        # The child may only project immutable input/read-only report history.
+        # Shared outbox/cache/settings are still written by this Bridge alone.
+        if RESEARCH_SHEET_EXECUTOR is None:
+            raise RequestError("Sheet projection worker is unavailable; the report remains queued.", 503)
+        from hq_backend.research.sheet_executor import SheetExecutorError
+        try:
+            items = RESEARCH_SHEET_EXECUTOR.call(
+                "projection.report_items", [report, config_revision], {},
+                timeout_seconds=45,
+            )
+        except SheetExecutorError as error:
+            if error.code in {"sheet_projection_integrity_failed", "sheet_worker_request_too_large", "sheet_worker_response_too_large"}:
+                raise DataIntegrityError("Sheet report projection is invalid or exceeds its bounded payload size.") from error
+            raise RequestError("Sheet projection worker is unavailable; the report remains queued.", 503) from error
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict)
+            or item.get("reportId") != safe_reference(report.get("id"))
+            or item.get("configRevision") != config_revision
+            for item in items
+        ):
+            raise DataIntegrityError("Sheet worker returned an invalid report projection.")
+        return items
     report_id = safe_reference(report.get("id"))
     items: list[dict] = []
     projections: list[tuple[str, list[dict]]] = []
@@ -65354,7 +65498,20 @@ def _research_sheet_queue_report(
     deferred_store_full = False
     deferred_count = 0
     config_revision = int(internal.get("configRevision") or 0)
-    with RESEARCH_SHEET_OUTBOX_LOCK:
+    with (REPORTS_LOCK if RESEARCH_SHEET_ISOLATION_ENABLED else nullcontext()), DASHBOARD_WORKFLOW_SETTINGS_LOCK, RESEARCH_SHEET_OUTBOX_LOCK:
+        # Projection may take place in another process while the operator
+        # activates a different Sheet or a report is edited. Never prune the
+        # current revision or publish an obsolete report from an old reply.
+        current_internal = _research_sheet_hub_internal()
+        if (str(current_internal.get("sheetId") or "") != sheet_id
+                or current_internal.get("configRevision") != config_revision
+                or current_internal.get("activeConfigRevision") != config_revision
+                or current_internal.get("active") is not True):
+            return {"queued": 0, "reason": "sheet_configuration_changed"}
+        if RESEARCH_SHEET_ISOLATION_ENABLED:
+            current_report = read_json(RUNTIME_REPORTS_DIR / f"{safe_reference(report.get('id'))}.json", None)
+            if not isinstance(current_report, dict) or _report_snapshot_digest(current_report) != _report_snapshot_digest(report):
+                return {"queued": 0, "reason": "report_changed"}
         store = _load_research_sheet_outbox_unlocked()
         # A crash immediately after an activation settings commit can leave
         # durable work from the previous Sheet revision behind.  Stale rows
@@ -65816,6 +65973,7 @@ def _research_sheet_background_opener(deadline_monotonic: float):
                 ) from error
             raise
 
+    open_with_budget.sheet_deadline_monotonic = deadline_monotonic
     return open_with_budget
 
 
@@ -65944,6 +66102,27 @@ def _flush_research_sheet_outbox_locked(
         error_code = None
         receipt = None
         try:
+            if RESEARCH_SHEET_ISOLATION_ENABLED:
+                # Persist uncertainty BEFORE dispatch. A Bridge/child crash
+                # after Google accepts a write cannot leave a false unsent or
+                # synced receipt; recovery verifies this same record key.
+                claimed = False
+                with RESEARCH_SHEET_OUTBOX_LOCK:
+                    claim_store = _load_research_sheet_outbox_unlocked()
+                    for current_item in claim_store.get("items") or []:
+                        if (current_item.get("id") == candidate.get("id")
+                                and current_item.get("payloadDigest") == candidate.get("payloadDigest")
+                                and current_item.get("configRevision") == revision):
+                            current_item["status"] = "write_unknown"
+                            current_item["lastErrorCode"] = "sheet_worker_inflight"
+                            current_item["lastAttemptAt"] = utc_now()
+                            current_item["nextAttemptAt"] = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+                            claimed = True
+                            break
+                    if claimed:
+                        _save_research_sheet_outbox_unlocked(claim_store)
+                if not claimed:
+                    continue
             candidate_contract = _research_sheet_tab_contracts().get(
                 str(candidate.get("consumerId") or ""),
                 {},
@@ -65974,7 +66153,12 @@ def _flush_research_sheet_outbox_locked(
                 # read as retryable; explicit auth/schema denials stay terminal.
                 status = "retry_pending"
                 error_code = "background_budget_exhausted"
-            elif error.code in {"rate_limited", "google_api_unavailable", "background_budget_exhausted"}:
+            elif error.code in {
+                "rate_limited", "google_api_unavailable", "background_budget_exhausted",
+                "sheet_worker_busy", "sheet_worker_closed", "sheet_worker_unavailable",
+                "sheet_worker_start_failed", "sheet_worker_exited", "sheet_worker_timeout",
+                "sheet_worker_protocol_error",
+            }:
                 status = "retry_pending"
             else:
                 # Auth/permission failures require an operator correction and
@@ -71511,12 +71695,210 @@ def _record_dashboard_workflow_scheduler_tick_result(result: object) -> None:
     )
 
 
+def initialize_research_sheet_process_isolation() -> None:
+    """Production-only boundary: imports/unit fixtures never launch a worker."""
+    global RESEARCH_SHEET_EXECUTOR, RESEARCH_SHEET_ISOLATION_ENABLED
+    if RESEARCH_SHEET_ISOLATION_ENABLED:
+        return
+    # An unavailable optional executor must fail closed for Sheets without
+    # preventing core HQ startup or falling back to in-process provider work.
+    RESEARCH_SHEET_ISOLATION_ENABLED = True
+    try:
+        from hq_backend.research.sheet_executor import SheetExecutor, SheetExecutorError
+        RESEARCH_SHEET_EXECUTOR = SheetExecutor(PROJECT_ROOT)
+    except Exception:
+        SheetExecutorError = RuntimeError
+        RESEARCH_SHEET_EXECUTOR = None
+        _research_sheet_service_update(lastError="sheet_worker_initialization_failed", lastErrorAt=utc_now())
+
+    def proxy(name):
+        def invoke(*args, **kwargs):
+            if RESEARCH_SHEET_EXECUTOR is None:
+                raise google_sheet_hub.GoogleSheetHubError(
+                    "sheet_worker_unavailable", "The isolated Sheet worker is unavailable.", 503)
+            options = dict(kwargs)
+            opener = options.pop("open_url", None)
+            deadline = getattr(opener, "sheet_deadline_monotonic", None)
+            timeout = 45.0 if deadline is None else min(45.0, max(0.01, deadline - time.monotonic()))
+            binding = options.get("expected_credential_binding")
+            if binding is not None:
+                options["expected_credential_binding"] = {"fingerprint": binding._fingerprint}
+            try:
+                return RESEARCH_SHEET_EXECUTOR.call("google." + name, list(args), options, timeout_seconds=timeout)
+            except SheetExecutorError as error:
+                raise google_sheet_hub.GoogleSheetHubError(
+                    error.code, "Google Sheet worker is unavailable or the request failed.",
+                    error.status, error.write_unknown,
+                ) from error
+        return invoke
+
+    for name in (
+        "read_values", "inspect_tabs", "probe_tabs", "upsert_row",
+        "start_google_oauth", "complete_google_oauth", "disconnect_google_oauth",
+    ):
+        RESEARCH_SHEET_PROXY_ORIGINALS[name] = getattr(google_sheet_hub, name)
+        setattr(google_sheet_hub, name, proxy(name))
+
+
+def _enqueue_research_sheet_report_intent(report: dict) -> dict:
+    """Persist only a reference; report commits never wait for Sheet/network work."""
+    report_id = safe_reference(report.get("id"))
+    if not report_id or report.get("type") not in RESEARCH_SHEET_SYNC_REPORT_TYPES:
+        return {"queued": 0, "reason": "report_not_eligible"}
+    intent = {"version": 1, "reportId": report_id,
+              "reportDigest": _report_snapshot_digest(report), "createdAt": utc_now()}
+    # No 240-report horizon: each durable report retains its own delivery intent
+    # until the existing outbox has accepted/acknowledged that report.
+    with RESEARCH_SHEET_INTENT_LOCK:
+        RESEARCH_SHEET_INTENTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = RESEARCH_SHEET_INTENTS_DIR / (hashlib.sha256(report_id.encode()).hexdigest() + ".json")
+        write_json(path, intent)
+        RESEARCH_SHEET_INTENT_RETRY_AT.pop(path.name, None)
+    RESEARCH_SHEET_SERVICE_WAKE.set()
+    return {"queued": 0, "deferred": True, "reason": "sheet_worker_queued"}
+
+
+def _drain_research_sheet_report_intents(*, max_reports: int = 2) -> dict:
+    if not RESEARCH_SHEET_INTENTS_DIR.is_dir():
+        return {"scanned": 0, "drained": 0}
+    paths = sorted(RESEARCH_SHEET_INTENTS_DIR.glob("*.json"), key=lambda p: (p.stat().st_mtime_ns, p.name))
+    scanned = drained = 0
+    for path in paths:
+        if scanned >= max_reports or RESEARCH_SHEET_SERVICE_STOP.is_set():
+            break
+        if RESEARCH_SHEET_INTENT_RETRY_AT.get(path.name, 0) > time.monotonic():
+            continue
+        scanned += 1
+        try:
+            with RESEARCH_SHEET_INTENT_LOCK:
+                raw = path.read_bytes()
+                intent = json.loads(raw.decode("utf-8-sig"))
+            report_id = safe_reference(intent.get("reportId"))
+            if not report_id or hashlib.sha256(report_id.encode()).hexdigest() + ".json" != path.name:
+                raise DataIntegrityError("Invalid Sheet report intent.")
+            report = read_json(RUNTIME_REPORTS_DIR / f"{report_id}.json", None)
+            if not isinstance(report, dict) or report.get("id") != report_id:
+                raise DataIntegrityError("Sheet intent report is missing or invalid.")
+            result = _research_sheet_queue_report(report, flush=False)
+            if result.get("reason") in {"not_configured", "activation_required", "sheet_configuration_changed", "report_changed"}:
+                RESEARCH_SHEET_INTENT_RETRY_AT[path.name] = time.monotonic() + 60
+                continue
+            if result.get("reason") == "outbox_capacity_reached" and not result.get("deferredStored"):
+                RESEARCH_SHEET_INTENT_RETRY_AT[path.name] = time.monotonic() + 60
+                continue
+            with RESEARCH_SHEET_INTENT_LOCK:
+                # A newer report commit may have replaced the same intent while
+                # projection ran. Only acknowledge the exact observed intent.
+                if path.exists() and path.read_bytes() == raw:
+                    path.unlink()
+                    RESEARCH_SHEET_INTENT_RETRY_AT.pop(path.name, None)
+                    drained += 1
+        except Exception as error:
+            RESEARCH_SHEET_INTENT_RETRY_AT[path.name] = time.monotonic() + 60
+            _research_sheet_service_update(lastError="intent_" + type(error).__name__, lastErrorAt=utc_now())
+    return {"scanned": scanned, "drained": drained}
+
+
+def _research_sheet_service_update(**values) -> None:
+    with RESEARCH_SHEET_SERVICE_LOCK:
+        RESEARCH_SHEET_SERVICE_RUNTIME.update(values)
+
+
+def research_sheet_service_read_model() -> dict:
+    with RESEARCH_SHEET_SERVICE_LOCK:
+        state = dict(RESEARCH_SHEET_SERVICE_RUNTIME)
+    thread = RESEARCH_SHEET_SERVICE_THREAD
+    alive = bool(thread and thread.is_alive() and not RESEARCH_SHEET_SERVICE_STOP.is_set())
+    executor = RESEARCH_SHEET_EXECUTOR.status() if RESEARCH_SHEET_EXECUTOR is not None else {"status": "not_started"}
+    heartbeat = parse_iso(state.get("lastHeartbeatAt"))
+    age = max(0.0, (datetime.now(timezone.utc) - heartbeat).total_seconds()) if heartbeat else None
+    return {**state, "alive": alive, "heartbeatAgeSeconds": round(age, 1) if age is not None else None,
+            "heartbeatStale": age is None or age > 120, "executor": executor,
+            "isolatedProcess": RESEARCH_SHEET_ISOLATION_ENABLED, "affectsCoreHealth": False,
+            "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            "externalWriteScopes": ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else [],
+            "googleSheetExternalWritesEnabled": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            "sharedStoreWriter": "bridge", "metaTraderActions": False}
+
+
+def research_sheet_service_loop() -> None:
+    # The coordinator owns local transactions only. Provider I/O and expensive
+    # report projection run in its child; neither appears in core health.
+    due = {"sheet_intents": 0.0, "sheet_flush": 0.0, "sheet_backfill": 0.0,
+           "sheet_deferred": 0.0, "sheet_cache": 0.0}
+    backfill_state: dict = {}
+    cache_state: dict = {}
+    _research_sheet_service_update(status="running", phase="starting", lastHeartbeatAt=utc_now())
+    while not RESEARCH_SHEET_SERVICE_STOP.is_set():
+        now = time.monotonic()
+        ready = [name for name, deadline in due.items() if deadline <= now]
+        if RESEARCH_SHEET_AUTO_SYNC_ENABLED and ready:
+            phase = min(ready, key=lambda name: due[name])
+            interval = RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
+            _research_sheet_service_update(phase=phase, lastHeartbeatAt=utc_now())
+            try:
+                if phase == "sheet_intents":
+                    _drain_research_sheet_report_intents(max_reports=2)
+                elif phase == "sheet_flush":
+                    outcome = _flush_research_sheet_outbox(max_items=1, background=True)
+                    if outcome.get("synced"):
+                        due["sheet_cache"] = min(due["sheet_cache"], now)
+                elif phase == "sheet_backfill":
+                    outcome = _research_sheet_backfill_background_step(backfill_state)
+                    if not outcome.get("more"):
+                        interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                elif phase == "sheet_deferred":
+                    outcome = _research_sheet_drain_deferred_reports(
+                        max_reports=1, max_scanned=1,
+                        deadline_monotonic=time.monotonic() + RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS)
+                    if not outcome.get("eligibleDeferred"):
+                        interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                else:
+                    outcome = _research_sheet_background_cache_step(cache_state)
+                    if not outcome.get("more"):
+                        interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                _research_sheet_service_update(lastSuccessAt=utc_now())
+            except Exception as error:
+                _research_sheet_service_update(lastError=type(error).__name__, lastErrorAt=utc_now())
+            finally:
+                due[phase] = time.monotonic() + interval
+        _research_sheet_service_update(phase="waiting", lastHeartbeatAt=utc_now())
+        wait_seconds = RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
+        if RESEARCH_SHEET_AUTO_SYNC_ENABLED:
+            wait_seconds = min(wait_seconds, max(0.1, min(due.values()) - time.monotonic()))
+        RESEARCH_SHEET_SERVICE_WAKE.wait(wait_seconds)
+        RESEARCH_SHEET_SERVICE_WAKE.clear()
+    _research_sheet_service_update(status="stopped", phase="stopped")
+
+
+def start_research_sheet_service() -> threading.Thread:
+    global RESEARCH_SHEET_SERVICE_THREAD
+    with RESEARCH_SHEET_SERVICE_LOCK:
+        if RESEARCH_SHEET_SERVICE_THREAD and RESEARCH_SHEET_SERVICE_THREAD.is_alive():
+            return RESEARCH_SHEET_SERVICE_THREAD
+        RESEARCH_SHEET_SERVICE_STOP.clear()
+        RESEARCH_SHEET_SERVICE_WAKE.clear()
+        RESEARCH_SHEET_SERVICE_THREAD = threading.Thread(target=research_sheet_service_loop,
+            name="metafx-sheet-coordinator", daemon=True)
+        RESEARCH_SHEET_SERVICE_THREAD.start()
+        return RESEARCH_SHEET_SERVICE_THREAD
+
+
+def stop_research_sheet_service() -> None:
+    RESEARCH_SHEET_SERVICE_STOP.set()
+    RESEARCH_SHEET_SERVICE_WAKE.set()
+    if RESEARCH_SHEET_EXECUTOR is not None:
+        try:
+            RESEARCH_SHEET_EXECUTOR.close()
+        except Exception:
+            _research_sheet_service_update(lastError="sheet_worker_shutdown_failed", lastErrorAt=utc_now())
+    thread = RESEARCH_SHEET_SERVICE_THREAD
+    if thread and thread.is_alive():
+        thread.join(timeout=3)
+
+
 def dashboard_workflow_scheduler_loop() -> None:
     started_at = utc_now()
-    sheet_due = {"sheet_flush": 0.0, "sheet_backfill": 0.0,
-                 "sheet_deferred": 0.0, "sheet_cache": 0.0}
-    sheet_backfill_state: dict = {}
-    sheet_cache_state: dict = {}
     _dashboard_workflow_scheduler_runtime_update(
         status="running",
         phase="starting",
@@ -71530,16 +71912,13 @@ def dashboard_workflow_scheduler_loop() -> None:
             "type": "dashboard.workflow_scheduler_started",
             "timezone": "Asia/Bangkok",
             "pollSeconds": DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS,
-            # This worker may flush the durable outbox to the one active,
-            # operator-confirmed Google Sheet.  Declare that capability
-            # honestly even when no row happens to be due during this run.
-            "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            # Sheet delivery belongs to the isolated optional Sheet service.
+            "externalWrites": False,
+            "sheetServiceOwner": "isolated_sheet_service",
             "externalWriteScopes": (
-                ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else []
+                []
             ),
-            "googleSheetExternalWritesEnabled": bool(
-                RESEARCH_SHEET_AUTO_SYNC_ENABLED
-            ),
+            "googleSheetExternalWritesEnabled": False,
             "googleSheetExternalWritesRequireActiveConfiguration": True,
             "otherExternalWrites": False,
             "metaTraderActions": False,
@@ -71581,49 +71960,6 @@ def dashboard_workflow_scheduler_loop() -> None:
                 lastTickKind="scheduler_exception",
                 lastTickMessage=redact_text(f"{type(error).__name__}: {error}", 160),
             )
-        if RESEARCH_SHEET_AUTO_SYNC_ENABLED and not DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
-            now_monotonic = time.monotonic()
-            due = [phase for phase, due_at in sheet_due.items() if due_at <= now_monotonic]
-            # Only one maintenance phase per scheduler tick. Earliest-due
-            # selection gives backfill, recovery and cache their turn even
-            # while the outbox has continuous delivery work.
-            if due:
-                phase = min(due, key=lambda value: sheet_due[value])
-                interval = RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
-                try:
-                    _dashboard_workflow_scheduler_runtime_update(phase=phase)
-                    if phase == "sheet_flush":
-                        outcome = _flush_research_sheet_outbox(max_items=1, background=True)
-                        if outcome.get("synced"):
-                            sheet_due["sheet_cache"] = min(sheet_due["sheet_cache"], now_monotonic)
-                    elif phase == "sheet_backfill":
-                        outcome = _research_sheet_backfill_background_step(sheet_backfill_state)
-                        if not outcome.get("more"):
-                            interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
-                    elif phase == "sheet_deferred":
-                        outcome = _research_sheet_drain_deferred_reports(
-                            max_reports=1, max_scanned=1,
-                            deadline_monotonic=time.monotonic() + RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS,
-                        )
-                        if not outcome.get("eligibleDeferred"):
-                            interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
-                    else:
-                        outcome = _research_sheet_background_cache_step(sheet_cache_state)
-                        if not outcome.get("more"):
-                            interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
-                except Exception as error:
-                    # The report/outbox remain durable. Rotate past a failed
-                    # phase instead of letting it monopolize every tick.
-                    try:
-                        append_audit({
-                            "type": f"research_sheet_hub.background_{phase.removeprefix('sheet_')}_failed",
-                            "errorCode": type(error).__name__,
-                            "credentialsIncluded": False,
-                        })
-                    except Exception:
-                        pass
-                finally:
-                    sheet_due[phase] = time.monotonic() + interval
         _dashboard_workflow_scheduler_runtime_update(phase="waiting")
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.wait(DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS)
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.clear()
@@ -71635,13 +71971,12 @@ def dashboard_workflow_scheduler_loop() -> None:
     try:
         append_audit({
             "type": "dashboard.workflow_scheduler_stopped",
-            "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            "externalWrites": False,
+            "sheetServiceOwner": "isolated_sheet_service",
             "externalWriteScopes": (
-                ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else []
+                []
             ),
-            "googleSheetExternalWritesEnabled": bool(
-                RESEARCH_SHEET_AUTO_SYNC_ENABLED
-            ),
+            "googleSheetExternalWritesEnabled": False,
             "googleSheetExternalWritesRequireActiveConfiguration": True,
             "otherExternalWrites": False,
             "metaTraderActions": False,
@@ -90041,6 +90376,9 @@ def runtime_health() -> dict:
             "scheduleStoreReady": COLLABORATION_SCHEDULE_PATH.is_file(),
         },
         "dashboardWorkflowScheduler": dashboard_scheduler,
+        # Optional Sheet failures remain visible without changing the actual
+        # Council/dashboard/mission-worker readiness or watchdog predicate.
+        "researchSheetService": research_sheet_service_read_model(),
         "missionWorker": mission_worker,
         "time": utc_now(),
     }
@@ -114306,6 +114644,7 @@ def main() -> int:
     httpd: BridgeHTTPServer | None = None
     actual_port = int(args.port)
     try:
+        initialize_research_sheet_process_isolation()
         ensure_memory_dir()
         ensure_operator_mode_store()
         ensure_collaboration_schedule_store()
@@ -114380,6 +114719,7 @@ def main() -> int:
         )
         start_dashboard_workflow_scheduler()
         start_ai_trade_council_automation_scheduler()
+        start_research_sheet_service()
         RADAR_IMAGE_ADAPTER_RUNTIME_ENABLED = True
         queued_radar_publisher_images = queue_latest_radar_publisher_image_enrichment()
         append_audit({
@@ -114431,6 +114771,7 @@ def main() -> int:
         pass
     finally:
         RADAR_IMAGE_ADAPTER_RUNTIME_ENABLED = False
+        stop_research_sheet_service()
         close_full_agent_gateway()
         if httpd is not None:
             httpd.server_close()

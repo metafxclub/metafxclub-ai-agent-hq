@@ -120,12 +120,22 @@
   },
   "background_scheduler": {
     "dashboardWorkflowScheduler": {
+      "googleSheetExternalWritesEnabledByDefault": false,
+      "externalWriteScopes": [],
+      "sheetServiceOwner": "isolated_sheet_service",
+      "otherExternalWrites": false,
+      "metaTraderActions": false,
+      "auditRule": "The critical dashboard scheduler does not execute Sheet maintenance or Google provider calls. Sheet capability belongs to researchSheetService."
+    },
+    "researchSheetService": {
+      "providerOwner": "one_isolated_sheet_executor_process",
+      "sharedStoreWriter": "bridge",
       "googleSheetExternalWritesEnabledByDefault": true,
       "externalWriteScopes": ["google_sheets"],
       "googleSheetWritePreconditions": ["auto sync enabled", "one active operator-confirmed Sheet revision", "Backend-only Google authorization configured", "eligible durable outbox work"],
-      "otherExternalWrites": false,
+      "affectsCoreHealth": false,
       "metaTraderActions": false,
-      "auditRule": "Scheduler start and stop events declare Google Sheets as a possible external-write scope whenever automatic Sheet sync is enabled; they must never claim externalWrites=false while that capability is active."
+      "recoveryRule": "Only the owned Sheet child may be restarted. Persist ambiguous write state before dispatch and verify the same record key on retry. Never restart HQ or MetaTrader for an optional Sheet failure."
     }
   },
   "research_sheet_hub": {
