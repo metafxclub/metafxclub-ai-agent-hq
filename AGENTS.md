@@ -14,6 +14,10 @@ Metafxclub AI Agent HQ เป็น Visual Office แบบ Local-first:
 
 ## ขั้นตอนมาตรฐานเมื่อผู้ใช้ขอให้ติดตั้ง
 
+### อัปเกรดเครื่องที่มี HQ อยู่แล้ว
+
+ใช้ `docs/prompts/update-github-preserve-settings-th.md` เมื่อผู้ใช้ต้องการเก็บค่าตั้งเดิม ห้ามใช้ `-ResetGoogleOAuthToCentralRelease` โดยอนุมานจากขั้นตอนติดตั้งใหม่ ตั้งแต่ v0.9.27 การอัปเกรดต้องเป็นช่วงบำรุงรักษาที่เจ้าของเครื่องหยุด HQ ไว้แล้ว หาก Bridge เดิมยังรันอยู่ ตัวติดตั้งต้องปฏิเสธก่อนหยุด Sentiment/watchdog หรือเปลี่ยนไฟล์ ห้ามหยุดสภา/MT4/MT5/ออเดอร์หรือเปลี่ยนค่าผู้ใช้เพื่อข้ามตัวตรวจ ให้รายงานเหตุผลและรอช่วงบำรุงรักษา การเผยแพร่ release จาก checkout ไม่ใช่เหตุให้ติดตั้งทับโปรแกรมจริงในเครื่องผู้พัฒนาอีกครั้ง
+
 ### โหมดหลัก: Prompt เดียว + Git Clone
 
 เมื่อผู้ใช้วาง `docs/prompts/install-github-google-auto-th.md` ซึ่งล็อก Repository, Tag และ Version ไว้แล้ว ให้ทำตามลำดับนี้โดยไม่ข้ามขั้น เส้นทางหลักต้องใช้ Google OAuth native/installed-app client configuration กลางที่บรรจุอยู่ใน Release Asset นักเรียนไม่ต้องสร้าง Google Cloud Project/OAuth Client, เพิ่ม Test users, ดาวน์โหลด JSON หรือแก้ Client ID ไฟล์ Client จริงถูก GitHub Actions inject จาก Release secrets ตอน build Asset และต้องไม่ถูก commit ลง public Git tree; ค่า `client_id`/`client_secret` ของ installed app เป็น app metadata ที่แจกพร้อมโปรแกรม ไม่ใช่ Credential ของบัญชีผู้ใช้:
@@ -62,7 +66,7 @@ $health | Select-Object ok, status, agentCount, agentRosterComplete, version
 - URL ใน `data/runtime/bridge-endpoint.json` เปิดได้
 - URL/Port ตรงกับค่าที่ผู้ใช้ยืนยัน
 - มีรายงานสถานะ Codex และ Rate Limit ของบัญชีเครื่องนี้ หรือแจ้ง `auth_required`/`config_error` อย่างชัดเจน
-- `data/runtime/install-result.json` ของเส้นทางห้องเรียนต้องเป็น `ready_central` จาก `central_release` เท่านั้น มีเฉพาะสถานะที่อนุญาตและไม่เก็บข้อมูลระบุตัวบัญชี
+- `data/runtime/install-result.json` ของการติดตั้งใหม่แบบห้องเรียนต้องเป็น `ready_central` จาก `central_release` เท่านั้น มีเฉพาะสถานะที่อนุญาตและไม่เก็บข้อมูลระบุตัวบัญชี การอัปเกรดแบบรักษาค่าต้องยืนยันว่ารักษา provider configuration เดิม รวม custom override ที่ผู้ใช้ตั้งไว้โดยชอบ ไม่บังคับ reset เป็น central เพื่อให้สถานะผ่าน
 - ไม่มีการเปิด Live Trading, Telegram จริง หรือ Real execution ใดระหว่างการติดตั้ง
 
 รายงานผลให้นักเรียนด้วยภาษาง่าย ๆ โดยระบุเวอร์ชัน ตำแหน่งโปรแกรม สถานะ Bridge, Health และลิงก์เปิดใช้งาน หากยังมี `auth_required` ของ Codex ให้แยกเป็น “ขั้นตอน Login บัญชีของนักเรียน” ไม่ควรกล่าวว่าการติดตั้ง HQ ล้มเหลวหากส่วน Demo และ Health พร้อมแล้ว

@@ -3236,7 +3236,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.26")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.27")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -4363,7 +4363,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
         self.assertIn('function Suspend-BridgeScheduledTask', installer)
         self.assertIn('Disable-ScheduledTask -TaskName $bridgeTaskName', installer)
-        self.assertIn('Stop-ScheduledTask -TaskName $bridgeTaskName', installer)
+        self.assertNotIn('Stop-ScheduledTask -TaskName $bridgeTaskName', installer)
+        self.assertIn('the watchdog started during preflight', installer)
         self.assertIn('$bridgeTaskWasEnabled = Suspend-BridgeScheduledTask', installer)
         self.assertIn('$script:bridgeTaskExisted = $true', installer)
         self.assertIn('if ($bridgeTaskExisted) {', installer)
@@ -4381,7 +4382,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('$savedStateVersion -lt 3 -and $savedWatchdogMinutes -eq 5', installer)
         self.assertIn('ผูก Watchdog ใหม่ไม่สำเร็จและคืน Task เดิมแล้ว', installer)
         self.assertIn('การติดตั้งแบบ SkipLaunch ต้องใช้พอร์ตเดิม', installer)
-        self.assertIn('finally {\n        # A Sentiment restore failure must not skip the watchdog restore below.\n        try {\n            Restore-SentimentAfterUpdateFailure\n        }\n        catch {', installer)
+        self.assertIn('finally {\n        Exit-UpgradeMaintenanceLease\n        # A Sentiment restore failure must not skip the watchdog restore below.\n        try {\n            Restore-SentimentAfterUpdateFailure\n        }\n        catch {', installer)
         self.assertIn('        }\n        if ($script:rollbackIncomplete) {\n            Write-Warning', installer)
         self.assertIn('Restore-BridgeScheduledTask -WasEnabled $bridgeTaskWasEnabled', installer)
         self.assertIn('คง Watchdog ไว้ในสถานะปิด เพราะ Rollback ไม่สมบูรณ์', installer)
@@ -4492,8 +4493,17 @@ class RuntimeIntegrityTests(unittest.TestCase):
         main_start = installer.rindex("\ntry {")
         self.assertLess(
             installer.index("$selectedBridgePort = Confirm-BridgeEndpoint", main_start),
-            installer.index("Stop-ExistingBridge", main_start),
+            installer.index("Enter-UpgradeMaintenanceLease", main_start),
         )
+        self.assertLess(
+            installer.index("Enter-UpgradeMaintenanceLease", main_start),
+            installer.index("Assert-OfflineUpgradeReady", main_start),
+        )
+        self.assertLess(
+            installer.index("Assert-OfflineUpgradeReady", main_start),
+            installer.index("Suspend-SentimentForUpdate", main_start),
+        )
+        self.assertNotIn("Stop-ExistingBridge", installer[main_start:])
         self.assertIn('"-Port"', installer)
         self.assertIn("[string]$ConfirmedPort", installer)
         self.assertIn(
@@ -4528,7 +4538,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.26")
+        self.assertEqual(version, "0.9.27")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)

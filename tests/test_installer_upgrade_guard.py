@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+import base64
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("isolated_upgrade_guard", ROOT / "installer" / "upgrade_guard.py")
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+
+
+class OfflineUpgradeStateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "hq"
+        self.common = Path(self.temp.name) / "common"
+        self.runtime = self.root / "data" / "runtime"
+        self.runtime.mkdir(parents=True)
+
+    def write(self, relative, value):
+        path = self.runtime / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def check(self):
+        guard.check_upgrade_state(self.root, self.common, now=1000)
+
+    def blocked(self, reason):
+        with self.assertRaisesRegex(guard.UpgradeBlocked, reason):
+            self.check()
+
+    def channel(self):
+        self.write("metatrader-targets.json", {
+            "candidates": {"mtc-test": {"platform": "mt5"}},
+            "selections": {"council": {"candidateId": "mtc-test"}},
+            "platformSelections": {"mt5": {"candidateId": "mtc-test"}},
+        })
+        folder = self.common / "MetafxHQ" / "mtc-test"
+        (folder / "trade-gateway").mkdir(parents=True)
+        return folder
+
+    def test_fresh_install_has_no_runtime_to_rewrite(self):
+        self.check()
+        self.assertEqual([], list(self.runtime.iterdir()))
+
+    def test_enabled_but_quiescent_settings_and_daily_ledger_are_preserved(self):
+        self.write("ai-trade-council-automation.json", {"config": {"enabled": True}, "state": {"status": "idle", "pendingQueue": []}})
+        self.write("sentiment-news-ai/state.json", {"status": "ready", "attempted": True})
+        self.write("sentiment-news-ai/days/2026-10-27.json", {"attempted": True, "status": "ready"})
+        self.write("private-config-fixture.json", {"myfxbook": "UNCHANGED", "mt5": "SAVED"})
+        before = {p: p.read_bytes() for p in self.runtime.rglob("*.json")}
+        self.check()
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+
+    def test_mission_shapes_allow_terminal_history_but_block_active_or_unknown(self):
+        for wrapped in (False, True):
+            for status in ("completed", "failed", "blocked", "archived", "cancelled"):
+                rows = [{"status": status}]
+                self.write("missions.json", {"missions": rows} if wrapped else rows)
+                self.check()
+            for status in ("queued", "running", "waiting_approval", "waiting_quota", "unexpected"):
+                rows = [{"status": status}]
+                self.write("missions.json", {"missions": rows} if wrapped else rows)
+                self.blocked("active_mission")
+
+    def test_council_pending_capture_or_queue_is_not_discarded(self):
+        for state in ({"pendingQueue": [{"snapshot": "retained"}]}, {"pendingClosedBarTime": 123}, {"status": "running"}):
+            path = self.write("ai-trade-council-automation.json", {"config": {"enabled": False}, "state": state})
+            before = path.read_bytes()
+            self.blocked("council_pending")
+            self.assertEqual(before, path.read_bytes())
+
+    def test_active_agent_turn_and_stale_pointer_block(self):
+        for thread in ({"activeTurnId": "t", "turns": []}, {"activeTurnId": None, "turns": [{"status": "running"}]}):
+            self.write("full-agent-runtime/full-agent-runtime-v1.json", {"threads": {"x": thread}})
+            self.blocked("active_agent_turn")
+        self.write("full-agent-runtime/full-agent-runtime-v1.json", {"threads": {"x": {"activeTurnId": None, "turns": [{"status": "cancelled"}]}}})
+        self.check()
+
+    def test_daily_news_reservation_blocks_without_retrying_it(self):
+        path = self.write("sentiment-news-ai/state.json", {"status": "running", "attempted": True})
+        before = path.read_bytes()
+        self.blocked("daily_news_analysis_active")
+        self.assertEqual(before, path.read_bytes())
+
+    def test_gateway_outstanding_or_execution_unknown_blocks(self):
+        for state in (
+            {"activeCommandId": "c", "commands": {}},
+            {"activeCommandId": None, "commands": {"c": {"outstanding": True, "status": "published"}}},
+            {"activeCommandId": None, "commands": {"c": {"outstanding": False, "status": "quarantined_execution_unknown"}}},
+        ):
+            self.write("mt4-trade-gateway/mt4-trade-gateway-ledger.json", state)
+            self.blocked("trade_command")
+
+    def test_settled_gateway_history_is_preserved(self):
+        self.write("mt4-trade-gateway/mt4-trade-gateway-ledger.json", {"activeCommandId": None, "commands": {"c": {"outstanding": False, "status": "acknowledged"}}})
+        self.check()
+
+    def test_fresh_ea_status_and_future_clock_fail_closed(self):
+        folder = self.channel()
+        for observed in (999, 1031):
+            (folder / "trade-gateway/status.json").write_text(json.dumps({"channelId": "mtc-test", "observedAt": observed, "currentManagedPositions": 0}))
+            self.blocked("ea_connection_active")
+
+    def test_stale_ea_status_with_open_positions_still_blocks(self):
+        folder = self.channel()
+        (folder / "trade-gateway/status.json").write_text(json.dumps({"channelId": "mtc-test", "observedAt": 1, "currentManagedPositions": 1}))
+        self.blocked("open_positions")
+
+    def test_unmanaged_open_snapshot_position_also_blocks(self):
+        folder = self.channel()
+        (folder / "snapshot.json").write_text(json.dumps({"channelId": "mtc-test", "positionsSummary": {"count": 1}}))
+        self.blocked("open_positions")
+
+    def test_prior_owned_channel_is_checked_even_without_current_selection(self):
+        folder = self.channel()
+        (self.runtime / "metatrader-targets.json").unlink()
+        (folder / "trade-gateway/status.json").write_text(json.dumps({"channelId": "mtc-test", "observedAt": 999, "currentManagedPositions": 0}))
+        self.write("ai-trade-council-automation.json", {"config": {"enabled": True}, "state": {"candidateId": "mtc-test"}})
+        self.blocked("ea_connection_active")
+        (self.runtime / "ai-trade-council-automation.json").unlink()
+        self.write("mt4-trade-gateway/mt4-trade-gateway-ledger.json", {"activeCommandId": None, "commands": {"c": {"outstanding": False, "status": "acknowledged", "command": {"channelId": "mtc-test"}}}})
+        self.blocked("ea_connection_active")
+
+    def test_stale_flat_status_and_empty_unselected_targets_are_allowed(self):
+        folder = self.channel()
+        (folder / "trade-gateway/status.json").write_text(json.dumps({"channelId": "mtc-test", "observedAt": 1, "currentManagedPositions": 0}))
+        self.check()
+        self.write("metatrader-targets.json", {"candidates": {}, "selections": {"council": None}, "platformSelections": {}})
+        self.check()
+
+    def test_channel_traversal_and_mismatched_identity_are_rejected(self):
+        folder = self.channel()
+        (folder / "snapshot.json").write_text(json.dumps({"channelId": "mtc-other", "positionsSummary": {"count": 0}}))
+        self.blocked("ea_identity_invalid")
+        self.write("metatrader-targets.json", {"candidates": {}, "selections": {"council": {"candidateId": "mtc-../../other"}}})
+        self.blocked("target_identity_invalid")
+
+    def test_corrupt_duplicate_null_and_nonfinite_json_fail_closed(self):
+        path = self.runtime / "missions.json"
+        for raw in ('{', 'null', '{"missions":[],"missions":[]}', '{"missions":[],"number":NaN}'):
+            path.write_text(raw)
+            with self.assertRaises(guard.UpgradeBlocked):
+                self.check()
+            self.assertEqual(raw, path.read_text())
+
+    def test_cli_errors_contain_only_safe_reason(self):
+        self.write("missions.json", {"missions": [{"status": "running", "secret": "NEVER_EMIT_THIS"}]})
+        import sys
+        result = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "installer/upgrade_guard.py"), "--install-root", str(self.root), "--common-files", str(self.common)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(3, result.returncode)
+        self.assertEqual({"ok": False, "code": "active_mission"}, json.loads(result.stdout))
+        self.assertEqual("", result.stderr)
+
+
+@unittest.skipUnless(os.name == "nt", "Windows maintenance lease")
+class OfflineUpgradeLeaseTests(unittest.TestCase):
+    def run_fixture(self, body):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "isolated-hq"
+            script = f"""
+$ErrorActionPreference='Stop'
+$installRoot='{str(root).replace("'", "''")}'
+$upgradeMaintenanceLease=$null
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('{str(ROOT / 'installer/install.ps1').replace("'", "''")}',[ref]$tokens,[ref]$errors)
+if ($errors.Count) {{ throw 'Installer syntax error' }}
+foreach ($name in @('Assert-NoInstalledBridgeProcess','Enter-UpgradeMaintenanceLease','Exit-UpgradeMaintenanceLease')) {{
+ $function=$ast.Find({{param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name}},$true)
+ Invoke-Expression $function.Extent.Text
+}}
+function Get-CimInstance {{ @() }}
+{body}
+"""
+            command = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+            result = subprocess.run(["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", command], capture_output=True, text=True, timeout=20)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_same_bridge_namespace_is_held_and_released(self):
+        self.run_fixture(r"""
+Enter-UpgradeMaintenanceLease
+try {
+ $sha=[Security.Cryptography.SHA256]::Create()
+ $digest=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($installRoot.ToLowerInvariant())))).Replace('-','').ToLowerInvariant().Substring(0,16)
+ $sha.Dispose(); $created=$false
+ $competitor=[Threading.Mutex]::new($false,('Local\MetafxAgentHQBridge-'+$digest),[ref]$created)
+ if ($created) { throw 'Bridge could enter during upgrade' }
+ $competitor.Dispose()
+} finally { Exit-UpgradeMaintenanceLease }
+$created=$false
+$next=[Threading.Mutex]::new($false,('Local\MetafxAgentHQBridge-'+$digest),[ref]$created)
+if (-not $created) { throw 'Maintenance lease leaked' }; $next.Dispose()
+""")
+
+    def test_existing_owner_refuses_without_releasing_its_lease(self):
+        self.run_fixture(r"""
+Enter-UpgradeMaintenanceLease
+$owner=$script:upgradeMaintenanceLease; $script:upgradeMaintenanceLease=$null
+try {
+ $rejected=$false
+ try { Enter-UpgradeMaintenanceLease } catch { $rejected=$true }
+ if (-not $rejected) { throw 'Existing owner accepted' }
+ if ($script:upgradeMaintenanceLease) { throw 'Refusal retained another lease' }
+} finally { $owner.Dispose() }
+Enter-UpgradeMaintenanceLease; Exit-UpgradeMaintenanceLease
+""")
+
+    def test_legacy_running_or_unknown_identity_rejects_and_releases(self):
+        self.run_fixture(r"""
+function Get-CimInstance { @([pscustomobject]@{Name='python.exe'; CommandLine=('python "'+$installRoot+'\backend\local-runner\bridge_server.py" --host 127.0.0.1 --port 4186'); ExecutablePath='C:\fixture\python.exe'}) }
+$rejected=$false
+try { Enter-UpgradeMaintenanceLease } catch { $rejected=$true }
+if (-not $rejected -or $script:upgradeMaintenanceLease) { throw 'Legacy process refusal failed' }
+function Get-CimInstance { throw 'CIM unavailable' }
+$rejected=$false
+try { Enter-UpgradeMaintenanceLease } catch { $rejected=$true }
+if (-not $rejected -or $script:upgradeMaintenanceLease) { throw 'Unknown process state accepted' }
+function Get-CimInstance { @() }
+Enter-UpgradeMaintenanceLease; Exit-UpgradeMaintenanceLease
+""")
+
+    def test_guard_precedes_service_mutations_and_copy_is_covered(self):
+        source = (ROOT / "installer/install.ps1").read_text(encoding="utf-8-sig")
+        start = source.index("$bridgeTaskWasEnabled = $false\n    try {")
+        main = source[start:]
+        self.assertLess(main.index("Enter-UpgradeMaintenanceLease"), main.index("Suspend-SentimentForUpdate"))
+        self.assertLess(main.index("Assert-OfflineUpgradeReady"), main.index("Suspend-SentimentForUpdate"))
+        self.assertNotIn("Stop-ExistingBridge", main)
+        self.assertLess(main.index("Publish-StagedApplication"), main.index("Exit-UpgradeMaintenanceLease"))
+        self.assertLess(main.index("Exit-UpgradeMaintenanceLease"), main.index("$bridgeEndpoint = Start-And-TestBridge"))
+        suspend = source[source.index("function Suspend-BridgeScheduledTask"):source.index("function Restore-BridgeScheduledTask")]
+        self.assertNotIn("Stop-ScheduledTask", suspend)
+        self.assertIn("finally {\n        Exit-UpgradeMaintenanceLease", main)
+
+
+if __name__ == "__main__":
+    unittest.main()

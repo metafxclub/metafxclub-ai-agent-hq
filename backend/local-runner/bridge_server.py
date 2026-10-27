@@ -203,7 +203,7 @@ from hq_backend.research.radar_image_adapter import (  # noqa: E402 - public HTT
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.26"
+BRIDGE_RUNTIME_VERSION = "0.9.27"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"

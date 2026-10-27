@@ -132,6 +132,7 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "README.md",
             "STUDENT-QUICKSTART-TH.md",
             "installer/install.ps1",
+            "installer/upgrade_guard.py",
             PIP_BOOTSTRAP_RELATIVE_PATH.as_posix(),
             "installer/bootstrap/README.md",
             "2-SETUP-GOOGLE-HQ.bat",
