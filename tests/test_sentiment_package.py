@@ -3,7 +3,10 @@ from pathlib import Path
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
+import tempfile
 import unittest
 from tests.test_release_candidate_preflight import REQUIRED_SENTIMENT_PACKAGE_FILES
 
@@ -14,7 +17,7 @@ class SentimentPackageTests(unittest.TestCase):
     def test_inventory_covers_every_backend_module_at_all_boundaries(self):
         package=ROOT/'backend/local-runner/sentiment_universe'
         actual={p.relative_to(ROOT).as_posix() for p in package.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix in {'.py','.js','.html','.css'}}
-        required={p for p in REQUIRED_SENTIMENT_PACKAGE_FILES if p.startswith('backend/')}
+        required={p for p in REQUIRED_SENTIMENT_PACKAGE_FILES if p.startswith('backend/local-runner/sentiment_universe/')}
         self.assertEqual(actual,required)
         for path in REQUIRED_SENTIMENT_PACKAGE_FILES:
             self.assertTrue((ROOT/path).is_file(),path)
@@ -27,6 +30,48 @@ class SentimentPackageTests(unittest.TestCase):
             for path in REQUIRED_SENTIMENT_PACKAGE_FILES:
                 with self.subTest(boundary=name,path=path):
                     self.assertIn('"'+path.replace('/','\\')+'"',body)
+
+    def test_isolated_universe_package_requires_its_shared_pure_news_contract(self):
+        overlay='backend/local-runner/sentiment_universe/live_backend/news_ai_overlay.py'
+        contract='backend/local-runner/hq_backend/research/sentiment_news_ai.py'
+        for path in (overlay,contract):
+            self.assertIn(path,REQUIRED_SENTIMENT_PACKAGE_FILES)
+        probe=r'''
+import importlib.util,json,os,sys
+from pathlib import Path
+def guard(event,args):
+    if event.startswith(('socket.','subprocess.')) or event in ('os.system','os.mkdir','os.remove','os.rename'):
+        raise AssertionError('unexpected side effect: '+event)
+    if event=='open':
+        mode=args[1] if len(args)>1 else None
+        flags=args[2] if len(args)>2 else 0
+        if (isinstance(mode,str) and any(char in mode for char in 'wax+')) or (isinstance(flags,int) and flags & (os.O_WRONLY|os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_APPEND)):
+            raise AssertionError('unexpected write')
+sys.addaudithook(guard)
+path=Path(sys.argv[1])
+spec=importlib.util.spec_from_file_location('isolated_universe_overlay',path)
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    shared=module.contract()
+    result={'ready':True,'profile':shared.RESULT_PROFILE,'bridgeLoaded':any('bridge_server' in name for name in sys.modules)}
+except FileNotFoundError:
+    result={'ready':False,'reason':'shared_contract_missing'}
+print(json.dumps(result))
+'''
+        with tempfile.TemporaryDirectory(prefix='sentiment-contract-package-') as temporary:
+            root=Path(temporary)
+            for relative in (overlay,contract):
+                destination=root/relative
+                destination.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copyfile(ROOT/relative,destination)
+            def check():
+                run=subprocess.run([sys.executable,'-I','-B','-c',probe,str(root/overlay)],capture_output=True,text=True,timeout=15)
+                self.assertEqual(run.returncode,0,run.stderr)
+                return json.loads(run.stdout)
+            self.assertEqual(check(),{'ready':True,'profile':'sentiment_news_daily_v1','bridgeLoaded':False})
+            (root/contract).unlink()
+            self.assertEqual(check(),{'ready':False,'reason':'shared_contract_missing'})
 
     def test_browser_assets_exist_and_private_state_is_not_shipped(self):
         public=ROOT/'frontend/public/sentiment-universe'

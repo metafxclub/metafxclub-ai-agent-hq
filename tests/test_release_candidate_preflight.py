@@ -56,6 +56,8 @@ REQUIRED_BACKEND_PACKAGE_FILES = (
     "backend/local-runner/hq_backend/research/radar_prompt.py",
     "backend/local-runner/hq_backend/research/radar_publication.py",
     "backend/local-runner/hq_backend/research/sheet_executor.py",
+    "backend/local-runner/hq_backend/research/sentiment_news_ai.py",
+    "backend/local-runner/hq_backend/research/sentiment_news_daily.py",
     "backend/local-runner/hq_backend/runtime/__init__.py",
     "backend/local-runner/hq_backend/runtime/codex_quota.py",
     "backend/local-runner/hq_backend/runtime/manager_parallel.py",
@@ -79,6 +81,7 @@ REQUIRED_SENTIMENT_PACKAGE_FILES = (
     'backend/local-runner/sentiment_universe/live_backend/mt5_setup.py',
     'backend/local-runner/sentiment_universe/live_backend/myfxbook.py',
     'backend/local-runner/sentiment_universe/live_backend/news.py',
+    'backend/local-runner/sentiment_universe/live_backend/news_ai_overlay.py',
     'backend/local-runner/sentiment_universe/live_backend/public_snapshot.py',
     'backend/local-runner/sentiment_universe/live_backend/secure_store.py',
     'backend/local-runner/sentiment_universe/live_backend/server.py',
@@ -94,7 +97,11 @@ REQUIRED_SENTIMENT_PACKAGE_FILES = (
     'backend/local-runner/sentiment_universe/tests/test_live_mt5_setup.py',
     'backend/local-runner/sentiment_universe/tests/test_live_myfxbook.py',
     'backend/local-runner/sentiment_universe/tests/test_live_news.py',
+    'backend/local-runner/sentiment_universe/tests/test_news_ai_overlay.py',
     'backend/local-runner/sentiment_universe/tests/test_live_server.py',
+
+    # Universe reads the same pure contract as Bridge; no second AI producer.
+    'backend/local-runner/hq_backend/research/sentiment_news_ai.py',
 
     'frontend/public/sentiment-universe/index.html',
     'frontend/public/sentiment-universe/sentiment-universe.js',
