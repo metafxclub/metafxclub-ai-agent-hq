@@ -19,9 +19,21 @@ class DailyNewsTests(unittest.TestCase):
 
     def setUp(self):
         self.setUpBase()
+        # Admission has a Thai 00:10 gate. Fixtures must not depend on the
+        # wall clock of the CI runner or cross midnight during the suite.
+        self.now = datetime(2026, 10, 28, 12, 0, tzinfo=self.bridge.sentiment_news_daily.THAI)
+        fixture_owner = self
+
+        class FixtureClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = fixture_owner.now
+                return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+        self.stack.enter_context(mock.patch.object(self.bridge.sentiment_news_daily, "datetime", FixtureClock))
         self.service = self.bridge.sentiment_news_daily.DailyNews(self.bridge)
         self.stack.enter_context(mock.patch.object(self.bridge, "_SENTIMENT_NEWS_DAILY", self.service))
-        self.day = datetime.now(self.bridge.sentiment_news_daily.THAI).date().isoformat()
+        self.day = self.now.date().isoformat()
         self.news = fixture()
         self.news["dayThai"] = self.day
         self.news["lastSuccessAt"] = f"{self.day}T00:00:35Z"
@@ -71,6 +83,26 @@ class DailyNewsTests(unittest.TestCase):
         self.service.tick()
         restarted = self.bridge.sentiment_news_daily.DailyNews(self.bridge)
         restarted.tick()
+        self.assertEqual(len(self.dispatched), 1)
+        self.assertEqual(len(self.bridge.load_missions()), 1)
+
+    def test_thai_midnight_waits_until_0010_without_consuming_the_daily_attempt(self):
+        for minute, second in ((0, 0), (9, 59)):
+            with self.subTest(minute=minute, second=second):
+                self.now = self.now.replace(hour=0, minute=minute, second=second)
+                self.service.next_poll = 0
+                self.service.tick()
+                self.assertEqual(self.service.ledger(self.day)["reason"], "waiting_calendar")
+                self.assertFalse(self.service.ledger(self.day)["attempted"])
+                self.assertEqual(self.bridge.load_missions(), [])
+                self.assertEqual(self.dispatched, [])
+        self.now = self.now.replace(hour=0, minute=10, second=0)
+        mission = self.queue()
+        self.process(mission)
+        self.assertEqual(self.bridge.find_mission(mission["id"])["status"], "completed")
+        self.assertEqual(self.service.ledger(self.day)["status"], "ready")
+        self.service.next_poll = 0
+        self.service.tick()
         self.assertEqual(len(self.dispatched), 1)
         self.assertEqual(len(self.bridge.load_missions()), 1)
 
