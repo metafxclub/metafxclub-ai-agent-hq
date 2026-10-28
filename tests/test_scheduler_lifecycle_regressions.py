@@ -36,7 +36,7 @@ class SchedulerLifecycleRegressionTests(unittest.TestCase):
         self.bridge.DASHBOARD_WORKFLOW_SCHEDULER_STOP.clear()
         self.bridge.DASHBOARD_WORKFLOW_SCHEDULER_WAKE.clear()
 
-    def test_scheduler_audit_declares_google_sheet_external_write_scope(self) -> None:
+    def test_scheduler_audit_assigns_google_sheet_writes_to_isolated_service(self) -> None:
         stop = mock.Mock()
         stop.is_set.return_value = True
         audit_events: list[dict] = []
@@ -71,9 +71,10 @@ class SchedulerLifecycleRegressionTests(unittest.TestCase):
             },
         )
         for event in lifecycle.values():
-            self.assertTrue(event["externalWrites"])
-            self.assertEqual(event["externalWriteScopes"], ["google_sheets"])
-            self.assertTrue(event["googleSheetExternalWritesEnabled"])
+            self.assertFalse(event["externalWrites"])
+            self.assertEqual(event["externalWriteScopes"], [])
+            self.assertFalse(event["googleSheetExternalWritesEnabled"])
+            self.assertEqual(event["sheetServiceOwner"], "isolated_sheet_service")
             self.assertTrue(
                 event["googleSheetExternalWritesRequireActiveConfiguration"]
             )
@@ -85,8 +86,8 @@ class SchedulerLifecycleRegressionTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )["background_scheduler"]["dashboardWorkflowScheduler"]
-        self.assertTrue(contract["googleSheetExternalWritesEnabledByDefault"])
-        self.assertEqual(contract["externalWriteScopes"], ["google_sheets"])
+        self.assertFalse(contract["googleSheetExternalWritesEnabledByDefault"])
+        self.assertEqual(contract["externalWriteScopes"], [])
         self.assertFalse(contract["otherExternalWrites"])
         self.assertFalse(contract["metaTraderActions"])
 

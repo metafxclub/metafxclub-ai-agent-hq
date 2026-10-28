@@ -88,6 +88,19 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
     def setUp(self) -> None:
         self.bridge = load_bridge()
         self.runner = load_runner()
+        # Read-model helpers can provision/read Gateway signing metadata. Even
+        # tests without an explicit selected-terminal fixture must never reach
+        # the developer's real MetaTrader Common Files or runtime state.
+        sandbox = tempfile.TemporaryDirectory(prefix="mt4-readonly-council-")
+        self.addCleanup(sandbox.cleanup)
+        root = Path(sandbox.name)
+        runtime = root / "runtime"
+        self.bridge.RUNTIME_DIR = runtime
+        self.bridge.METATRADER_COMMON_FILES_DIR = root / "common"
+        self.bridge.MISSIONS_PATH = runtime / "missions.json"
+        self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
+        self.bridge.AGENT_EVENTS_PATH = runtime / "agent-events.jsonl"
+        self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
         self._install_dual_lock_fixture()
 
     @staticmethod

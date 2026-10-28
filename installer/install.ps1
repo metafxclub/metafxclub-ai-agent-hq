@@ -68,6 +68,114 @@ $sentimentTaskXml = $null
 $sentimentPrepared = $false
 $sentimentSetupComplete = $false
 $sentimentWasRunning = $false
+$upgradeMaintenanceLease = $null
+
+function Assert-NoInstalledBridgeProcess {
+    # Read raw OS identity; never use endpoints that ingest or repair data.
+    $server = (Join-Path $installRoot 'backend\local-runner\bridge_server.py').Replace('/', '\')
+    $records = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    foreach ($record in $records) {
+        $commandLine = ([string]$record.CommandLine).Replace('/', '\')
+        $executable = ([string]$record.ExecutablePath).Replace('/', '\')
+        if ($commandLine.IndexOf($server, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            ($executable.StartsWith(($installRoot + '\'), [StringComparison]::OrdinalIgnoreCase) -and
+             [string]::IsNullOrWhiteSpace($commandLine)) -or
+            (([string]$record.Name) -match '^python(?:w|[0-9.]*)?\.exe$' -and
+             [string]::IsNullOrWhiteSpace($commandLine))) {
+            throw 'Offline upgrade refused: HQ is running or its process identity is unknown. Arrange intentional maintenance first; the installer will not stop HQ or trading terminals.'
+        }
+    }
+}
+
+function Assert-NoRunningBridgeWatchdog {
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return }
+    $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction SilentlyContinue
+    if (-not $task) { return }
+    $owned = $false
+    foreach ($action in @($task.Actions)) {
+        $identity = '{0} {1} {2}' -f [string]$action.Execute, [string]$action.Arguments, [string]$action.WorkingDirectory
+        if ($identity.IndexOf($installRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $owned = $true }
+    }
+    if (-not $owned) {
+        if ($PackageSmoke) { return }
+        throw 'Offline upgrade refused: Bridge watchdog ownership is unknown.'
+    }
+    if ([string]$task.State -in @('Running', 'Queued')) {
+        throw 'Offline upgrade refused: Bridge watchdog is running. Wait for it to finish; it will not be stopped.'
+    }
+}
+
+function Enter-UpgradeMaintenanceLease {
+    if ($script:upgradeMaintenanceLease) { throw 'Upgrade maintenance lease is already held.' }
+    $normalized = [IO.Path]::GetFullPath($installRoot).TrimEnd('\')
+    $part = $normalized
+    while ($part) {
+        if (Test-Path -LiteralPath $part) {
+            if ((Get-Item -LiteralPath $part -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'Offline upgrade refused: install path contains a reparse point.'
+            }
+        }
+        $part = Split-Path -Parent $part
+    }
+    # GetFullPath can expand only the first 8.3 component when a later leaf
+    # does not exist. Bridge uses pathlib.Path.resolve(), so resolve every
+    # existing component natively before appending the absent suffix.
+    $existing = $normalized
+    $suffix = New-Object 'System.Collections.Generic.List[string]'
+    while (-not (Test-Path -LiteralPath $existing)) {
+        $suffix.Insert(0, [IO.Path]::GetFileName($existing))
+        $existing = Split-Path -Parent $existing
+        if (-not $existing) { throw 'Offline upgrade refused: cannot resolve the installation root.' }
+    }
+    if (-not ('Metafxclub.Installer.UpgradeCanonicalPathV1' -as [type])) {
+        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; namespace Metafxclub.Installer { public static class UpgradeCanonicalPathV1 { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] public static extern uint GetLongPathNameW(string path, StringBuilder output, uint capacity); } }'
+    }
+    $canonical = [Text.StringBuilder]::new(32768)
+    $length = [Metafxclub.Installer.UpgradeCanonicalPathV1]::GetLongPathNameW($existing, $canonical, [uint32]$canonical.Capacity)
+    if ($length -eq 0 -or $length -ge $canonical.Capacity) { throw 'Offline upgrade refused: cannot establish the canonical Bridge lease identity.' }
+    $normalized = $canonical.ToString().TrimEnd('\')
+    foreach ($leaf in $suffix) { $normalized = Join-Path $normalized $leaf }
+    # Same existing Bridge guard: prevents watchdog/manual starts during copy.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized.ToLowerInvariant())))).Replace('-', '').ToLowerInvariant().Substring(0, 16) }
+    finally { $sha.Dispose() }
+    $created = $false
+    $lease = [Threading.Mutex]::new($false, ('Local\MetafxAgentHQBridge-' + $digest), [ref]$created)
+    if (-not $created) {
+        $lease.Dispose()
+        throw 'Offline upgrade refused: HQ or another installer holds the runtime lease. No services or user settings were changed.'
+    }
+    $script:upgradeMaintenanceLease = $lease
+    try { Assert-NoInstalledBridgeProcess }
+    catch { Exit-UpgradeMaintenanceLease; throw }
+}
+
+function Exit-UpgradeMaintenanceLease {
+    if ($script:upgradeMaintenanceLease) {
+        $script:upgradeMaintenanceLease.Dispose()
+        $script:upgradeMaintenanceLease = $null
+    }
+}
+
+function Assert-OfflineUpgradeReady {
+    if (-not $script:upgradeMaintenanceLease) { throw 'Offline upgrade requires the runtime maintenance lease.' }
+    Assert-NoInstalledBridgeProcess
+    Assert-NoRunningBridgeWatchdog
+    $guard = Join-Path $sourceRoot 'installer\upgrade_guard.py'
+    if (-not (Test-Path -LiteralPath $guard -PathType Leaf)) { throw 'Offline upgrade guard is missing.' }
+    $python = Resolve-SystemPython
+    $commonFiles = Join-Path $env:APPDATA 'MetaQuotes\Terminal\Common\Files'
+    $arguments = @($python.PrefixArguments) + @('-I', '-B', $guard, '--install-root', $installRoot, '--common-files', $commonFiles)
+    $raw = & $python.FilePath @arguments
+    $guardExit = $LASTEXITCODE
+    if ($guardExit -ne 0) {
+        $reason = 'runtime_state_unavailable'
+        try { $reason = [string](($raw | Select-Object -Last 1 | ConvertFrom-Json).code) } catch {}
+        throw "Offline upgrade refused ($reason): wait for intentional maintenance and resolve active work first. Saved configuration and orders were not changed."
+    }
+    $receipt = $raw | Select-Object -Last 1 | ConvertFrom-Json
+    if ($receipt.ok -ne $true -or $receipt.code -cne 'offline_state_ready') { throw 'Offline upgrade guard returned an invalid receipt.' }
+}
 
 function Suspend-SentimentForUpdate {
     if ($PackageSmoke) { return }
@@ -964,6 +1072,7 @@ function Assert-SafeSource {
     Assert-ExpectedGitSource
 
     $requiredFiles = @(
+        "installer\upgrade_guard.py",
         "backend\local-runner\sentiment_universe\live_backend\__init__.py",
         "backend\local-runner\sentiment_universe\live_backend\connect.html",
         "backend\local-runner\sentiment_universe\live_backend\connect.js",
@@ -972,6 +1081,7 @@ function Assert-SafeSource {
         "backend\local-runner\sentiment_universe\live_backend\mt5_setup.py",
         "backend\local-runner\sentiment_universe\live_backend\myfxbook.py",
         "backend\local-runner\sentiment_universe\live_backend\news.py",
+        "backend\local-runner\sentiment_universe\live_backend\news_ai_overlay.py",
         "backend\local-runner\sentiment_universe\live_backend\public_snapshot.py",
         "backend\local-runner\sentiment_universe\live_backend\secure_store.py",
         "backend\local-runner\sentiment_universe\live_backend\server.py",
@@ -986,6 +1096,7 @@ function Assert-SafeSource {
                 "backend\local-runner\sentiment_universe\tests\test_live_mt5_setup.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_myfxbook.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_news.py",
+                "backend\local-runner\sentiment_universe\tests\test_news_ai_overlay.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_server.py",
         "frontend\public\sentiment-universe\index.html",
                 "frontend\public\sentiment-universe\sentiment-universe.js",
@@ -1023,6 +1134,9 @@ function Assert-SafeSource {
         "backend\local-runner\hq_backend\research\radar_image_adapter.py",
         "backend\local-runner\hq_backend\research\radar_prompt.py",
         "backend\local-runner\hq_backend\research\radar_publication.py",
+        "backend\local-runner\hq_backend\research\sheet_executor.py",
+        "backend\local-runner\hq_backend\research\sentiment_news_ai.py",
+        "backend\local-runner\hq_backend\research\sentiment_news_daily.py",
         "contracts\research\radar-website-source-policy-v1.json",
         "contracts\research\radar-website-tool-compatibility-v1.json",
         "contracts\reports\report-contract.json",
@@ -1404,8 +1518,7 @@ function Assert-NoEmbeddedHighConfidenceSecrets {
 function Suspend-BridgeScheduledTask {
     if (
         -not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -or
-        -not (Get-Command Disable-ScheduledTask -ErrorAction SilentlyContinue) -or
-        -not (Get-Command Stop-ScheduledTask -ErrorAction SilentlyContinue)
+        -not (Get-Command Disable-ScheduledTask -ErrorAction SilentlyContinue)
     ) {
         return $false
     }
@@ -1478,6 +1591,9 @@ function Suspend-BridgeScheduledTask {
     if ([string]$task.State -ceq "Disabled") {
         return $false
     }
+    if ([string]$task.State -in @('Running', 'Queued')) {
+        throw 'Offline upgrade refused: the Bridge watchdog is running. Wait for it to finish; no task or process was stopped.'
+    }
 
     $taskWasDisabled = $false
     try {
@@ -1486,15 +1602,7 @@ function Suspend-BridgeScheduledTask {
         $taskWasDisabled = $true
         $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
         if ([string]$task.State -in @("Running", "Queued")) {
-            Stop-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
-            $deadline = [DateTime]::UtcNow.AddSeconds(15)
-            do {
-                Start-Sleep -Milliseconds 250
-                $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
-            } while ([string]$task.State -in @("Running", "Queued") -and [DateTime]::UtcNow -lt $deadline)
-            if ([string]$task.State -in @("Running", "Queued")) {
-                throw "พัก Watchdog ไม่สำเร็จ จึงหยุดก่อนแก้ไฟล์โปรแกรม"
-            }
+            throw 'Offline upgrade refused: the watchdog started during preflight. It will not be force-stopped.'
         }
         return $true
     }
@@ -1709,7 +1817,7 @@ function Stop-ExistingBridge {
     }
 
     Write-Step "กำลังหยุด Local Bridge เดิมแบบตรวจสอบตัวตนก่อน"
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $lifecycle -Action Stop
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $lifecycle -Action Stop -GracefulOnly
     if ($LASTEXITCODE -ne 0) {
         throw "หยุด Local Bridge เดิมไม่สำเร็จ จึงยกเลิกเพื่อไม่ให้แก้ไฟล์ขณะระบบกำลังทำงาน"
     }
@@ -2065,7 +2173,7 @@ function Stop-CandidateBridgeAfterFailedStart {
     }
     try {
         & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
-            -File $lifecycle -Action Stop -Port $CandidatePort | Out-Host
+            -File $lifecycle -Action Stop -Port $CandidatePort -GracefulOnly | Out-Host
         if ($LASTEXITCODE -ne 0) {
             throw "Lifecycle คืนรหัส $LASTEXITCODE"
         }
@@ -2732,6 +2840,7 @@ function Invoke-BridgeLifecycleProcess {
     if ($Action -in @("Start", "Restart")) {
         $arguments += @("-HealthTimeoutSeconds", "60")
     }
+    if ($Action -in @('Stop', 'Restart')) { $arguments += @('-GracefulOnly') }
 
     # A native PowerShell pipeline can retain a descendant's inherited pipe
     # handle and make the installer wait until the long-running Bridge exits.
@@ -3358,6 +3467,13 @@ try {
     }
     $bridgeTaskWasEnabled = $false
     try {
+        Enter-UpgradeMaintenanceLease
+        Assert-OfflineUpgradeReady
+        # The verified maintenance baseline supersedes the earlier endpoint
+        # probe: the owner may have intentionally stopped HQ in between. A
+        # failed upgrade must preserve that stopped state, not revive HQ.
+        $previousBridgeWasRunning = $false
+        $script:previousBridgeWasStopped = $false
         Suspend-SentimentForUpdate
         $bridgeTaskWasEnabled = Suspend-BridgeScheduledTask
         if (
@@ -3367,8 +3483,8 @@ try {
         ) {
             throw "เมื่อเปิด Autostart อยู่ การติดตั้งแบบ SkipLaunch ต้องใช้พอร์ตเดิม เพราะพอร์ตใหม่ยังไม่ผ่าน Health check"
         }
-        $script:previousBridgeWasStopped = $previousBridgeWasRunning
-        Stop-ExistingBridge
+        # Recheck after watchdog suspension, still holding the runtime lease.
+        Assert-OfflineUpgradeReady
         if (-not (Test-LoopbackPortAvailable -CandidatePort $selectedBridgePort)) {
             throw "พอร์ตที่ผู้ใช้ยืนยัน ($selectedBridgePort) ไม่ว่างหลังหยุด HQ เดิม ระบบหยุดโดยไม่เปลี่ยน URL"
         }
@@ -3394,6 +3510,7 @@ try {
         $venvPython = Initialize-PythonEnvironment
         Test-InstalledApplication -PythonPath $venvPython
         if (-not $SkipLaunch) {
+            Exit-UpgradeMaintenanceLease
             # The lifecycle command may start a process and then fail a later
             # endpoint/health assertion. Mark it before the call so rollback
             # always attempts to stop that candidate safely.
@@ -3532,6 +3649,8 @@ try {
                     $bridgeEndpoint = $null
                     $script:candidateBridgeMayBeRunning = $false
                 }
+                if (-not $script:upgradeMaintenanceLease) { Enter-UpgradeMaintenanceLease }
+                Assert-NoInstalledBridgeProcess
                 Restore-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState
                 $rollbackRestored = $true
             }
@@ -3549,6 +3668,7 @@ try {
                 }
             }
             if ($rollbackRestored -and $previousBridgeWasRunning) {
+                Exit-UpgradeMaintenanceLease
                 $previousBridgeRestored = [bool](Start-PreviousBridgeAfterRollback)
             }
         }
@@ -3556,11 +3676,13 @@ try {
             # Port races and snapshot/pre-publish failures occur before any
             # application mutation, but the verified old Bridge was already
             # stopped. Restore its service independently of file rollback.
+            Exit-UpgradeMaintenanceLease
             $previousBridgeRestored = [bool](Start-PreviousBridgeAfterRollback)
         }
         throw $installError
     }
     finally {
+        Exit-UpgradeMaintenanceLease
         # A Sentiment restore failure must not skip the watchdog restore below.
         try {
             Restore-SentimentAfterUpdateFailure

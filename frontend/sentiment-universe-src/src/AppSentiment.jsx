@@ -4,7 +4,7 @@ import {OrbitalScene} from './OrbitalScene.jsx';
 import {SentimentPreview} from './SentimentPreview.jsx';
 import {getSentimentColor} from './SentimentNode.js';
 import {PAIRS} from './data.js';
-import {getSentiment,getNewsForSymbol,getEventScenarios,getCorrelations,getAvailableEdges,thaiDay,formatThaiStamp,eventTime,sourceStatus} from './market-data.js';
+import {getSentiment,getNewsForSymbol,getEventScenarios,getEventAi,getNewsAiState,getCorrelations,getAvailableEdges,thaiDay,formatThaiStamp,eventTime,sourceStatus} from './market-data.js';
 import {useMarketData} from './useMarketData.js';
 import {assetUrl} from './asset-url.js';
 import {handleUniverseKey} from './embed-interaction.js';
@@ -15,6 +15,11 @@ import {useInspectorPresence} from './useInspectorPresence.js';
 
 const FILTERS=[['all','ทั้งหมด',32],['forex','Forex',28],['metals','Metals',2],['oil','Oil',2]];
 const SENTIMENT_GRADIENT=`linear-gradient(90deg,${[0,10,20,35,50,65,80,90,100].map(long=>`${getSentimentColor({available:true,long,short:100-long}).color} ${long}%`).join(',')})`;
+function NewsAiStatus({source,day,event}){
+ const ai=event?getEventAi(event):null,state=getNewsAiState(source,day);
+ const ready=event?Boolean(ai):state.status==='ready';
+ return <div className={`news-ai-status ${ready?'ready':'fallback'}`} role="status"><strong>{event&&state.status==='ready'&&!ai?'ยังไม่มี AI ที่ตรงกับข่าวนี้':state.label}</strong><small>{ready?`วิเคราะห์ ${formatThaiStamp(ai?.generatedAt||state.generatedAt)} · เวลาไทย`:`${state.reason?`${state.reason} · `:''}แสดงคำอธิบายพื้นฐานจากพจนานุกรมข่าว`}</small></div>;
+}
 function AssetSearch({symbol,onSelect}){
  const[query,setQuery]=useState(''),[open,setOpen]=useState(false),[active,setActive]=useState(0);const host=useRef(null),input=useRef(null);
  const matches=PAIRS.filter(p=>`${p.symbol} ${p.name}`.toLowerCase().includes(query.trim().toLowerCase()));
@@ -39,6 +44,7 @@ function NewsRail({symbol,news,eventId,onEvent,highOnly,setHighOnly,inactive,day
    <div className="news-filter"><span className="sample-mini">{highOnly?'ข่าวสำคัญ':'ทุกระดับความสำคัญ'}</span><button aria-pressed={highOnly} onClick={()=>setHighOnly(v=>!v)}>เฉพาะข่าวสำคัญ</button></div>
    <div className="news-source-status" role="status"><a href={source.sourceUrl||'https://www.forexfactory.com/calendar'} target="_blank" rel="noopener noreferrer">{source.source||'Forex Factory'}<IconExternalLink size={11}/></a><span>{dayStatus}{sourceProblem&&hasSnapshot?` · ${sourceStatus(source)}`:''}</span><small>วันที่เลือก {dayCount} · ในช่วงที่ดึงไว้ {calendarCount} รายการ<br/>เป็นรายการจากแหล่งนี้ อาจไม่ครอบคลุมทุกข่าวตลาด</small></div>
    {source.error==='http_429'&&<p className="news-retry-notice">ต้นทางจำกัดการเรียก · ใช้ปฏิทินรอบที่เก็บไว้<br/>ลองใหม่ {formatThaiStamp(source.nextAttemptAt)} เวลาไทย</p>}
+   <NewsAiStatus source={source} day={day}/>
   </header>
   <div className="news-list">{groups.map(g=><section className="news-time-group" key={g.key}><div className="time-heading"><IconCircleFilled size={10}/><time dateTime={g.event.time||undefined}>{eventTime(g.event)}</time><span>{g.events.length>1?`${g.events.length} เหตุการณ์`:g.events[0].currency}</span></div><div className="events-at-time">{g.events.map(e=><button key={e.id} id={`news-${e.id}`} className={`news-event ${e.id===eventId?'selected':''}`} aria-expanded={e.id===eventId} aria-controls={e.id===eventId?'news-popover':undefined} onClick={()=>onEvent(e.id)}><span className="event-currency">{e.currency}</span><span className="event-title">{e.title}</span><span className={`impact ${e.impact}`} title={`ความสำคัญ ${e.impactLabel||'ไม่ระบุ'}`}><IconCircleFilled size={8}/><span className="sr-only">{e.impactLabel||'ไม่ระบุ'}</span></span></button>)}</div></section>)}{!visible.length&&<div className="empty-news"><IconNews size={28}/><h3>{emptyTitle}</h3><p>{emptyNote}</p></div>}</div>
   <footer className="news-round"><IconClock size={19}/><div>ปฏิทินอัปเดตวันละครั้ง<small>ดึงสำเร็จ {formatThaiStamp(source.lastSuccessAt)}<br/>กำหนดการที่เก็บไว้ อาจมีการเปลี่ยนภายหลัง</small></div></footer>
@@ -47,15 +53,28 @@ function NewsRail({symbol,news,eventId,onEvent,highOnly,setHighOnly,inactive,day
 function NewsPopover({event,symbol,onClose,onLearnMore,explainerOpen}){
  const close=useRef(null);useEffect(()=>{close.current?.focus({preventScroll:true});},[event.id]);const scenarios=symbol?getEventScenarios(event,symbol):[];
  const hasFigures=event.numeric||[event.forecast,event.previous].some(value=>value!==null&&value!==undefined&&value!=='—');
- return <section className="news-popover" id="news-popover" role={explainerOpen?"region":"dialog"} aria-modal={explainerOpen?undefined:false} aria-labelledby="news-title"><header><div className="popup-meta"><span className="currency-tag">{event.currency}</span><time dateTime={event.time||undefined}>{event.dayThai||thaiDay(event.time)} · {eventTime(event)} · ไทย</time></div><button ref={close} className="icon-button" aria-label="ปิดบทวิเคราะห์ข่าว" onClick={onClose}><IconX size={20}/></button></header><div className="popup-scroll"><h2 id="news-title">{event.title}</h2>{event.summary&&<p className="news-summary">{event.summary}</p>}<button id="news-learn-more" className="news-learn-more" aria-expanded={explainerOpen} aria-controls={explainerOpen?'news-explainer':undefined} onClick={onLearnMore}><IconInfoCircle size={16}/>อ่านเพิ่มเติม · ข่าวนี้หมายถึงอะไร</button>{hasFigures&&<div className="event-figures"><div><small>คาดการณ์</small><strong>{event.forecast??'—'}</strong></div><div><small>ครั้งก่อน</small><strong>{event.previous??'—'}</strong></div></div>}<p className="actual-status">ผลจริง: {event.actual===null||event.actual===undefined?'แหล่งนี้ไม่ส่งผลจริง':String(event.actual)}</p>{scenarios.length>0?<><div className="scenario-heading">ฉากทัศน์ต่อ <strong>{symbol}</strong><span>หากผลออกมา…</span></div><div className="scenario-list">{scenarios.map(s=><div className={`scenario ${s.direction}`} key={s.key}><div><span className="scenario-icon">{s.direction==='up'?<IconArrowUpRight size={18}/>:s.direction==='down'?<IconArrowDownRight size={18}/>:<IconMinus size={18}/>}</span><strong>{s.label}</strong></div><p>{s.summary}</p></div>)}</div><p className="scenario-note">{scenarios[0].note}<br/>ข่าวเดียวไม่พอสรุปทิศทางระยะยาว</p></>:<p className="overview-news-hint">{symbol?'ยังไม่มีฉากทัศน์ทิศทางที่รองรับสำหรับข่าวและสินทรัพย์นี้':'เลือกคู่เงินเพื่อดูฉากทัศน์ เมื่อข่าวมีตัวเลขคาดการณ์ที่รองรับ'}</p>}{event.datePrecisionNote&&<p className="scenario-note">{event.datePrecisionNote}</p>}</div><footer>{event.sourceUrl?<a href={event.sourceUrl} target="_blank" rel="noopener noreferrer">{event.sourceName}<IconExternalLink size={14}/></a>:<span>{event.sourceName||'ไม่ระบุแหล่งข่าว'}</span>}<span>ปฏิทินรอบรายวัน</span></footer></section>;
+ const ai=getEventAi(event),summary=ai?.summaryTh||event.summary;
+ return <section className="news-popover" id="news-popover" role={explainerOpen?'region':'dialog'} aria-modal={explainerOpen?undefined:false} aria-labelledby="news-title">
+  <header><div className="popup-meta"><span className="currency-tag">{event.currency}</span><time dateTime={event.time||undefined}>{event.dayThai||thaiDay(event.time)} · {eventTime(event)} · ไทย</time></div><button ref={close} className="icon-button" aria-label="ปิดบทวิเคราะห์ข่าว" onClick={onClose}><IconX size={20}/></button></header>
+  <div className="popup-scroll"><h2 id="news-title">{event.title}</h2><NewsAiStatus event={event} day={event.dayThai||thaiDay(event.time)}/>{summary&&<p className="news-summary">{summary}</p>}
+   <button id="news-learn-more" className="news-learn-more" aria-expanded={explainerOpen} aria-controls={explainerOpen?'news-explainer':undefined} onClick={onLearnMore}><IconInfoCircle size={16}/>อ่านเพิ่มเติม · ข่าวนี้หมายถึงอะไร</button>
+   {hasFigures&&<div className="event-figures"><div><small>คาดการณ์</small><strong>{event.forecast??'—'}</strong></div><div><small>ครั้งก่อน</small><strong>{event.previous??'—'}</strong></div></div>}
+   <p className="actual-status">ผลจริง: {event.actual===null||event.actual===undefined?'แหล่งนี้ไม่ส่งผลจริง':String(event.actual)}</p>
+   {scenarios.length>0?<><div className="scenario-heading">ฉากทัศน์ต่อ <strong>{symbol}</strong><span>{ai?'AI รายวัน · หากผลออกมา…':'หลักการพื้นฐาน · หากผลออกมา…'}</span></div>
+    <div className="scenario-list">{scenarios.map(s=><div className={`scenario ${s.direction} ${s.detail?'has-analysis':''}`} key={s.key}><div><span className="scenario-icon">{s.direction==='up'?<IconArrowUpRight size={18}/>:s.direction==='down'?<IconArrowDownRight size={18}/>:<IconMinus size={18}/>}</span><strong>{s.label}</strong></div><p>{s.summary}{s.detail&&<small>{s.detail}</small>}</p></div>)}</div>
+    <p className="scenario-note">{scenarios[0].note}<br/>ข่าวเดียวไม่พอสรุปทิศทางระยะยาว</p></>:<p className="overview-news-hint">{symbol?'ยังไม่มีฉากทัศน์ทิศทางที่รองรับสำหรับข่าวและสินทรัพย์นี้':'เลือกสินทรัพย์เพื่อดูฉากทัศน์ เมื่อข่าวมีตัวเลขคาดการณ์ที่รองรับ'}</p>}
+   {ai&&<details className="news-horizons"><summary>ผลที่อาจเกิดขึ้นตามระยะเวลา</summary><dl>{[['short','ระยะสั้น'],['medium','ระยะกลาง'],['long','ระยะยาว']].map(([key,label])=><div key={key}><dt>{label}</dt><dd>{ai.horizonNotesTh[key]}</dd></div>)}</dl>{!scenarios.length&&<p>{ai.caveatTh}</p>}</details>}
+   {event.datePrecisionNote&&<p className="scenario-note">{event.datePrecisionNote}</p>}
+  </div><footer>{event.sourceUrl?<a href={event.sourceUrl} target="_blank" rel="noopener noreferrer">{event.sourceName}<IconExternalLink size={14}/></a>:<span>{event.sourceName||'ไม่ระบุแหล่งข่าว'}</span>}<span>{ai?'AI วิเคราะห์รายวัน':'คำอธิบายพื้นฐาน'}</span></footer>
+ </section>;
 }
 function NewsExplainer({event,onClose}) {
  const close=useRef(null),info=getNewsExplainer(event);
  useEffect(()=>{close.current?.focus({preventScroll:true});if(matchMedia('(max-width:740px)').matches)close.current?.closest('.news-explainer')?.scrollIntoView({block:'nearest'});},[event.id]);
  return <aside className="news-explainer" id="news-explainer" role="region" aria-labelledby="explainer-title">
-  <header><div><p className="eyebrow">UNDERSTAND THE EVENT</p><h2 id="explainer-title">{info.title}</h2></div><button ref={close} className="icon-button" aria-label="ปิดคำอธิบายข่าว" onClick={onClose}><IconX size={19}/></button></header>
+  <header><div><p className="eyebrow">{info.origin==='ai'?'DAILY AI BRIEF':'UNDERSTAND THE EVENT'}</p><h2 id="explainer-title">{info.title}</h2></div><button ref={close} className="icon-button" aria-label="ปิดคำอธิบายข่าว" onClick={onClose}><IconX size={19}/></button></header>
   <div className="explainer-points">{info.lines.map((line,i)=><p key={i}><span>{String(i+1).padStart(2,'0')}</span>{line}</p>)}</div>
-  <footer><a href={info.sourceUrl} target="_blank" rel="noopener noreferrer">{info.sourceName}<IconExternalLink size={14}/></a><small>คำอธิบายตัวชี้วัด · ตรวจผลจริงจากแหล่งประกาศ</small></footer>
+  <footer>{info.sourceRefs.map(ref=><a key={ref.url} href={ref.url} target="_blank" rel="noopener noreferrer">{ref.name}<IconExternalLink size={14}/></a>)}<small>{info.origin==='ai'?`AI รายวัน · วิเคราะห์ ${formatThaiStamp(info.generatedAt)} เวลาไทย`:'คำอธิบายพื้นฐานจากพจนานุกรมข่าว · ไม่ใช่ผลวิเคราะห์ AI'}<br/>ตรวจผลจริงจากแหล่งประกาศ · ไม่ใช่สัญญาณซื้อขาย</small></footer>
  </aside>;
 }
 function NewsReader({event,symbol,explainerOpen,onClose,onLearnMore,onCloseExplainer,embedded=false}) {

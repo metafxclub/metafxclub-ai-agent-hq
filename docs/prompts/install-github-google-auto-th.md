@@ -1,5 +1,7 @@
 # Prompt ติดตั้งด้วย Codex จาก GitHub Clone พร้อม OAuth Client กลาง
 
+ใช้สำหรับเครื่องใหม่เท่านั้น ถ้ามี HQ อยู่แล้ว ให้ใช้ [Prompt อัปเดตโดยเก็บค่าตั้งเดิม](update-github-preserve-settings-th.md) ของ tag เดียวกัน
+
 Prompt นี้ใช้สำหรับให้นักเรียนวางใน Codex บน Windows เพียงครั้งเดียว Codex จะตรวจและติดตั้งเฉพาะ Git/Python ที่ขาดแบบ current-user, Clone Source รุ่นที่ล็อกไว้จาก GitHub, ตรวจ Tag/Version, ดาวน์โหลดและตรวจ Release ZIP + `.sha256`, extract เฉพาะ OAuth native/installed-app client configuration กลางที่ถูก inject ตอน build, เรียก Installer, ตรวจ Runtime และเปิด Agent HQ ให้เอง นักเรียนไม่ต้องติดตั้ง Git/Python ล่วงหน้า ไม่ต้องดาวน์โหลด ZIP เอง และไม่ต้องกดไฟล์ BAT
 
 ก่อนส่งให้นักเรียน อาจารย์ล็อกค่า `GITHUB_REPOSITORY`, `GITHUB_TAG` และ `EXPECTED_VERSION` ไว้แล้ว นักเรียนวาง Prompt ได้ทันทีโดยไม่ต้องสร้าง Google Cloud Project/OAuth Client, เพิ่ม Test users, ดาวน์โหลด JSON หรือกรอก/แก้ Client ID กลาง:
@@ -10,8 +12,10 @@ Prompt นี้ใช้สำหรับให้นักเรียนว�
 ช่วยติดตั้ง Metafxclub AI Agent HQ บน Windows User ปัจจุบันให้เสร็จอัตโนมัติ โดยให้คุณ Clone Tag จาก GitHub, ดาวน์โหลด Release ZIP กับ `.sha256` เพื่อตรวจและนำเข้าเฉพาะ Client กลาง แล้วเรียก Installer เอง ฉันจะไม่ดาวน์โหลด ZIP และไม่กดไฟล์ BAT
 
 GITHUB_REPOSITORY = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
-GITHUB_TAG = "v0.9.26"
-EXPECTED_VERSION = "0.9.26"
+GITHUB_TAG = "v0.9.27"
+EXPECTED_VERSION = "0.9.27"
+
+ก่อนทำขั้นตอนอื่น ตรวจว่า %LOCALAPPDATA%\Metafxclub\AI-Agent-HQ มีอยู่หรือไม่ด้วย metadata เท่านั้น หากมีโฟลเดอร์อยู่แล้ว ไม่ว่าจะเปิดหรือหยุดโปรแกรมอยู่ ให้หยุดเส้นทางติดตั้งใหม่นี้ก่อนเปลี่ยนไฟล์/บริการ/บัญชี แล้วใช้ docs/prompts/update-github-preserve-settings-th.md จาก tag v0.9.27 แทน ห้ามใช้ -ResetGoogleOAuthToCentralRelease กับโปรแกรมเดิม หรือทำให้เครื่องเหมือนติดตั้งใหม่ด้วยการลบ/ย้ายข้อมูลเดิม
 
 ข้อความนี้เป็นการยืนยันล่วงหน้าให้ Codex ใช้ Local endpoint มาตรฐาน `http://127.0.0.1:4186/` และส่งพอร์ต 4186 เข้า Installer ด้วย `-EndpointConfirmed` ได้ ไม่ต้องถามฉันให้เลือก Port หรือกดไฟล์ BAT ซ้ำ ห้ามใช้ 0.0.0.0, LAN IP หรือ Public IP
 
@@ -46,7 +50,7 @@ EXPECTED_VERSION = "0.9.26"
    `git clone --depth 1 --single-branch --branch "<GITHUB_TAG>" "<GITHUB_REPOSITORY>" "<SOURCE_DIR>"`
    ห้ามใช้หรือแก้ Repository เดิมของผู้เรียน ห้าม Pull/Merge/Stash/Reset งานเดิม หลัง Clone ให้ตรวจว่า `origin` ตรงกับ GITHUB_REPOSITORY, `HEAD` ตรงกับทั้ง `REMOTE_TAG_COMMIT` และ `refs/tags/GITHUB_TAG^{commit}`, อยู่ใน detached HEAD, `git status --porcelain --untracked-files=all` ว่าง และไฟล์ `VERSION` ตรงกับ EXPECTED_VERSION หากข้อใดไม่ตรงให้หยุด
 
-4. เส้นทางหลักต้องใช้ OAuth native/installed-app client configuration กลางที่ GitHub Actions inject จาก Release secrets ตอน build Asset เท่านั้น ไฟล์จริงต้องไม่อยู่ใน public Git tree หลัง Clone ให้ยืนยันว่า `backend/local-runner/google_oauth_native_client.txt` ไม่มีอยู่ใน Git index, คำสั่ง `git check-ignore -q -- backend/local-runner/google_oauth_native_client.txt` ผ่าน และ worktree ยังสะอาด จาก ZIP ที่ตรวจ hash แล้ว ให้เปิดแบบอ่านอย่างเดียวและยอมรับเฉพาะ entry ปกติที่ path ตรง `Metafxclub-AI-Agent-HQ-<GITHUB_TAG>/backend/local-runner/google_oauth_native_client.txt` เพียงหนึ่งรายการ (เช่น `Metafxclub-AI-Agent-HQ-v0.9.26/...`) ห้ามมี absolute path, `..`, duplicate, directory, symlink หรือ ReparsePoint อ่าน bytes ของ entry นี้แล้วเขียนแบบ atomic ไปที่ `SOURCE_DIR/backend/local-runner/google_oauth_native_client.txt` โดยตัดเฉพาะชื่อ root ของ Archive ออก ห้าม extract ไฟล์อื่นหรือทับ Source จาก Git และตรวจ `git status --porcelain --untracked-files=all` ต้องยังว่างเพราะไฟล์ถูก ignore
+4. เส้นทางหลักต้องใช้ OAuth native/installed-app client configuration กลางที่ GitHub Actions inject จาก Release secrets ตอน build Asset เท่านั้น ไฟล์จริงต้องไม่อยู่ใน public Git tree หลัง Clone ให้ยืนยันว่า `backend/local-runner/google_oauth_native_client.txt` ไม่มีอยู่ใน Git index, คำสั่ง `git check-ignore -q -- backend/local-runner/google_oauth_native_client.txt` ผ่าน และ worktree ยังสะอาด จาก ZIP ที่ตรวจ hash แล้ว ให้เปิดแบบอ่านอย่างเดียวและยอมรับเฉพาะ entry ปกติที่ path ตรง `Metafxclub-AI-Agent-HQ-<GITHUB_TAG>/backend/local-runner/google_oauth_native_client.txt` เพียงหนึ่งรายการ (เช่น `Metafxclub-AI-Agent-HQ-v0.9.27/...`) ห้ามมี absolute path, `..`, duplicate, directory, symlink หรือ ReparsePoint อ่าน bytes ของ entry นี้แล้วเขียนแบบ atomic ไปที่ `SOURCE_DIR/backend/local-runner/google_oauth_native_client.txt` โดยตัดเฉพาะชื่อ root ของ Archive ออก ห้าม extract ไฟล์อื่นหรือทับ Source จาก Git และตรวจ `git status --porcelain --untracked-files=all` ต้องยังว่างเพราะไฟล์ถูก ignore
 
    ไฟล์ Client กลางมี `client_id` และ `client_secret` ของ installed app ซึ่งเป็น app metadata ที่ต้องแจกพร้อมโปรแกรม ไม่ใช่ Credential ของบัญชีนักเรียน แต่ห้าม commit ค่าจริงลง public Source และห้ามพิมพ์ค่าเต็มใน console, Chat, Frontend, Mission, Report หรือ Log ห้ามถามนักเรียนหา Client ID, Client Secret, OAuth JSON หรือ Google Cloud Project Installer ทางการต้องตรวจรูปแบบและ metadata ด้วย Release preflight เอง หากไฟล์ขาดหรือรูปแบบไม่ถูกต้องให้หยุดและแจ้งว่า Release Asset ไม่สมบูรณ์ ห้ามแก้ด้วย Credential ของนักเรียนแบบเงียบ ๆ
 

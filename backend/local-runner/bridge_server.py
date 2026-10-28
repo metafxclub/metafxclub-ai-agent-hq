@@ -25,7 +25,7 @@ import time
 import unicodedata
 import zipfile
 import zlib
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
 from decimal import (
     Decimal,
@@ -160,7 +160,7 @@ from hq_backend.ea.ea_factory_optimization import (  # noqa: E402 - durable guar
     EaFactoryOptimizationService,
     OptimizationDomainError,
 )
-from hq_backend.research import fx_news_direct, fx_trend  # noqa: E402 - pure research models
+from hq_backend.research import fx_news_direct, fx_trend, sentiment_news_ai, sentiment_news_daily  # noqa: E402 - pure research models
 from hq_backend.google import google_sheet_hub  # noqa: E402 - backend-only authenticated Sheets adapter
 from hq_backend.trading.mt4_market_watch import (  # noqa: E402 - selected MT4 Market Watch read model
     MAX_MARKET_WATCH_SYMBOLS,
@@ -203,7 +203,7 @@ from hq_backend.research.radar_image_adapter import (  # noqa: E402 - public HTT
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.26"
+BRIDGE_RUNTIME_VERSION = "0.9.27"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -315,6 +315,20 @@ RESEARCH_SHEET_OUTBOX_LOCK = threading.RLock()
 RESEARCH_SHEET_CACHE_LOCK = threading.RLock()
 RESEARCH_SHEET_FLUSH_LOCK = threading.RLock()
 RESEARCH_SHEET_PREVIEW_LOCK = threading.RLock()
+RESEARCH_SHEET_ISOLATION_ENABLED = False
+RESEARCH_SHEET_EXECUTOR = None
+RESEARCH_SHEET_PROXY_ORIGINALS: dict = {}
+RESEARCH_SHEET_SERVICE_LOCK = threading.RLock()
+RESEARCH_SHEET_SERVICE_STOP = threading.Event()
+RESEARCH_SHEET_SERVICE_WAKE = threading.Event()
+RESEARCH_SHEET_SERVICE_THREAD = None
+RESEARCH_SHEET_SERVICE_RUNTIME = {
+    "status": "stopped", "phase": "stopped", "lastHeartbeatAt": None,
+    "lastError": None, "lastErrorAt": None, "lastSuccessAt": None,
+}
+RESEARCH_SHEET_INTENT_LOCK = threading.RLock()
+RESEARCH_SHEET_INTENTS_DIR = RUNTIME_DIR / "research-sheet-intents"
+RESEARCH_SHEET_INTENT_RETRY_AT: dict[str, float] = {}
 DEEP_RESEARCH_CONFIRMATION_LOCK = threading.RLock()
 EA_FACTORY_DEEP_RESEARCH_CATALOG_CACHE_LOCK = threading.RLock()
 EA_FACTORY_DEEP_RESEARCH_CATALOG_CACHE_CONDITION = threading.Condition(
@@ -336,6 +350,7 @@ MEMORY_INDEX_LOCK = threading.RLock()
 AUDIT_LOCK = threading.Lock()
 MISSIONS_LOCK = threading.RLock()
 MISSIONS_READ_CACHE_LOCK = MISSIONS_LOCK
+COUNCIL_MISSION_BATCH = threading.local()
 REPORTS_LOCK = threading.RLock()
 RADAR_BATCH_REPORT_COMMIT_LOCK = threading.RLock()
 RADAR_IMAGE_ADAPTER_LOCK = threading.RLock()
@@ -402,6 +417,8 @@ DASHBOARD_WORKFLOW_SCHEDULER_MAX_HEARTBEAT_AGE_SECONDS = max(
 MISSION_WORKER_MAX_HEARTBEAT_AGE_SECONDS = 12 * 60
 DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME = {
     "status": "stopped",
+    "phase": "stopped",
+    "phaseStartedAt": None,
     "startedAt": None,
     "lastHeartbeatAt": None,
     "lastSuccessAt": None,
@@ -413,6 +430,7 @@ DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME = {
     "lastError": None,
     "lastErrorAt": None,
 }
+DASHBOARD_WORKFLOW_SCHEDULER_PHASE_STARTED_MONOTONIC: float | None = None
 BRIDGE_PROCESS_GUARD: dict[str, object] | None = None
 BRIDGE_PROCESS_GUARD_STATE = {
     "acquired": False,
@@ -602,6 +620,7 @@ AI_TRADE_COUNCIL_HIGHER_TIMEFRAME = {
 }
 AI_TRADE_COUNCIL_AUTOMATION_POLL_SECONDS = 5
 AI_TRADE_COUNCIL_AUTOMATION_SETTLE_SECONDS = 10
+AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS = 300
 AI_TRADE_COUNCIL_QUEUE_ASSEMBLY_GRACE_SECONDS = 30
 AI_TRADE_COUNCIL_AUTOMATION_MAX_DAILY_ROUNDS = 24
 AI_TRADE_COUNCIL_AUTOMATION_DAILY_LIMIT_MODES = ("unlimited", "limited")
@@ -2640,12 +2659,13 @@ RESEARCH_SHEET_OUTBOX_REQUEUE_SCAN_LIMIT = 500
 # Keeping a bounded tail prevents hundreds of terminal failures from evicting
 # new reports forever; every dropped failure still has a durable audit event.
 RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT = 100
-# The scheduler is already a durable always-on Backend loop.  Use it to wake
-# the Sheet outbox as well so a temporary Google/API outage cannot leave a
-# daily report stranded until somebody opens the UI or another report happens
-# to be created.
+# The optional Sheet coordinator owns the durable outbox maintenance loop;
+# provider work runs in a separately supervised process, outside core health.
 RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS = 30
 RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS = 5 * 60
+RESEARCH_SHEET_BACKGROUND_REPORT_BATCH_LIMIT = 2
+RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS = 8.0
+RESEARCH_SHEET_BACKGROUND_IO_BUDGET_SECONDS = 40.0
 RESEARCH_SHEET_OUTBOX_RETRY_BASE_SECONDS = 60
 RESEARCH_SHEET_OUTBOX_RETRY_MAX_SECONDS = 60 * 60
 RESEARCH_SHEET_AUTO_SYNC_ENABLED = __name__ in {"__main__", "bridge_server"}
@@ -3436,6 +3456,9 @@ def mission_payload_digest(mission: dict) -> str:
     }
     if mission.get("managerAnalysisContext") is not None:
         packet["managerAnalysisContext"] = mission["managerAnalysisContext"]
+    if mission.get("sentimentNewsContext") is not None:
+        packet["sentimentNewsContext"] = mission["sentimentNewsContext"]
+        packet["newsRequester"] = mission.get("requester")
     if mission.get("councilProviderRetry") is not None:
         packet["councilProviderRetry"] = mission["councilProviderRetry"]
     scheduled_completion_retry = mission.get("scheduledCompletionRetry")
@@ -9410,10 +9433,24 @@ DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION = (
 )
 
 
+class _SentimentNewsHost:
+    def __getattr__(self, name):
+        return globals()[name]
+
+
+_SENTIMENT_NEWS_DAILY = sentiment_news_daily.DailyNews(_SentimentNewsHost())
+
+
+def _sentiment_news_service():
+    return _SENTIMENT_NEWS_DAILY
+
+
 def _mission_output_limit_hard_cap(mission: object) -> int:
     """Keep the larger result budget exclusive to the bound Deep Research action."""
 
     row = mission if isinstance(mission, dict) else {}
+    if sentiment_news_daily.context(row):
+        return sentiment_news_ai.MAX_OUTPUT_CHARS
     context = row.get("workflowContext") if isinstance(row.get("workflowContext"), dict) else {}
     return (
         TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS
@@ -15599,7 +15636,11 @@ def create_report(
         and research_save_confirmed
     ):
         try:
-            queue_result = _research_sheet_queue_report(report)
+            queue_result = (
+                _enqueue_research_sheet_report_intent(report)
+                if RESEARCH_SHEET_ISOLATION_ENABLED
+                else _research_sheet_queue_report(report)
+            )
             if (
                 queue_result.get("reason") == "outbox_capacity_reached"
                 or clamp_int(queue_result.get("rejected"), 0, 0, 1000) > 0
@@ -16568,6 +16609,46 @@ def _mission_backend_auto_safe_marker_is_coherent(mission: dict) -> bool:
     return secrets.compare_digest(expected_digest, mission_payload_digest(mission))
 
 
+def _mission_council_round_timing_read_model(mission: dict) -> dict:
+    """Expose recorded Council times only, never its private analysis packet."""
+    context = mission.get("analysisContext") if isinstance(mission.get("analysisContext"), dict) else {}
+    delegation = mission.get("delegation") if isinstance(mission.get("delegation"), dict) else {}
+    if not (
+        context.get("kind") in {"ai_trade_council_parent", "ai_trade_council_vote"}
+        or delegation.get("mode") == "ai_trade_council_read_only"
+        or mission.get("reportType") in {"ai_trade_council_report", "ai_trade_council_vote"}
+    ):
+        return {}
+    automation = context.get("automation") if isinstance(context.get("automation"), dict) else {}
+
+    def timestamp(*values: object) -> str | None:
+        for value in values:
+            parsed = parse_iso(value) if isinstance(value, str) else None
+            if parsed is not None:
+                return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return None
+
+    started_at = timestamp(context.get("roundStartedAt"), delegation.get("roundStartedAt"))
+    deadline_at = timestamp(context.get("roundDeadlineAt"), delegation.get("roundDeadlineAt"))
+    timing_source = "recorded_round" if started_at or deadline_at else None
+    if started_at is None and deadline_at is None:
+        # Older admission windows are a fallback, not a replacement for a
+        # recorded round deadline (which may legitimately differ from them).
+        started_at = timestamp(automation.get("quotaAdmittedAt"))
+        deadline_at = timestamp(automation.get("triggerExpiresAt"))
+        if started_at or deadline_at:
+            timing_source = "legacy_admission_window"
+    trigger_mode = delegation.get("triggerMode")
+    if trigger_mode not in {"auto_on_new_closed_bar", "manual"}:
+        trigger_mode = "auto_on_new_closed_bar" if automation else "manual"
+    return {
+        "roundStartedAt": started_at,
+        "roundDeadlineAt": deadline_at,
+        "roundTimingSource": timing_source,
+        "triggerMode": trigger_mode,
+    }
+
+
 def mission_read_model_item(mission: dict) -> dict:
     """Return a frontend-safe mission card without internal approval digests or paths."""
     approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
@@ -16691,6 +16772,7 @@ def mission_read_model_item(mission: dict) -> dict:
             and str(approval.get("state") or "") == "approved"
         ),
         "delegation": {
+            **_mission_council_round_timing_read_model(mission),
             "state": redact_text(str(delegation.get("state") or ""), 40),
             "mode": redact_text(str(delegation.get("mode") or ""), 120),
             "snapshotId": safe_reference(delegation.get("snapshotId")),
@@ -18665,6 +18747,12 @@ def _dashboard_workflow_scheduler_operational_state(
 
     with DASHBOARD_WORKFLOW_SCHEDULER_STATE_LOCK:
         runtime = copy.deepcopy(DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME)
+        phase_started = DASHBOARD_WORKFLOW_SCHEDULER_PHASE_STARTED_MONOTONIC
+        runtime["phaseElapsedSeconds"] = (
+            round(max(0.0, time.monotonic() - phase_started), 1)
+            if phase_started is not None
+            else 0.0
+        )
     alive = _dashboard_workflow_scheduler_alive()
     status = str(runtime.get("status") or "stopped").strip().lower()
     heartbeat = parse_iso(str(runtime.get("lastHeartbeatAt") or ""))
@@ -18705,10 +18793,17 @@ def _dashboard_workflow_scheduler_operational_state(
 
 
 def _dashboard_workflow_scheduler_runtime_update(**values: object) -> None:
+    global DASHBOARD_WORKFLOW_SCHEDULER_PHASE_STARTED_MONOTONIC
     with DASHBOARD_WORKFLOW_SCHEDULER_STATE_LOCK:
         for key in DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME:
             if key in values:
                 DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME[key] = values[key]
+        if "phase" in values:
+            # Diagnostic progress must not refresh heartbeat or imply success.
+            DASHBOARD_WORKFLOW_SCHEDULER_RUNTIME["phaseStartedAt"] = utc_now()
+            DASHBOARD_WORKFLOW_SCHEDULER_PHASE_STARTED_MONOTONIC = (
+                None if values["phase"] == "stopped" else time.monotonic()
+            )
 
 
 def dashboard_workflow_scheduler_read_model() -> dict:
@@ -18725,7 +18820,15 @@ def dashboard_workflow_scheduler_read_model() -> dict:
         "timezone": "Asia/Bangkok",
         "pollSeconds": DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS,
         "readOnlyAutomaticActions": True,
+        # The critical scheduler does not perform Sheet provider work.
         "externalWrites": False,
+        "externalWriteScopes": (
+            []
+        ),
+        "googleSheetExternalWritesEnabled": False,
+        "googleSheetExternalWritesRequireActiveConfiguration": True,
+        "sheetServiceOwner": "isolated_sheet_service",
+        "otherExternalWrites": False,
         "metaTraderActions": False,
     }
 
@@ -18902,7 +19005,11 @@ def _research_sheet_cached_rows(consumer_id: str) -> list[dict]:
     consumer_check = checks.get(consumer_id) if isinstance(checks.get(consumer_id), dict) else {}
     with RESEARCH_SHEET_CACHE_LOCK:
         cache = _load_research_sheet_cache_unlocked()
-    cached_at = parse_iso(str(cache.get("updatedAt") or ""))
+    consumer = (cache.get("consumers") or {}).get(consumer_id)
+    cached_at = parse_iso(str(
+        (consumer.get("observedAt") if isinstance(consumer, dict) else None)
+        or cache.get("updatedAt") or ""
+    ))
     cache_age_seconds = (
         max(0.0, (datetime.now(timezone.utc) - cached_at.astimezone(timezone.utc)).total_seconds())
         if cached_at is not None
@@ -18920,7 +19027,6 @@ def _research_sheet_cached_rows(consumer_id: str) -> list[dict]:
         or cache_age_seconds > RESEARCH_SHEET_CACHE_MAX_AGE_SECONDS
     ):
         return []
-    consumer = (cache.get("consumers") or {}).get(consumer_id)
     rows = consumer.get("rows") if isinstance(consumer, dict) and isinstance(consumer.get("rows"), list) else []
     return [
         copy.deepcopy(row)
@@ -18950,10 +19056,17 @@ def _refresh_research_sheet_cache(
     consumer_checks: object | None = None,
     *,
     persist: bool = True,
+    allowed_consumer_ids: set[str] | None = None,
+    merge_existing: bool = False,
+    open_url=None,
 ) -> dict:
+    refresh_started_at = utc_now()
     consumers: dict[str, dict] = {}
     checks = consumer_checks if isinstance(consumer_checks, dict) else None
+    request_options = {"open_url": open_url} if open_url is not None else {}
     for consumer_id, contract in _research_sheet_tab_contracts().items():
+        if allowed_consumer_ids is not None and consumer_id not in allowed_consumer_ids:
+            continue
         if checks is not None:
             check = checks.get(consumer_id)
             if not isinstance(check, dict) or check.get("readReady") is not True:
@@ -18962,6 +19075,7 @@ def _refresh_research_sheet_cache(
             sheet_id,
             str(contract.get("tabName") or ""),
             "1:1",
+            **request_options,
         )
         headers = [
             google_sheet_hub.canonical_header(value)
@@ -18979,6 +19093,7 @@ def _refresh_research_sheet_cache(
             sheet_id,
             str(contract.get("tabName") or ""),
             f"{key_column}2:{key_column}{RESEARCH_SHEET_CACHE_SCAN_MAX_ROW}",
+            **request_options,
         )
         keyed_row_numbers = [
             row_number
@@ -18999,6 +19114,7 @@ def _refresh_research_sheet_cache(
                 sheet_id,
                 str(contract.get("tabName") or ""),
                 f"A{first_row_number}:{end_column}{last_row_number}",
+                **request_options,
             )
         rows: list[dict] = []
         row_numbers: list[int] = []
@@ -19043,12 +19159,38 @@ def _refresh_research_sheet_cache(
         "updatedAt": utc_now(),
     }
     if persist:
-        with RESEARCH_SHEET_CACHE_LOCK:
-            write_json(
-                RESEARCH_SHEET_CACHE_PATH,
-                cache,
-                keep_backup=RESEARCH_SHEET_CACHE_PATH.exists(),
-            )
+        # Keep the established settings -> cache lock order, with no network
+        # work under either lock. The active revision cannot change between
+        # its recheck and this background compare-and-merge publication.
+        with (DASHBOARD_WORKFLOW_SETTINGS_LOCK if merge_existing else nullcontext()):
+            if merge_existing:
+                current = _research_sheet_hub_internal()
+                if (str(current.get("sheetId") or "") != sheet_id
+                        or current.get("configRevision") != config_revision
+                        or current.get("activeConfigRevision") != config_revision
+                        or current.get("active") is not True):
+                    return cache
+            with RESEARCH_SHEET_CACHE_LOCK:
+                if merge_existing:
+                    previous = _load_research_sheet_cache_unlocked()
+                    if (previous.get("sheetDigest") == cache["sheetDigest"]
+                            and previous.get("configRevision") == config_revision):
+                        merged = dict(previous.get("consumers") or {})
+                        for consumer_id, consumer in consumers.items():
+                            old = merged.get(consumer_id) or {}
+                            old_observed = parse_iso(str(old.get("observedAt") or ""))
+                            if old_observed is None or old_observed <= parse_iso(refresh_started_at):
+                                merged[consumer_id] = consumer
+                        cache["consumers"] = merged
+                        # A partial refresh never rejuvenates another consumer.
+                        observed = [str(item.get("observedAt") or previous.get("updatedAt") or "")
+                                    for item in merged.values() if isinstance(item, dict)]
+                        cache["updatedAt"] = min(observed) if observed else cache["updatedAt"]
+                write_json(
+                    RESEARCH_SHEET_CACHE_PATH,
+                    cache,
+                    keep_backup=RESEARCH_SHEET_CACHE_PATH.exists(),
+                )
     return cache
 
 
@@ -19875,237 +20017,342 @@ def _research_sheet_requeue_failed_current_revision(
         }
     )
     with RESEARCH_SHEET_OUTBOX_LOCK:
-        store = _load_research_sheet_outbox_unlocked()
-        stored_items = [
-            item for item in (store.get("items") or []) if isinstance(item, dict)
-        ]
-        item_by_id = {
-            safe_reference(item.get("id")): item
-            for item in stored_items
-            if safe_reference(item.get("id"))
-        }
-        eligible: list[tuple[str, dict, bool]] = []
-        for item in stored_items:
-            if not isinstance(item, dict) or item.get("status") != "failed":
-                continue
-            if (
-                allowed_ids is not None
-                and safe_reference(item.get("id")) not in allowed_ids
-            ):
-                continue
-            item_revision = clamp_int(
-                item.get("configRevision"),
-                -2,
-                -2,
-                999999,
-            )
-            if item_revision != revision:
-                stale_ignored += 1
-                continue
-            requeue_count = clamp_int(item.get("requeueCount"), 0, 0, 9999)
-            error_code = str(item.get("lastErrorCode") or "").strip().lower()
-            live_reopen_exhausted = bool(
-                live_verification_reason
-                and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
-                and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
-            )
-            if (
-                live_verification_reason
-                and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
-            ):
-                live_verification_ineligible += 1
-                if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
-                    exhausted += 1
-                continue
-            if (
-                requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
-                and not live_reopen_exhausted
-            ):
+        store = copy.deepcopy(_load_research_sheet_outbox_unlocked())
+    # Reconstruct immutable candidates without holding Bridge store locks.
+    stored_items = [
+        item for item in (store.get("items") or []) if isinstance(item, dict)
+    ]
+    item_by_id = {
+        safe_reference(item.get("id")): item
+        for item in stored_items
+        if safe_reference(item.get("id"))
+    }
+    eligible: list[tuple[str, dict, bool]] = []
+    for item in stored_items:
+        if not isinstance(item, dict) or item.get("status") != "failed":
+            continue
+        if (
+            allowed_ids is not None
+            and safe_reference(item.get("id")) not in allowed_ids
+        ):
+            continue
+        item_revision = clamp_int(
+            item.get("configRevision"),
+            -2,
+            -2,
+            999999,
+        )
+        if item_revision != revision:
+            stale_ignored += 1
+            continue
+        requeue_count = clamp_int(item.get("requeueCount"), 0, 0, 9999)
+        error_code = str(item.get("lastErrorCode") or "").strip().lower()
+        live_reopen_exhausted = bool(
+            live_verification_reason
+            and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+            and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        )
+        if (
+            live_verification_reason
+            and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+        ):
+            live_verification_ineligible += 1
+            if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
                 exhausted += 1
-                continue
-            eligible.append(("item", item, live_reopen_exhausted))
-        for entry in store.get("failedLedger") or []:
-            if not isinstance(entry, dict):
-                continue
-            entry_id = safe_reference(entry.get("id"))
-            # Every retained failed item also has a ledger marker. Process the
-            # full payload once and use the ledger only for pruned failures.
-            if not entry_id or entry_id in item_by_id:
-                continue
-            if allowed_ids is not None and entry_id not in allowed_ids:
-                continue
-            entry_revision = clamp_int(
-                entry.get("configRevision"),
-                -2,
-                -2,
-                999999,
-            )
-            if entry_revision != revision:
-                stale_ignored += 1
-                continue
-            requeue_count = clamp_int(entry.get("requeueCount"), 0, 0, 9999)
-            error_code = str(entry.get("lastErrorCode") or "").strip().lower()
-            live_reopen_exhausted = bool(
-                live_verification_reason
-                and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
-                and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
-            )
-            if (
-                live_verification_reason
-                and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
-            ):
-                live_verification_ineligible += 1
-                if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
-                    exhausted += 1
-                continue
-            if (
-                requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
-                and not live_reopen_exhausted
-            ):
+            continue
+        if (
+            requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+            and not live_reopen_exhausted
+        ):
+            exhausted += 1
+            continue
+        eligible.append(("item", item, live_reopen_exhausted))
+    for entry in store.get("failedLedger") or []:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = safe_reference(entry.get("id"))
+        # Every retained failed item also has a ledger marker. Process the
+        # full payload once and use the ledger only for pruned failures.
+        if not entry_id or entry_id in item_by_id:
+            continue
+        if allowed_ids is not None and entry_id not in allowed_ids:
+            continue
+        entry_revision = clamp_int(
+            entry.get("configRevision"),
+            -2,
+            -2,
+            999999,
+        )
+        if entry_revision != revision:
+            stale_ignored += 1
+            continue
+        requeue_count = clamp_int(entry.get("requeueCount"), 0, 0, 9999)
+        error_code = str(entry.get("lastErrorCode") or "").strip().lower()
+        live_reopen_exhausted = bool(
+            live_verification_reason
+            and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+            and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        )
+        if (
+            live_verification_reason
+            and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+        ):
+            live_verification_ineligible += 1
+            if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
                 exhausted += 1
-                continue
-            eligible.append(("ledger", entry, live_reopen_exhausted))
-        eligible.sort(key=lambda candidate: (
-            clamp_int(candidate[1].get("requeueCount"), 0, 0, 9999),
-            str(
-                candidate[1].get("updatedAt")
-                or candidate[1].get("createdAt")
-                or candidate[1].get("failedAt")
-                or ""
-            ),
-            safe_reference(candidate[1].get("id")) or "",
-        ))
-        delivery_statuses = {"pending", "retry_pending", "write_unknown"}
-        delivery_count = sum(
-            1 for item in stored_items if item.get("status") in delivery_statuses
-        )
-        available_delivery_slots = max(
-            0,
-            RESEARCH_SHEET_OUTBOX_LIMIT - delivery_count,
-        )
-        selected_limit = min(limit, available_delivery_slots)
-        capacity_deferred = max(
-            0,
-            min(len(eligible), limit) - selected_limit,
-        )
-        requeued_at = utc_now()
-        scan_limit = min(
-            len(eligible),
-            RESEARCH_SHEET_OUTBOX_REQUEUE_SCAN_LIMIT,
-        )
-        scanned = 0
-        store_changed = False
-        deep_version_index: dict[tuple[str, str], dict] | None = None
-        deep_version_index_unavailable = False
-        for source_kind, candidate, live_reopen_exhausted in eligible[:scan_limit]:
-            if requeued >= selected_limit:
-                break
-            scanned += 1
-            item = candidate
-            if source_kind == "ledger":
-                report_id = safe_reference(candidate.get("reportId"))
-                report = None
-                if report_id:
-                    report_path = (
-                        RUNTIME_REPORTS_DIR / f"{report_id}.json"
-                    ).resolve(strict=False)
-                    try:
-                        report_path.relative_to(
-                            RUNTIME_REPORTS_DIR.resolve(strict=False)
-                        )
-                        report = read_json(report_path, None)
-                    except (ValueError, DataIntegrityError):
-                        report = None
-                if not isinstance(report, dict):
-                    reconstruction_missing += 1
-                    candidate["requeueCount"] = (
-                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
-                    )
-                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
-                    store_changed = True
-                    continue
+            continue
+        if (
+            requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+            and not live_reopen_exhausted
+        ):
+            exhausted += 1
+            continue
+        eligible.append(("ledger", entry, live_reopen_exhausted))
+    eligible.sort(key=lambda candidate: (
+        clamp_int(candidate[1].get("requeueCount"), 0, 0, 9999),
+        str(
+            candidate[1].get("updatedAt")
+            or candidate[1].get("createdAt")
+            or candidate[1].get("failedAt")
+            or ""
+        ),
+        safe_reference(candidate[1].get("id")) or "",
+    ))
+    delivery_statuses = {"pending", "retry_pending", "write_unknown"}
+    delivery_count = sum(
+        1 for item in stored_items if item.get("status") in delivery_statuses
+    )
+    available_delivery_slots = max(
+        0,
+        RESEARCH_SHEET_OUTBOX_LIMIT - delivery_count,
+    )
+    selected_limit = min(limit, available_delivery_slots)
+    capacity_deferred = max(
+        0,
+        min(len(eligible), limit) - selected_limit,
+    )
+    requeued_at = utc_now()
+    scan_limit = min(
+        len(eligible),
+        RESEARCH_SHEET_OUTBOX_REQUEUE_SCAN_LIMIT,
+    )
+    scanned = 0
+    plans = []
+    original_candidates = {
+        (kind, safe_reference(candidate.get("id"))): copy.deepcopy(candidate)
+        for kind, candidate, _ in eligible
+    }
+    store_changed = False
+    deep_version_index: dict[tuple[str, str], dict] | None = None
+    deep_version_index_unavailable = False
+    for source_kind, candidate, live_reopen_exhausted in eligible[:scan_limit]:
+        if requeued >= selected_limit:
+            break
+        scanned += 1
+        item = candidate
+        report_version = None
+        if source_kind == "ledger":
+            report_id = safe_reference(candidate.get("reportId"))
+            report = None
+            if report_id:
+                report_path = (
+                    RUNTIME_REPORTS_DIR / f"{report_id}.json"
+                ).resolve(strict=False)
                 try:
-                    if report.get("type") == "trading_system_research_report":
-                        if deep_version_index_unavailable:
-                            raise DataIntegrityError(
-                                "Deep Research version index is unavailable."
-                            )
-                        if deep_version_index is None:
-                            try:
-                                deep_version_index = (
-                                    _research_sheet_runtime_deep_version_index(report)
-                                )
-                            except (OSError, ValueError, TypeError, DataIntegrityError):
-                                deep_version_index_unavailable = True
-                                raise
-                    projected = _research_sheet_report_items(
-                        report,
-                        revision,
-                        deep_version_index=deep_version_index,
+                    report_path.relative_to(
+                        RUNTIME_REPORTS_DIR.resolve(strict=False)
                     )
-                except (OSError, ValueError, TypeError, DataIntegrityError):
-                    reconstruction_missing += 1
-                    candidate["requeueCount"] = (
-                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
-                    )
-                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
-                    store_changed = True
-                    continue
-                matching = [
-                    projected_item
-                    for projected_item in projected
-                    if safe_reference(projected_item.get("id"))
-                    == safe_reference(candidate.get("id"))
-                ]
-                if len(matching) != 1:
-                    reconstruction_missing += 1
-                    candidate["requeueCount"] = (
-                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
-                    )
-                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
-                    store_changed = True
-                    continue
-                item = matching[0]
-                if item.get("payloadDigest") != candidate.get("payloadDigest"):
-                    reconstruction_digest_mismatch += 1
-                    candidate["requeueCount"] = (
-                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
-                    )
-                    candidate["lastErrorCode"] = "requeue_payload_digest_mismatch"
-                    store_changed = True
-                    continue
-                item["requeueCount"] = clamp_int(
-                    candidate.get("requeueCount"),
-                    0,
-                    0,
-                    9999,
+                    report = read_json(report_path, None)
+                except (ValueError, DataIntegrityError):
+                    report = None
+            report_version = _report_snapshot_digest(report) if isinstance(report, dict) else None
+            if not isinstance(report, dict):
+                reconstruction_missing += 1
+                candidate["requeueCount"] = (
+                    clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
                 )
-                stored_items.append(item)
+                candidate["lastErrorCode"] = "requeue_reconstruction_missing"
                 store_changed = True
-            if live_reopen_exhausted:
-                # Preserve the exhausted retry history. The successful live
-                # verification is the bounded authorization to make one more
-                # delivery attempt, not a reset of the manual retry budget.
-                item["requeueCount"] = RESEARCH_SHEET_OUTBOX_MAX_REQUEUES - 1
-            item["status"] = "pending"
-            item["attemptCount"] = 0
-            item["nextAttemptAt"] = None
-            item["lastErrorCode"] = None
-            item["receipt"] = None
-            item["requeueCount"] = (
-                clamp_int(item.get("requeueCount"), 0, 0, 9999) + 1
+                plans.append((
+                    source_kind,
+                    original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+                    copy.deepcopy(candidate), report_version, False, live_reopen_exhausted,
+                ))
+                continue
+            try:
+                if report.get("type") == "trading_system_research_report":
+                    if deep_version_index_unavailable:
+                        raise DataIntegrityError(
+                            "Deep Research version index is unavailable."
+                        )
+                    if deep_version_index is None:
+                        try:
+                            deep_version_index = (
+                                _research_sheet_runtime_deep_version_index(report)
+                            )
+                        except (OSError, ValueError, TypeError, DataIntegrityError):
+                            deep_version_index_unavailable = True
+                            raise
+                projected = _research_sheet_report_items(
+                    report,
+                    revision,
+                    deep_version_index=deep_version_index,
+                )
+            except (OSError, ValueError, TypeError, DataIntegrityError):
+                reconstruction_missing += 1
+                candidate["requeueCount"] = (
+                    clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                )
+                candidate["lastErrorCode"] = "requeue_reconstruction_missing"
+                store_changed = True
+                plans.append((
+                    source_kind,
+                    original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+                    copy.deepcopy(candidate), report_version, False, live_reopen_exhausted,
+                ))
+                continue
+            matching = [
+                projected_item
+                for projected_item in projected
+                if safe_reference(projected_item.get("id"))
+                == safe_reference(candidate.get("id"))
+            ]
+            if len(matching) != 1:
+                reconstruction_missing += 1
+                candidate["requeueCount"] = (
+                    clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                )
+                candidate["lastErrorCode"] = "requeue_reconstruction_missing"
+                store_changed = True
+                plans.append((
+                    source_kind,
+                    original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+                    copy.deepcopy(candidate), report_version, False, live_reopen_exhausted,
+                ))
+                continue
+            item = matching[0]
+            if item.get("payloadDigest") != candidate.get("payloadDigest"):
+                reconstruction_digest_mismatch += 1
+                candidate["requeueCount"] = (
+                    clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                )
+                candidate["lastErrorCode"] = "requeue_payload_digest_mismatch"
+                store_changed = True
+                plans.append((
+                    source_kind,
+                    original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+                    copy.deepcopy(candidate), report_version, False, live_reopen_exhausted,
+                ))
+                continue
+            item["requeueCount"] = clamp_int(
+                candidate.get("requeueCount"),
+                0,
+                0,
+                9999,
             )
-            item["lastRequeuedAt"] = requeued_at
-            item["lastRequeueReason"] = reason
-            item["updatedAt"] = requeued_at
-            requeued += 1
-            if live_reopen_exhausted:
-                live_verification_reopened_exhausted += 1
+            stored_items.append(item)
             store_changed = True
-        eligible_deferred = max(0, len(eligible) - scanned)
-        if store_changed:
-            store["items"] = stored_items
-            _save_research_sheet_outbox_unlocked(store)
+        if live_reopen_exhausted:
+            # Preserve the exhausted retry history. The successful live
+            # verification is the bounded authorization to make one more
+            # delivery attempt, not a reset of the manual retry budget.
+            item["requeueCount"] = RESEARCH_SHEET_OUTBOX_MAX_REQUEUES - 1
+        item["status"] = "pending"
+        item["attemptCount"] = 0
+        item["nextAttemptAt"] = None
+        item["lastErrorCode"] = None
+        item["receipt"] = None
+        item["requeueCount"] = (
+            clamp_int(item.get("requeueCount"), 0, 0, 9999) + 1
+        )
+        item["lastRequeuedAt"] = requeued_at
+        item["lastRequeueReason"] = reason
+        item["updatedAt"] = requeued_at
+        requeued += 1
+        if live_reopen_exhausted:
+            live_verification_reopened_exhausted += 1
+        store_changed = True
+        plans.append((
+            source_kind,
+            original_candidates[(source_kind, safe_reference(candidate.get("id")))],
+            copy.deepcopy(item), report_version, True, live_reopen_exhausted,
+        ))
+    eligible_deferred = max(0, len(eligible) - scanned)
+    # Only committed transitions count as requeues/reconstruction failures.
+    # Another retry, a report edit or an activation can finish during IPC.
+    requeued = 0
+    reconstruction_missing = 0
+    reconstruction_digest_mismatch = 0
+    live_verification_reopened_exhausted = 0
+    result_reason = reason
+    if store_changed:
+        with (
+            REPORTS_LOCK if any(plan[0] == "ledger" for plan in plans) else nullcontext()
+        ), DASHBOARD_WORKFLOW_SETTINGS_LOCK, RESEARCH_SHEET_OUTBOX_LOCK:
+            current_internal = _research_sheet_hub_internal()
+            if (current_internal.get("sheetId") != internal.get("sheetId")
+                    or current_internal.get("configRevision") != revision
+                    or current_internal.get("activeConfigRevision") != revision
+                    or current_internal.get("active") is not True):
+                stale_ignored += len(plans)
+                result_reason = "sheet_configuration_changed"
+            else:
+                current_store = _load_research_sheet_outbox_unlocked()
+                current_items = [row for row in current_store.get("items") or [] if isinstance(row, dict)]
+                current_ledger = [row for row in current_store.get("failedLedger") or [] if isinstance(row, dict)]
+                current_item_by_id = {safe_reference(row.get("id")): row for row in current_items}
+                current_ledger_by_id = {safe_reference(row.get("id")): row for row in current_ledger}
+                delivery_count = sum(row.get("status") in delivery_statuses for row in current_items)
+                committed = False
+                for source_kind, before, after, report_version, succeeded, live_reopen_exhausted in plans:
+                    item_id = safe_reference(before.get("id"))
+                    current_candidate = (
+                        current_item_by_id if source_kind == "item" else current_ledger_by_id
+                    ).get(item_id)
+                    if (current_candidate != before
+                            or (source_kind == "ledger" and item_id in current_item_by_id)):
+                        stale_ignored += 1
+                        continue
+                    if source_kind == "ledger":
+                        report_id = safe_reference(before.get("reportId"))
+                        try:
+                            latest_report = (
+                                read_json(RUNTIME_REPORTS_DIR / f"{report_id}.json", None)
+                                if report_id else None
+                            )
+                            latest_version = _report_snapshot_digest(latest_report) if isinstance(latest_report, dict) else None
+                        except DataIntegrityError:
+                            stale_ignored += 1
+                            continue
+                        if latest_version != report_version:
+                            stale_ignored += 1
+                            continue
+                    if succeeded:
+                        if delivery_count >= RESEARCH_SHEET_OUTBOX_LIMIT:
+                            capacity_deferred += 1
+                            continue
+                        if source_kind == "ledger":
+                            current_items.append(after)
+                            current_item_by_id[item_id] = after
+                        else:
+                            current_candidate.clear()
+                            current_candidate.update(after)
+                        delivery_count += 1
+                        requeued += 1
+                        if live_reopen_exhausted:
+                            live_verification_reopened_exhausted += 1
+                    else:
+                        current_candidate.clear()
+                        current_candidate.update(after)
+                        if after.get("lastErrorCode") == "requeue_payload_digest_mismatch":
+                            reconstruction_digest_mismatch += 1
+                        else:
+                            reconstruction_missing += 1
+                    committed = True
+                if committed:
+                    current_store["items"] = current_items
+                    current_store["failedLedger"] = current_ledger
+                    _save_research_sheet_outbox_unlocked(current_store)
     result = {
         "requeued": requeued,
         "exhausted": exhausted,
@@ -20116,7 +20363,7 @@ def _research_sheet_requeue_failed_current_revision(
         "reconstructionDigestMismatch": reconstruction_digest_mismatch,
         "liveVerificationReopenedExhausted": live_verification_reopened_exhausted,
         "liveVerificationIneligible": live_verification_ineligible,
-        "reason": reason,
+        "reason": result_reason,
         "configRevision": revision,
     }
     append_audit({
@@ -65053,6 +65300,29 @@ def _research_sheet_report_items(
     *,
     deep_version_index: dict[tuple[str, str], dict] | None = None,
 ) -> list[dict]:
+    if RESEARCH_SHEET_ISOLATION_ENABLED:
+        # The child may only project immutable input/read-only report history.
+        # Shared outbox/cache/settings are still written by this Bridge alone.
+        if RESEARCH_SHEET_EXECUTOR is None:
+            raise RequestError("Sheet projection worker is unavailable; the report remains queued.", 503)
+        from hq_backend.research.sheet_executor import SheetExecutorError
+        try:
+            items = RESEARCH_SHEET_EXECUTOR.call(
+                "projection.report_items", [report, config_revision], {},
+                timeout_seconds=45,
+            )
+        except SheetExecutorError as error:
+            if error.code in {"sheet_projection_integrity_failed", "sheet_worker_request_too_large", "sheet_worker_response_too_large"}:
+                raise DataIntegrityError("Sheet report projection is invalid or exceeds its bounded payload size.") from error
+            raise RequestError("Sheet projection worker is unavailable; the report remains queued.", 503) from error
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict)
+            or item.get("reportId") != safe_reference(report.get("id"))
+            or item.get("configRevision") != config_revision
+            for item in items
+        ):
+            raise DataIntegrityError("Sheet worker returned an invalid report projection.")
+        return items
     report_id = safe_reference(report.get("id"))
     items: list[dict] = []
     projections: list[tuple[str, list[dict]]] = []
@@ -65245,7 +65515,20 @@ def _research_sheet_queue_report(
     deferred_store_full = False
     deferred_count = 0
     config_revision = int(internal.get("configRevision") or 0)
-    with RESEARCH_SHEET_OUTBOX_LOCK:
+    with (REPORTS_LOCK if RESEARCH_SHEET_ISOLATION_ENABLED else nullcontext()), DASHBOARD_WORKFLOW_SETTINGS_LOCK, RESEARCH_SHEET_OUTBOX_LOCK:
+        # Projection may take place in another process while the operator
+        # activates a different Sheet or a report is edited. Never prune the
+        # current revision or publish an obsolete report from an old reply.
+        current_internal = _research_sheet_hub_internal()
+        if (str(current_internal.get("sheetId") or "") != sheet_id
+                or current_internal.get("configRevision") != config_revision
+                or current_internal.get("activeConfigRevision") != config_revision
+                or current_internal.get("active") is not True):
+            return {"queued": 0, "reason": "sheet_configuration_changed"}
+        if RESEARCH_SHEET_ISOLATION_ENABLED:
+            current_report = read_json(RUNTIME_REPORTS_DIR / f"{safe_reference(report.get('id'))}.json", None)
+            if not isinstance(current_report, dict) or _report_snapshot_digest(current_report) != _report_snapshot_digest(report):
+                return {"queued": 0, "reason": "report_changed"}
         store = _load_research_sheet_outbox_unlocked()
         # A crash immediately after an activation settings commit can leave
         # durable work from the previous Sheet revision behind.  Stale rows
@@ -65454,6 +65737,8 @@ def _research_sheet_drain_deferred_reports(
     *,
     max_reports: int = RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
     allowed_consumer_ids: set[str] | None = None,
+    max_scanned: int = RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Materialize a bounded oldest durable capacity backlog into row work."""
 
@@ -65508,17 +65793,20 @@ def _research_sheet_drain_deferred_reports(
     ))
     scan_limit = min(
         len(eligible),
-        RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+        clamp_int(max_scanned, RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+                  1, RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT),
     )
     scanned = 0
     drained = 0
     queued = 0
     capacity_deferred = 0
     recovery_deferred = 0
-    deep_version_index: dict[tuple[str, str], dict] | None = None
-    deep_version_index_unavailable = False
     for marker in eligible[:scan_limit]:
-        if drained >= limit:
+        if drained >= limit or (
+            deadline_monotonic is not None
+            and (time.monotonic() >= deadline_monotonic
+                 or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set())
+        ):
             break
         scanned += 1
         report_id = safe_reference(marker.get("reportId"))
@@ -65553,31 +65841,35 @@ def _research_sheet_drain_deferred_reports(
                 error_code,
             )
             continue
-        if report_type == "trading_system_research_report":
-            if deep_version_index_unavailable:
-                error_code = "deferred_deep_version_index_unavailable"
-            elif deep_version_index is None:
-                try:
-                    deep_version_index = _research_sheet_runtime_deep_version_index(
-                        report
-                    )
-                except (OSError, ValueError, TypeError, DataIntegrityError):
-                    deep_version_index_unavailable = True
-                    error_code = "deferred_deep_version_index_unavailable"
-        if error_code is not None:
-            recovery_deferred += 1
+        # The compact A-J projection deliberately ignores version_index. Its
+        # confirmation and source-receipt checks remain in queue_report; an
+        # unrelated historical file must not turn one recovery into a full
+        # report archive traversal.
+        if deadline_monotonic is not None and (
+            time.monotonic() >= deadline_monotonic
+            or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set()
+        ):
+            break
+        try:
+            result = _research_sheet_queue_report(
+                report,
+                flush=False,
+                allowed_consumer_ids={consumer_id},
+                deep_version_index=None,
+            )
+        except DataIntegrityError:
+            # Keep an unprojectable report and its durable marker, but rotate
+            # it behind untouched work. Otherwise a one-marker background
+            # batch would retry the same poison report forever. This update
+            # must itself succeed: a corrupt/unwritable outbox still raises,
+            # and OSError from queue persistence is deliberately not caught.
             _research_sheet_mark_deferred_recovery(
                 report_id,
                 revision,
-                error_code,
+                "deferred_report_projection_integrity_failed",
             )
+            recovery_deferred += 1
             continue
-        result = _research_sheet_queue_report(
-            report,
-            flush=False,
-            allowed_consumer_ids={consumer_id},
-            deep_version_index=deep_version_index,
-        )
         if result.get("reason") == "outbox_capacity_reached":
             capacity_deferred += 1
             continue
@@ -65623,7 +65915,8 @@ def _research_sheet_drain_deferred_reports(
         "eligibleDeferredCount": eligible_deferred,
         "capacityDeferredCount": capacity_deferred,
         "recoveryDeferredCount": recovery_deferred,
-        "scanLimit": RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+        "scanLimit": clamp_int(max_scanned, RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+                              1, RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT),
         "batchLimit": limit,
         "credentialsIncluded": False,
     })
@@ -65661,17 +65954,58 @@ def _research_sheet_mark_write_verified(config_revision: int, consumer_id: str) 
     _mutate_dashboard_workflow_settings(mutate)
 
 
+def _research_sheet_background_opener(deadline_monotonic: float):
+    """Share one network budget across OAuth, the write and its read-back.
+
+    Existing authorization transactions still run in the adapter. A budget
+    exhaustion is retryable, and becomes write_unknown after any Sheets write
+    attempt, so a later idempotent retry must verify the same record key.
+    """
+
+    sheet_write_attempted = False
+
+    def open_with_budget(request, *, timeout=20):
+        nonlocal sheet_write_attempted
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= 0 or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+            raise google_sheet_hub.GoogleSheetHubError(
+                "background_budget_exhausted", "Background Sheet work yielded for the next tick.",
+                503, sheet_write_attempted,
+            )
+        url = str(getattr(request, "full_url", request))
+        method = request.get_method() if hasattr(request, "get_method") else "GET"
+        if url.startswith(google_sheet_hub.GOOGLE_API_ROOT + "/") and method not in {"GET", "HEAD"}:
+            sheet_write_attempted = True
+        try:
+            return urlopen(request, timeout=min(float(timeout), remaining))
+        except HTTPError:
+            # A definite provider rejection remains an auth/schema/permission
+            # result even if its response arrives at the deadline boundary.
+            raise
+        except (TimeoutError, OSError) as error:
+            if time.monotonic() >= deadline_monotonic:
+                raise google_sheet_hub.GoogleSheetHubError(
+                    "background_budget_exhausted", "Background Sheet request exhausted its budget.",
+                    503, sheet_write_attempted,
+                ) from error
+            raise
+
+    open_with_budget.sheet_deadline_monotonic = deadline_monotonic
+    return open_with_budget
+
+
 def _flush_research_sheet_outbox(
     *,
     max_items: int = 20,
     allowed_item_ids: set[str] | None = None,
+    background: bool = False,
 ) -> dict:
     if not RESEARCH_SHEET_FLUSH_LOCK.acquire(blocking=False):
         return {"processed": 0, "synced": 0, "reason": "flush_in_progress"}
     try:
+        options = {"background": True} if background else {}
         return _flush_research_sheet_outbox_locked(
-            max_items=max_items,
-            allowed_item_ids=allowed_item_ids,
+            max_items=max_items, allowed_item_ids=allowed_item_ids, **options,
         )
     finally:
         RESEARCH_SHEET_FLUSH_LOCK.release()
@@ -65715,11 +66049,15 @@ def _flush_research_sheet_outbox_locked(
     *,
     max_items: int = 20,
     allowed_item_ids: set[str] | None = None,
+    background: bool = False,
 ) -> dict:
+    deadline = (time.monotonic() + RESEARCH_SHEET_BACKGROUND_IO_BUDGET_SECONDS
+                if background else None)
+    request_options = ({"open_url": _research_sheet_background_opener(deadline)}
+                       if deadline is not None else {})
     internal = _research_sheet_hub_internal()
     sheet_id = str(internal.get("sheetId") or "")
     revision = int(internal.get("configRevision") or 0)
-    auth = google_sheet_hub.credential_status()
     if not sheet_id:
         return {"processed": 0, "synced": 0, "reason": "not_configured"}
     if (
@@ -65727,8 +66065,6 @@ def _flush_research_sheet_outbox_locked(
         or internal.get("activeConfigRevision") != revision
     ):
         return {"processed": 0, "synced": 0, "reason": "activation_required"}
-    if not auth.get("configured"):
-        return {"processed": 0, "synced": 0, "reason": "auth_required" if sheet_id else "not_configured"}
     allowed_ids = (
         None
         if allowed_item_ids is None
@@ -65763,15 +66099,47 @@ def _flush_research_sheet_outbox_locked(
             key=lambda item: clamp_int(item.get("attemptCount"), 0, 0, 9999)
         )
         candidates = candidates[:clamp_int(max_items, 20, 1, 50)]
+    if not candidates:
+        return {"processed": 0, "synced": 0, "deferred": 0, "reason": None,
+                **({"syncedConsumerIds": [], "configRevision": revision} if background else {})}
+    # An idle/synced outbox needs neither OAuth status nor a provider request.
+    auth = google_sheet_hub.credential_status()
+    if not auth.get("configured"):
+        return {"processed": 0, "synced": 0, "reason": "auth_required"}
     processed = 0
     synced = 0
     synced_consumer_ids: set[str] = set()
     for candidate in candidates:
+        if deadline is not None and (
+            time.monotonic() >= deadline or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set()
+        ):
+            break
         processed += 1
         status = "failed"
         error_code = None
         receipt = None
         try:
+            if RESEARCH_SHEET_ISOLATION_ENABLED:
+                # Persist uncertainty BEFORE dispatch. A Bridge/child crash
+                # after Google accepts a write cannot leave a false unsent or
+                # synced receipt; recovery verifies this same record key.
+                claimed = False
+                with RESEARCH_SHEET_OUTBOX_LOCK:
+                    claim_store = _load_research_sheet_outbox_unlocked()
+                    for current_item in claim_store.get("items") or []:
+                        if (current_item.get("id") == candidate.get("id")
+                                and current_item.get("payloadDigest") == candidate.get("payloadDigest")
+                                and current_item.get("configRevision") == revision):
+                            current_item["status"] = "write_unknown"
+                            current_item["lastErrorCode"] = "sheet_worker_inflight"
+                            current_item["lastAttemptAt"] = utc_now()
+                            current_item["nextAttemptAt"] = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+                            claimed = True
+                            break
+                    if claimed:
+                        _save_research_sheet_outbox_unlocked(claim_store)
+                if not claimed:
+                    continue
             candidate_contract = _research_sheet_tab_contracts().get(
                 str(candidate.get("consumerId") or ""),
                 {},
@@ -65788,13 +66156,26 @@ def _flush_research_sheet_outbox_locked(
                 exact_headers=tuple(
                     candidate_contract.get("exactHeaders") or []
                 ),
+                **request_options,
             )
             status = "synced"
         except google_sheet_hub.GoogleSheetHubError as error:
             error_code = error.code
             if error.write_unknown:
                 status = "write_unknown"
-            elif error.code in {"rate_limited", "google_api_unavailable"}:
+            elif (deadline is not None and time.monotonic() >= deadline
+                  and error.code in {"auth_unavailable", "google_api_unavailable"}):
+                # A socket can time out in response.read(), after the bounded
+                # opener has returned. Preserve an exhausted transient OAuth
+                # read as retryable; explicit auth/schema denials stay terminal.
+                status = "retry_pending"
+                error_code = "background_budget_exhausted"
+            elif error.code in {
+                "rate_limited", "google_api_unavailable", "background_budget_exhausted",
+                "sheet_worker_busy", "sheet_worker_closed", "sheet_worker_unavailable",
+                "sheet_worker_start_failed", "sheet_worker_exited", "sheet_worker_timeout",
+                "sheet_worker_protocol_error",
+            }:
                 status = "retry_pending"
             else:
                 # Auth/permission failures require an operator correction and
@@ -65872,42 +66253,42 @@ def _flush_research_sheet_outbox_locked(
     if synced:
         for consumer_id in sorted(synced_consumer_ids):
             _research_sheet_mark_write_verified(revision, consumer_id)
-        try:
-            _refresh_research_sheet_cache(sheet_id, revision)
-        except google_sheet_hub.GoogleSheetHubError:
-            # The row already has a verified per-write read-back receipt. A
-            # cache refresh failure is surfaced on the next explicit verify,
-            # not rewritten as a false write failure.
-            pass
+        if not background:
+            try:
+                _refresh_research_sheet_cache(sheet_id, revision)
+            except google_sheet_hub.GoogleSheetHubError:
+                # The row already has a verified per-write read-back receipt.
+                pass
     return {
         "processed": processed,
         "synced": synced,
         "deferred": max(0, len(candidates) - processed),
         "reason": None,
+        **({"syncedConsumerIds": sorted(synced_consumer_ids), "configRevision": revision}
+           if background else {}),
     }
 
 
 def _research_sheet_backfill_recent_reports(
     allowed_consumer_ids: set[str] | None = None,
+    *,
+    _report_batch: list[dict] | None = None,
+    _deliver: bool = True,
 ) -> dict:
     queued = 0
     quarantined = 0
-    recent_reports = list(reversed(load_runtime_reports(limit=240)))
+    recent_reports = (
+        list(reversed(load_runtime_reports(limit=240)))
+        if _report_batch is None else _report_batch
+    )
     allowed = (
         None
         if allowed_consumer_ids is None
         else {str(value) for value in allowed_consumer_ids if str(value)}
     )
-    deep_research_allowed = allowed is None or "deepResearch" in allowed
-    deep_version_index = None
-    if deep_research_allowed and any(
-        _research_sheet_deep_version_candidate(report)
-        for report in recent_reports
-    ):
-        # Build once from the complete durable history. Reusing this index for
-        # every projected report removes the former O(N*M) backfill path and
-        # keeps version/current selection correct beyond any recent-report cap.
-        deep_version_index = _research_sheet_runtime_deep_version_index()
+    # Compact A-J projection no longer consumes historical version metadata.
+    # Keep the full-history index for explicit history readers, without
+    # rebuilding it on every bounded background backfill.
     for report in recent_reports:
         if not (
             isinstance(report, dict)
@@ -65925,7 +66306,7 @@ def _research_sheet_backfill_recent_reports(
                 report,
                 flush=False,
                 allowed_consumer_ids=allowed_consumer_ids,
-                deep_version_index=deep_version_index,
+                deep_version_index=None,
             )
         except DataIntegrityError:
             # One malformed/oversized historical report must not abort Sheet
@@ -65983,10 +66364,16 @@ def _research_sheet_backfill_recent_reports(
                 quarantined += 1
             continue
         queued += int(queue_result.get("queued") or 0)
-    flush_result = _flush_research_sheet_outbox(max_items=50)
-    deferred_drain = _research_sheet_drain_deferred_reports(
-        max_reports=RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
-        allowed_consumer_ids=allowed_consumer_ids,
+    flush_result = (
+        _flush_research_sheet_outbox(max_items=50)
+        if _deliver else {"processed": 0, "synced": 0, "reason": "separate_background_phase"}
+    )
+    deferred_drain = (
+        _research_sheet_drain_deferred_reports(
+            max_reports=RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
+            allowed_consumer_ids=allowed_consumer_ids,
+        )
+        if _deliver else {"queued": 0, "eligibleDeferred": 0}
     )
     deferred_queued = clamp_int(
         deferred_drain.get("queued"),
@@ -66007,6 +66394,171 @@ def _research_sheet_backfill_recent_reports(
             RESEARCH_SHEET_DEFERRED_REPORT_LIMIT,
         ),
     }
+
+
+def _research_sheet_backfill_background_step(
+    state: dict,
+    *,
+    max_reports: int = RESEARCH_SHEET_BACKGROUND_REPORT_BATCH_LIMIT,
+    budget_seconds: float = RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS,
+) -> dict:
+    """Resume one cooperative local projection batch, without network delivery.
+
+    The scheduler owns this disposable cursor. The reports and the outbox are
+    the durable sources of truth: restart reconstructs the scan and the existing
+    payload/revision receipts prevent duplicate delivery. A fixed manifest
+    avoids perpetually revisiting the first reports as newer files arrive.
+    """
+
+    deadline = time.monotonic() + max(0.0, min(float(budget_seconds), 30.0))
+    limit = clamp_int(max_reports, RESEARCH_SHEET_BACKGROUND_REPORT_BATCH_LIMIT, 1, 10)
+    internal = _research_sheet_hub_internal()
+    revision = clamp_int(internal.get("configRevision"), -1, -1, 999999)
+    result = {"queued": 0, "recentQueued": 0, "quarantinedReports": 0,
+              "processedReports": 0, "scannedReports": 0, "more": False,
+              "reason": None, "configRevision": revision}
+    if (revision < 0 or internal.get("active") is not True
+            or internal.get("activeConfigRevision") != revision):
+        state.clear()
+        result["reason"] = "activation_required"
+        return result
+    sheet_digest = payload_digest("research-sheet-id-v1", str(internal.get("sheetId") or ""))
+    if state.get("configRevision") != revision or state.get("sheetDigest") != sheet_digest:
+        state.clear()
+    if "entries" not in state:
+        paths = []
+        for path in RUNTIME_REPORTS_DIR.glob("*.json"):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            paths.append((stat.st_mtime_ns, path.name, str(path), stat.st_size))
+        # Match the existing newest-240 scope, but process oldest first.
+        selected = list(reversed(sorted(paths, reverse=True)[:240]))
+        state.update({"configRevision": revision, "sheetDigest": sheet_digest, "cursor": 0,
+                      "entries": [item[2] for item in selected],
+                      "fingerprints": {item[2]: (item[0], item[3]) for item in selected}})
+    entries = state["entries"]
+    cursor = int(state.get("cursor") or 0)
+    fingerprints = state["fingerprints"]
+    pending = set(entries[cursor:])
+    # An edited report behind the cursor joins the tail instead of resetting
+    # the scan and starving untouched reports. Never persist a projection of
+    # the manifest's old bytes: the file is read again immediately below.
+    for path_text in list(dict.fromkeys(entries[:cursor])):
+        if time.monotonic() >= deadline or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+            break
+        try:
+            stat = Path(path_text).stat()
+        except FileNotFoundError:
+            continue
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+        if fingerprint != fingerprints.get(path_text):
+            fingerprints[path_text] = fingerprint
+            if path_text not in pending:
+                entries.append(path_text)
+                pending.add(path_text)
+    while cursor < len(entries) and result["processedReports"] < limit:
+        if DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+            result["reason"] = "stopped"
+            break
+        if time.monotonic() >= deadline:
+            result["reason"] = "budget_exhausted"
+            break
+        path = Path(entries[cursor])
+        # Advance only after an atomic report has succeeded or been safely
+        # quarantined. Unexpected store errors remain retryable at this cursor.
+        try:
+            report = read_json(path, None)
+        except DataIntegrityError:
+            # The normal whole-scan reader also fails closed on malformed JSON.
+            # Rotate this path once so later valid files can still progress;
+            # the durable file is retried during the next sweep.
+            cursor += 1
+            state["cursor"] = cursor
+            raise
+        result["scannedReports"] += 1
+        if isinstance(report, dict) and report.get("type") in RESEARCH_SHEET_SYNC_REPORT_TYPES:
+            if time.monotonic() >= deadline or DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
+                result["reason"] = ("stopped" if DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set()
+                                    else "budget_exhausted")
+                break
+            batch = _research_sheet_backfill_recent_reports(
+                _report_batch=[report], _deliver=False,
+            )
+            result["processedReports"] += 1
+            for key in ("queued", "recentQueued", "quarantinedReports"):
+                result[key] += int(batch.get(key) or 0)
+        cursor += 1
+        state["cursor"] = cursor
+    result["more"] = cursor < len(entries)
+    if not result["more"]:
+        state.clear()
+    return result
+
+
+def _research_sheet_background_cache_step(state: dict) -> dict:
+    """Refresh one stale consumer after delivery or before its cache expires.
+
+    The existing synced ledger is the durable refresh hint; losing this cursor
+    cannot lose a delivered update. A daily refresh also covers quiet periods
+    and verified Sheets without deliveries. A failed consumer rotates behind
+    its peers; only a successful read advances that consumer's observed time.
+    """
+
+    deadline = time.monotonic() + RESEARCH_SHEET_BACKGROUND_IO_BUDGET_SECONDS
+    internal = _research_sheet_hub_internal()
+    revision = clamp_int(internal.get("configRevision"), -1, -1, 999999)
+    sheet_id = str(internal.get("sheetId") or "")
+    if (not sheet_id or revision < 0 or internal.get("active") is not True
+            or internal.get("activeConfigRevision") != revision):
+        state.clear()
+        return {"refreshed": 0, "more": False, "reason": "activation_required"}
+    identity = (payload_digest("research-sheet-id-v1", sheet_id), revision)
+    if state.get("identity") != identity:
+        state.clear()
+        state["identity"] = identity
+        state["cursor"] = 0
+    with RESEARCH_SHEET_OUTBOX_LOCK:
+        store = _load_research_sheet_outbox_unlocked()
+    synced_at = [parsed for item in store.get("syncedLedger") or []
+                 if isinstance(item, dict) and item.get("configRevision") == revision
+                 and (parsed := parse_iso(str(item.get("syncedAt") or ""))) is not None]
+    latest_synced_at = max(synced_at, default=None)
+    # Readers expire at 26 hours. Refresh at 24 hours even if no report was
+    # delivered, leaving headroom for bounded provider retries and rotation.
+    refresh_before = datetime.now(timezone.utc) - timedelta(hours=24)
+    with RESEARCH_SHEET_CACHE_LOCK:
+        cache = _load_research_sheet_cache_unlocked()
+    cached_consumers = (cache.get("consumers") or {}) if (
+        cache.get("sheetDigest") == identity[0] and cache.get("configRevision") == revision
+    ) else {}
+    checks = internal.get("consumerChecks") or {}
+    consumer_ids = list(_research_sheet_tab_contracts())
+    pending = []
+    for consumer_id in consumer_ids:
+        check = checks.get(consumer_id) or {}
+        if check.get("readReady") is not True or check.get("configRevision") != revision:
+            continue
+        consumer = cached_consumers.get(consumer_id) or {}
+        observed_at = parse_iso(str(consumer.get("observedAt") or cache.get("updatedAt") or ""))
+        if (not consumer or observed_at is None or observed_at <= refresh_before
+                or (latest_synced_at is not None and observed_at < latest_synced_at)):
+            pending.append(consumer_id)
+    if not pending:
+        return {"refreshed": 0, "more": False, "reason": "cache_current"}
+    if DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set() or time.monotonic() >= deadline:
+        return {"refreshed": 0, "more": True, "reason": "budget_exhausted"}
+    start = int(state.get("cursor") or 0) % len(consumer_ids)
+    ordered = consumer_ids[start:] + consumer_ids[:start]
+    consumer_id = next(value for value in ordered if value in pending)
+    state["cursor"] = (consumer_ids.index(consumer_id) + 1) % len(consumer_ids)
+    _refresh_research_sheet_cache(
+        sheet_id, revision, checks, allowed_consumer_ids={consumer_id},
+        merge_existing=True, open_url=_research_sheet_background_opener(deadline),
+    )
+    return {"refreshed": 1, "consumerId": consumer_id,
+            "more": len(pending) > 1, "reason": None}
 
 
 def _deep_research_confirmation_failure(
@@ -71164,12 +71716,213 @@ def _record_dashboard_workflow_scheduler_tick_result(result: object) -> None:
     )
 
 
+def initialize_research_sheet_process_isolation() -> None:
+    """Production-only boundary: imports/unit fixtures never launch a worker."""
+    global RESEARCH_SHEET_EXECUTOR, RESEARCH_SHEET_ISOLATION_ENABLED
+    if RESEARCH_SHEET_ISOLATION_ENABLED:
+        return
+    # An unavailable optional executor must fail closed for Sheets without
+    # preventing core HQ startup or falling back to in-process provider work.
+    RESEARCH_SHEET_ISOLATION_ENABLED = True
+    try:
+        from hq_backend.research.sheet_executor import SheetExecutor, SheetExecutorError
+        RESEARCH_SHEET_EXECUTOR = SheetExecutor(PROJECT_ROOT)
+    except Exception:
+        SheetExecutorError = RuntimeError
+        RESEARCH_SHEET_EXECUTOR = None
+        _research_sheet_service_update(lastError="sheet_worker_initialization_failed", lastErrorAt=utc_now())
+
+    def proxy(name):
+        def invoke(*args, **kwargs):
+            if RESEARCH_SHEET_EXECUTOR is None:
+                raise google_sheet_hub.GoogleSheetHubError(
+                    "sheet_worker_unavailable", "The isolated Sheet worker is unavailable.", 503)
+            options = dict(kwargs)
+            opener = options.pop("open_url", None)
+            deadline = getattr(opener, "sheet_deadline_monotonic", None)
+            timeout = 45.0 if deadline is None else min(45.0, max(0.01, deadline - time.monotonic()))
+            binding = options.get("expected_credential_binding")
+            if binding is not None:
+                options["expected_credential_binding"] = {"fingerprint": binding._fingerprint}
+            try:
+                return RESEARCH_SHEET_EXECUTOR.call("google." + name, list(args), options, timeout_seconds=timeout)
+            except SheetExecutorError as error:
+                raise google_sheet_hub.GoogleSheetHubError(
+                    error.code, "Google Sheet worker is unavailable or the request failed.",
+                    error.status, error.write_unknown,
+                ) from error
+        return invoke
+
+    for name in (
+        "read_values", "inspect_tabs", "probe_tabs", "upsert_row",
+        "start_google_oauth", "complete_google_oauth", "disconnect_google_oauth",
+    ):
+        RESEARCH_SHEET_PROXY_ORIGINALS[name] = getattr(google_sheet_hub, name)
+        setattr(google_sheet_hub, name, proxy(name))
+
+
+def _enqueue_research_sheet_report_intent(report: dict) -> dict:
+    """Persist only a reference; report commits never wait for Sheet/network work."""
+    report_id = safe_reference(report.get("id"))
+    if not report_id or report.get("type") not in RESEARCH_SHEET_SYNC_REPORT_TYPES:
+        return {"queued": 0, "reason": "report_not_eligible"}
+    intent = {"version": 1, "reportId": report_id,
+              "reportDigest": _report_snapshot_digest(report), "createdAt": utc_now()}
+    # No 240-report horizon: each durable report retains its own delivery intent
+    # until the existing outbox has accepted/acknowledged that report.
+    with RESEARCH_SHEET_INTENT_LOCK:
+        RESEARCH_SHEET_INTENTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = RESEARCH_SHEET_INTENTS_DIR / (hashlib.sha256(report_id.encode()).hexdigest() + ".json")
+        write_json(path, intent)
+        RESEARCH_SHEET_INTENT_RETRY_AT.pop(path.name, None)
+    RESEARCH_SHEET_SERVICE_WAKE.set()
+    return {"queued": 0, "deferred": True, "reason": "sheet_worker_queued"}
+
+
+def _drain_research_sheet_report_intents(*, max_reports: int = 2) -> dict:
+    if not RESEARCH_SHEET_INTENTS_DIR.is_dir():
+        return {"scanned": 0, "drained": 0}
+    paths = sorted(RESEARCH_SHEET_INTENTS_DIR.glob("*.json"), key=lambda p: (p.stat().st_mtime_ns, p.name))
+    scanned = drained = 0
+    for path in paths:
+        if scanned >= max_reports or RESEARCH_SHEET_SERVICE_STOP.is_set():
+            break
+        if RESEARCH_SHEET_INTENT_RETRY_AT.get(path.name, 0) > time.monotonic():
+            continue
+        scanned += 1
+        try:
+            with RESEARCH_SHEET_INTENT_LOCK:
+                raw = path.read_bytes()
+                intent = json.loads(raw.decode("utf-8-sig"))
+            report_id = safe_reference(intent.get("reportId"))
+            if not report_id or hashlib.sha256(report_id.encode()).hexdigest() + ".json" != path.name:
+                raise DataIntegrityError("Invalid Sheet report intent.")
+            report = read_json(RUNTIME_REPORTS_DIR / f"{report_id}.json", None)
+            if not isinstance(report, dict) or report.get("id") != report_id:
+                raise DataIntegrityError("Sheet intent report is missing or invalid.")
+            result = _research_sheet_queue_report(report, flush=False)
+            if result.get("reason") in {"not_configured", "activation_required", "sheet_configuration_changed", "report_changed"}:
+                RESEARCH_SHEET_INTENT_RETRY_AT[path.name] = time.monotonic() + 60
+                continue
+            if result.get("reason") == "outbox_capacity_reached" and not result.get("deferredStored"):
+                RESEARCH_SHEET_INTENT_RETRY_AT[path.name] = time.monotonic() + 60
+                continue
+            with RESEARCH_SHEET_INTENT_LOCK:
+                # A newer report commit may have replaced the same intent while
+                # projection ran. Only acknowledge the exact observed intent.
+                if path.exists() and path.read_bytes() == raw:
+                    path.unlink()
+                    RESEARCH_SHEET_INTENT_RETRY_AT.pop(path.name, None)
+                    drained += 1
+        except Exception as error:
+            RESEARCH_SHEET_INTENT_RETRY_AT[path.name] = time.monotonic() + 60
+            _research_sheet_service_update(lastError="intent_" + type(error).__name__, lastErrorAt=utc_now())
+    return {"scanned": scanned, "drained": drained}
+
+
+def _research_sheet_service_update(**values) -> None:
+    with RESEARCH_SHEET_SERVICE_LOCK:
+        RESEARCH_SHEET_SERVICE_RUNTIME.update(values)
+
+
+def research_sheet_service_read_model() -> dict:
+    with RESEARCH_SHEET_SERVICE_LOCK:
+        state = dict(RESEARCH_SHEET_SERVICE_RUNTIME)
+    thread = RESEARCH_SHEET_SERVICE_THREAD
+    alive = bool(thread and thread.is_alive() and not RESEARCH_SHEET_SERVICE_STOP.is_set())
+    executor = RESEARCH_SHEET_EXECUTOR.status() if RESEARCH_SHEET_EXECUTOR is not None else {"status": "not_started"}
+    heartbeat = parse_iso(state.get("lastHeartbeatAt"))
+    age = max(0.0, (datetime.now(timezone.utc) - heartbeat).total_seconds()) if heartbeat else None
+    return {**state, "alive": alive, "heartbeatAgeSeconds": round(age, 1) if age is not None else None,
+            "heartbeatStale": age is None or age > 120, "executor": executor,
+            "isolatedProcess": RESEARCH_SHEET_ISOLATION_ENABLED, "affectsCoreHealth": False,
+            "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            "externalWriteScopes": ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else [],
+            "googleSheetExternalWritesEnabled": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            "sharedStoreWriter": "bridge", "metaTraderActions": False}
+
+
+def research_sheet_service_loop() -> None:
+    # The coordinator owns local transactions only. Provider I/O and expensive
+    # report projection run in its child; neither appears in core health.
+    due = {"sheet_intents": 0.0, "sheet_flush": 0.0, "sheet_backfill": 0.0,
+           "sheet_deferred": 0.0, "sheet_cache": 0.0}
+    backfill_state: dict = {}
+    cache_state: dict = {}
+    _research_sheet_service_update(status="running", phase="starting", lastHeartbeatAt=utc_now())
+    while not RESEARCH_SHEET_SERVICE_STOP.is_set():
+        now = time.monotonic()
+        ready = [name for name, deadline in due.items() if deadline <= now]
+        if RESEARCH_SHEET_AUTO_SYNC_ENABLED and ready:
+            phase = min(ready, key=lambda name: due[name])
+            interval = RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
+            _research_sheet_service_update(phase=phase, lastHeartbeatAt=utc_now())
+            try:
+                if phase == "sheet_intents":
+                    _drain_research_sheet_report_intents(max_reports=2)
+                elif phase == "sheet_flush":
+                    outcome = _flush_research_sheet_outbox(max_items=1, background=True)
+                    if outcome.get("synced"):
+                        due["sheet_cache"] = min(due["sheet_cache"], now)
+                elif phase == "sheet_backfill":
+                    outcome = _research_sheet_backfill_background_step(backfill_state)
+                    if not outcome.get("more"):
+                        interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                elif phase == "sheet_deferred":
+                    outcome = _research_sheet_drain_deferred_reports(
+                        max_reports=1, max_scanned=1,
+                        deadline_monotonic=time.monotonic() + RESEARCH_SHEET_BACKGROUND_STEP_BUDGET_SECONDS)
+                    if not outcome.get("eligibleDeferred"):
+                        interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                else:
+                    outcome = _research_sheet_background_cache_step(cache_state)
+                    if not outcome.get("more"):
+                        interval = RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
+                _research_sheet_service_update(lastSuccessAt=utc_now())
+            except Exception as error:
+                _research_sheet_service_update(lastError=type(error).__name__, lastErrorAt=utc_now())
+            finally:
+                due[phase] = time.monotonic() + interval
+        _research_sheet_service_update(phase="waiting", lastHeartbeatAt=utc_now())
+        wait_seconds = RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
+        if RESEARCH_SHEET_AUTO_SYNC_ENABLED:
+            wait_seconds = min(wait_seconds, max(0.1, min(due.values()) - time.monotonic()))
+        RESEARCH_SHEET_SERVICE_WAKE.wait(wait_seconds)
+        RESEARCH_SHEET_SERVICE_WAKE.clear()
+    _research_sheet_service_update(status="stopped", phase="stopped")
+
+
+def start_research_sheet_service() -> threading.Thread:
+    global RESEARCH_SHEET_SERVICE_THREAD
+    with RESEARCH_SHEET_SERVICE_LOCK:
+        if RESEARCH_SHEET_SERVICE_THREAD and RESEARCH_SHEET_SERVICE_THREAD.is_alive():
+            return RESEARCH_SHEET_SERVICE_THREAD
+        RESEARCH_SHEET_SERVICE_STOP.clear()
+        RESEARCH_SHEET_SERVICE_WAKE.clear()
+        RESEARCH_SHEET_SERVICE_THREAD = threading.Thread(target=research_sheet_service_loop,
+            name="metafx-sheet-coordinator", daemon=True)
+        RESEARCH_SHEET_SERVICE_THREAD.start()
+        return RESEARCH_SHEET_SERVICE_THREAD
+
+
+def stop_research_sheet_service() -> None:
+    RESEARCH_SHEET_SERVICE_STOP.set()
+    RESEARCH_SHEET_SERVICE_WAKE.set()
+    if RESEARCH_SHEET_EXECUTOR is not None:
+        try:
+            RESEARCH_SHEET_EXECUTOR.close()
+        except Exception:
+            _research_sheet_service_update(lastError="sheet_worker_shutdown_failed", lastErrorAt=utc_now())
+    thread = RESEARCH_SHEET_SERVICE_THREAD
+    if thread and thread.is_alive():
+        thread.join(timeout=3)
+
+
 def dashboard_workflow_scheduler_loop() -> None:
     started_at = utc_now()
-    next_sheet_outbox_maintenance = 0.0
-    next_sheet_backfill_maintenance = 0.0
     _dashboard_workflow_scheduler_runtime_update(
         status="running",
+        phase="starting",
         startedAt=started_at,
         lastHeartbeatAt=started_at,
         lastError=None,
@@ -71180,16 +71933,13 @@ def dashboard_workflow_scheduler_loop() -> None:
             "type": "dashboard.workflow_scheduler_started",
             "timezone": "Asia/Bangkok",
             "pollSeconds": DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS,
-            # This worker may flush the durable outbox to the one active,
-            # operator-confirmed Google Sheet.  Declare that capability
-            # honestly even when no row happens to be due during this run.
-            "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            # Sheet delivery belongs to the isolated optional Sheet service.
+            "externalWrites": False,
+            "sheetServiceOwner": "isolated_sheet_service",
             "externalWriteScopes": (
-                ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else []
+                []
             ),
-            "googleSheetExternalWritesEnabled": bool(
-                RESEARCH_SHEET_AUTO_SYNC_ENABLED
-            ),
+            "googleSheetExternalWritesEnabled": False,
             "googleSheetExternalWritesRequireActiveConfiguration": True,
             "otherExternalWrites": False,
             "metaTraderActions": False,
@@ -71203,6 +71953,7 @@ def dashboard_workflow_scheduler_loop() -> None:
         heartbeat_at = utc_now()
         _dashboard_workflow_scheduler_runtime_update(
             status="running",
+            phase="scheduler_tick",
             lastHeartbeatAt=heartbeat_at,
         )
         try:
@@ -71230,61 +71981,23 @@ def dashboard_workflow_scheduler_loop() -> None:
                 lastTickKind="scheduler_exception",
                 lastTickMessage=redact_text(f"{type(error).__name__}: {error}", 160),
             )
-        if (
-            RESEARCH_SHEET_AUTO_SYNC_ENABLED
-            and time.monotonic() >= next_sheet_outbox_maintenance
-        ):
-            next_sheet_outbox_maintenance = (
-                time.monotonic() + RESEARCH_SHEET_OUTBOX_MAINTENANCE_SECONDS
-            )
-            try:
-                _flush_research_sheet_outbox(max_items=20)
-            except Exception as error:
-                # Sheet delivery is downstream of the durable local report.
-                # Keep the daily scheduler alive and leave the item in the
-                # outbox for the next bounded retry.
-                try:
-                    append_audit({
-                        "type": "research_sheet_hub.background_flush_failed",
-                        "errorCode": type(error).__name__,
-                        "credentialsIncluded": False,
-                    })
-                except Exception:
-                    pass
-        if (
-            RESEARCH_SHEET_AUTO_SYNC_ENABLED
-            and time.monotonic() >= next_sheet_backfill_maintenance
-        ):
-            next_sheet_backfill_maintenance = (
-                time.monotonic() + RESEARCH_SHEET_BACKFILL_MAINTENANCE_SECONDS
-            )
-            try:
-                _research_sheet_backfill_recent_reports()
-            except Exception as error:
-                try:
-                    append_audit({
-                        "type": "research_sheet_hub.background_backfill_failed",
-                        "errorCode": type(error).__name__,
-                        "credentialsIncluded": False,
-                    })
-                except Exception:
-                    pass
+        _dashboard_workflow_scheduler_runtime_update(phase="waiting")
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.wait(DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS)
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.clear()
     _dashboard_workflow_scheduler_runtime_update(
         status="stopped",
+        phase="stopped",
         lastHeartbeatAt=utc_now(),
     )
     try:
         append_audit({
             "type": "dashboard.workflow_scheduler_stopped",
-            "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            "externalWrites": False,
+            "sheetServiceOwner": "isolated_sheet_service",
             "externalWriteScopes": (
-                ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else []
+                []
             ),
-            "googleSheetExternalWritesEnabled": bool(
-                RESEARCH_SHEET_AUTO_SYNC_ENABLED
-            ),
+            "googleSheetExternalWritesEnabled": False,
             "googleSheetExternalWritesRequireActiveConfiguration": True,
             "otherExternalWrites": False,
             "metaTraderActions": False,
@@ -71302,6 +72015,7 @@ def start_dashboard_workflow_scheduler() -> threading.Thread:
         DASHBOARD_WORKFLOW_SCHEDULER_WAKE.clear()
         _dashboard_workflow_scheduler_runtime_update(
             status="starting",
+            phase="starting",
             startedAt=utc_now(),
             lastHeartbeatAt=utc_now(),
             lastError=None,
@@ -71326,7 +72040,9 @@ def stop_dashboard_workflow_scheduler() -> None:
     if FX_TREND_THREAD and FX_TREND_THREAD.is_alive():
         FX_TREND_THREAD.join(timeout=5)
     if not thread or not thread.is_alive():
-        _dashboard_workflow_scheduler_runtime_update(status="stopped", lastHeartbeatAt=utc_now())
+        _dashboard_workflow_scheduler_runtime_update(
+            status="stopped", phase="stopped", lastHeartbeatAt=utc_now()
+        )
 
 
 AI_TRADE_COUNCIL_PROP_ID = "left_analytics_console"
@@ -75077,6 +75793,7 @@ def _run_safe_command_with_tree_timeout(
     cancel_event: threading.Event | None = None,
     tracking_key: str | None = None,
     factory_start_lease: str | None = None,
+    council_start_lease: str | None = None,
     structured_json_output: bool = False,
 ) -> dict:
     global MISSION_WORKER_PROCESS, MISSION_WORKER_JOB_HOLDER
@@ -75100,7 +75817,7 @@ def _run_safe_command_with_tree_timeout(
     cancellation = {"requested": False, "treeTerminated": False}
     job_holder = None
     try:
-        with MISSIONS_LOCK if factory_start_lease is not None else nullcontext():
+        with MISSIONS_LOCK if factory_start_lease is not None or council_start_lease is not None else nullcontext():
             if factory_start_lease is not None:
                 current = find_mission(tracking_key)
                 current_execution = current.get("execution") if isinstance(current, dict) and isinstance(current.get("execution"), dict) else {}
@@ -75116,6 +75833,29 @@ def _run_safe_command_with_tree_timeout(
                             structured_json_output=structured_json_output,
                         ),
                     }
+            if council_start_lease is not None:
+                current = find_mission(tracking_key)
+                current_execution = (current or {}).get("execution") or {}
+                timeout_at = parse_iso(current_execution.get("timeoutAt"))
+                now = datetime.now(timezone.utc)
+                if (cancel_event is not None and cancel_event.is_set()
+                    or not isinstance(current, dict) or not _council_automatic_vote(current)
+                    or current.get("status") != "running"
+                    or current_execution.get("dispatchState") != "running"
+                    or current_execution.get("leaseId") != council_start_lease
+                    or current_execution.get("leasePhase") != "executing"
+                    or current_execution.get("processStarted") is True
+                    or timeout_at is None or now >= timeout_at):
+                    return {
+                        "ok": False, "exitCode": "cancelled", "processStarted": False,
+                        "processTreeTerminated": True, "durationMs": 0,
+                        "output": _safe_command_failure_output(
+                            "cancelled", "Council Mission lease expired or was cancelled before process start.",
+                            output_limit, structured_json_output=structured_json_output,
+                        ),
+                    }
+                # Preparation/store latency must not extend the process lease.
+                timeout = min(timeout, max(0.001, (timeout_at - now).total_seconds()))
             process = subprocess.Popen(
                 command,
                 cwd=str(PROJECT_ROOT),
@@ -75138,10 +75878,54 @@ def _run_safe_command_with_tree_timeout(
                         MISSION_WORKER_PROCESSES[tracking_key] = {
                             "process": process,
                             "jobHolder": job_holder,
+                            **({"leaseId": council_start_lease} if council_start_lease is not None else {}),
                         }
             if os.name == "nt" and (not job_holder or not _resume_windows_process(process)):
                 _terminate_command_process_tree(process, job_holder)
                 raise RuntimeError("Unable to start command inside the guarded Windows process job.")
+            if council_start_lease is not None:
+                try:
+                    missions = load_missions()
+                    current = next(row for row in missions if row.get("id") == tracking_key)
+                    current_execution = current.get("execution") or {}
+                    if (current.get("status") != "running"
+                        or current_execution.get("leaseId") != council_start_lease
+                        or current_execution.get("leasePhase") != "executing"
+                        or current_execution.get("processStarted") is True):
+                        raise RuntimeError("Council launch lease changed before start receipt.")
+                    # Persist actual spawn once while the launch lock is held;
+                    # a second invocation using this same lease cannot spawn.
+                    current_execution["processStarted"] = True
+                    current_execution["processStartedAt"] = utc_now()
+                    current["execution"] = current_execution
+                    save_missions(missions)
+                except Exception:
+                    tree_terminated = _terminate_command_process_tree(process, job_holder)
+                    return {
+                        "ok": False, "exitCode": "council_process_start_receipt_failed",
+                        "processStarted": True, "processTreeTerminated": bool(tree_terminated),
+                        "durationMs": round((time.perf_counter() - started) * 1000),
+                        "output": _safe_command_failure_output(
+                            "council_process_start_receipt_failed",
+                            "Council process was stopped because its durable start receipt could not be stored.",
+                            output_limit, structured_json_output=structured_json_output,
+                        ),
+                    }
+                # Saving the receipt is part of the existing hard lease, not
+                # additional runtime. Stop if storage itself used the remainder.
+                remaining = (timeout_at - datetime.now(timezone.utc)).total_seconds()
+                if remaining <= 0:
+                    tree_terminated = _terminate_command_process_tree(process, job_holder)
+                    return {
+                        "ok": False, "exitCode": "timeout", "processStarted": True,
+                        "processTreeTerminated": bool(tree_terminated),
+                        "durationMs": round((time.perf_counter() - started) * 1000),
+                        "output": _safe_command_failure_output(
+                            "timeout", "Council hard execution deadline passed during start receipt storage.",
+                            output_limit, structured_json_output=structured_json_output,
+                        ),
+                    }
+                timeout = min(timeout, remaining)
         if cancel_event is not None:
             def watch_for_cancellation() -> None:
                 if cancel_event.wait():
@@ -75213,35 +75997,32 @@ def _run_safe_command_with_tree_timeout(
             "processTreeTerminated": False,
             "processStarted": True,
         }
-    except PermissionError as error:
+    except (PermissionError, FileNotFoundError) as error:
+        process_started = process is not None
+        tree_terminated = False
+        if process_started and process.poll() is None:
+            tree_terminated = _terminate_command_process_tree(process, job_holder)
+        failure_code = "permission_denied" if isinstance(error, PermissionError) else "not_found"
+        message = (
+            "Command transport failed after process start."
+            if process_started
+            else "Command could not start because permission was denied."
+            if failure_code == "permission_denied"
+            else "Command executable was not found."
+        )
         return {
             "ok": False,
-            "exitCode": "permission_denied",
+            "exitCode": failure_code,
             "output": _safe_command_failure_output(
-                "permission_denied",
-                "Command could not start because permission was denied.",
+                failure_code,
+                message,
                 output_limit,
                 structured_json_output=structured_json_output,
                 diagnostic=error,
             ),
             "durationMs": round((time.perf_counter() - started) * 1000),
-            "processTreeTerminated": False,
-            "processStarted": False,
-        }
-    except FileNotFoundError as error:
-        return {
-            "ok": False,
-            "exitCode": "not_found",
-            "output": _safe_command_failure_output(
-                "not_found",
-                "Command executable was not found.",
-                output_limit,
-                structured_json_output=structured_json_output,
-                diagnostic=error,
-            ),
-            "durationMs": round((time.perf_counter() - started) * 1000),
-            "processTreeTerminated": False,
-            "processStarted": False,
+            "processTreeTerminated": bool(tree_terminated),
+            "processStarted": process_started,
         }
     except Exception as error:
         tree_terminated = False
@@ -75287,6 +76068,7 @@ def run_safe_command(
     cancel_event: threading.Event | None = None,
     tracking_key: str | None = None,
     factory_start_lease: str | None = None,
+    council_start_lease: str | None = None,
     structured_json_output: bool = False,
 ) -> dict:
     if kill_process_tree_on_timeout:
@@ -75298,6 +76080,7 @@ def run_safe_command(
             cancel_event=cancel_event,
             tracking_key=tracking_key,
             **({"factory_start_lease": factory_start_lease} if factory_start_lease is not None else {}),
+            **({"council_start_lease": council_start_lease} if council_start_lease is not None else {}),
             structured_json_output=structured_json_output,
         )
     started = time.perf_counter()
@@ -78524,6 +79307,20 @@ def _mt4_trade_gateway_publish_for_selection(
         gateway = _mt4_trade_gateway_instance(
             mt5_account_binding_id=mt5_account_binding_id
         )
+        # Target/quote checks and acquiring this lock may consume the remaining
+        # round budget. Recheck at publication admission, without altering an
+        # already-issued command's TTL, ACK lifecycle or EA-owned risk policy.
+        publication_deadline = parse_iso(str(analysis_context.get("roundDeadlineAt") or ""))
+        if (
+            publication_deadline is None
+            or datetime.now(timezone.utc) >= publication_deadline.astimezone(timezone.utc)
+        ):
+            return {
+                "ok": False,
+                "reasonCode": "decision_dispatch_window_expired",
+                "published": None,
+                "command": None,
+            }
         published = gateway.queue_trade_intent(intent)
         command_id = safe_reference(
             (published.get("command") or {}).get("commandId")
@@ -84445,6 +85242,26 @@ def _ai_trade_council_canonical_instrument(symbol: object) -> dict:
     }
 
 
+def _ai_trade_council_automatic_deadline(automation: object) -> datetime | None:
+    """Read the immutable admission deadline without extending older rounds.
+
+    New automatic rounds have one total budget from new-bar detection through
+    decision/publication admission. Existing shorter admissions stay shorter;
+    no clock, retry or reconstruction may grant a fresh budget to stored work.
+    """
+    if not isinstance(automation, dict):
+        return None
+    admitted_at = parse_iso(str(automation.get("quotaAdmittedAt") or ""))
+    expires_at = parse_iso(str(automation.get("triggerExpiresAt") or ""))
+    if admitted_at is None or expires_at is None:
+        return None
+    admitted_at = admitted_at.astimezone(timezone.utc)
+    expires_at = expires_at.astimezone(timezone.utc)
+    if not 0 < (expires_at - admitted_at).total_seconds() <= AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS:
+        return None
+    return expires_at
+
+
 def _ai_trade_council_expected_valid_until(
     closed_bar_time: int,
     timeframe: str,
@@ -84679,6 +85496,9 @@ def load_ai_trade_council_prompt_contract() -> dict:
         != AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN
         or quality_gate.get("decisionExpirySource")
         != AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE
+        or type(quality_gate.get("automaticTotalBudgetSeconds")) is not int
+        or quality_gate.get("automaticTotalBudgetSeconds")
+        != AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS
         or not isinstance(protective_fallback, dict)
         or protective_fallback.get("enabled") is not True
         or protective_fallback.get("trigger")
@@ -84804,6 +85624,7 @@ def load_ai_trade_council_prompt_contract() -> dict:
         "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
         "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
         "roundDeadlineSeconds": clamp_int(quality_gate.get("roundDeadlineSeconds"), 240, 60, 290),
+        "automaticTotalBudgetSeconds": AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS,
         "maximumSnapshotSpreadPoints": clamp_int(quality_gate.get("maximumSnapshotSpreadPoints"), 1000, 1, 10_000_000),
         "maximumNewsAgeSeconds": clamp_int(quality_gate.get("maximumNewsAgeSeconds"), 86400, 300, 604800),
         "maximumFutureEvidenceSkewSeconds": clamp_int(quality_gate.get("maximumFutureEvidenceSkewSeconds"), 300, 0, 3600),
@@ -87770,6 +88591,17 @@ def _run_ai_trade_council_analysis_unlocked(
     round_deadline_at = round_started_at + timedelta(
         seconds=int(quality_policy["roundDeadlineSeconds"])
     )
+    if automation_packet:
+        automatic_deadline = _ai_trade_council_automatic_deadline(automation_packet)
+        admitted_at = parse_iso(str(automation_packet.get("quotaAdmittedAt") or ""))
+        if automatic_deadline is None or admitted_at is None or admitted_at > round_started_at:
+            raise RequestError("AI Trade Council automatic admission is invalid.", 409)
+        if round_started_at >= automatic_deadline:
+            raise RequestError("AI Trade Council automatic round deadline expired.", 409)
+        # Preparation, all three workers and synthesis share the original
+        # admission budget. Never restart this clock when missions are created.
+        round_started_at = admitted_at.astimezone(timezone.utc)
+        round_deadline_at = automatic_deadline
     council_quality_gate.update({
         "confidenceFloorDefault": quality_policy["confidenceFloorDefault"],
         "confidenceFloorByRole": quality_policy["confidenceFloorByRole"],
@@ -88044,215 +88876,217 @@ def _run_ai_trade_council_analysis_unlocked(
     if not allowed:
         raise RequestError(f"กรุณารอ {retry_after} วินาทีก่อนเริ่มรอบวิเคราะห์ใหม่", 429)
 
-    parent = existing_parent or create_mission({
-        "title": f"สภา AI Trade วิเคราะห์ {chart.get('symbol')} {chart.get('timeframe')}",
-        "prompt": (
-            f"Manager ประสานผลการวิเคราะห์แบบอ่านอย่างเดียวจาก Agent 3 ตัว "
-            f"โดยใช้ Snapshot {snapshot_id} เดียวกัน"
-        ),
-        "agentId": "manager",
-        "requester": "system_scheduler" if automation_packet else "human",
-        "toolId": "manager_mission",
-        "targetId": prop_id,
-        "risk": "low",
-        "reportType": "ai_trade_council_report",
-        "idempotencyKey": parent_idempotency,
-        "analysisContext": {
-            "kind": "ai_trade_council_parent",
+    with _council_mission_store_batch():
+        parent = existing_parent or create_mission({
+            "title": f"สภา AI Trade วิเคราะห์ {chart.get('symbol')} {chart.get('timeframe')}",
+            "prompt": (
+                f"Manager ประสานผลการวิเคราะห์แบบอ่านอย่างเดียวจาก Agent 3 ตัว "
+                f"โดยใช้ Snapshot {snapshot_id} เดียวกัน"
+            ),
+            "agentId": "manager",
+            "requester": "system_scheduler" if automation_packet else "human",
+            "toolId": "manager_mission",
+            "targetId": prop_id,
+            "risk": "low",
+            "reportType": "ai_trade_council_report",
+            "idempotencyKey": parent_idempotency,
+            "analysisContext": {
+                "kind": "ai_trade_council_parent",
+                "snapshotId": snapshot_id,
+                "snapshotArtifact": snapshot_artifact,
+                "snapshotArtifactDigest": snapshot_artifact_digest,
+                "propId": prop_id,
+                "referencePrice": reference_price,
+                "analysisQuote": analysis_quote_context,
+                "snapshotObservedAt": chart.get("observedAt"),
+                "horizonBars": horizon_bars,
+                "validUntilBarTime": valid_until_bar_time,
+                "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
+                "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
+                "roundStartedAt": council_quality_gate["roundStartedAt"],
+                "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
+                "qualityGate": council_quality_gate,
+                "requiredVotes": required_votes,
+                **analysis_context_metadata,
+                "readOnly": True,
+                "contractDigest": contract_digest,
+                **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
+                **({"automation": automation_packet} if automation_packet else {}),
+            },
+        }, status="running", allow_analysis_context=True)
+
+        subtasks = []
+        try:
+            for row, prompt in prepared_rows:
+                child_key = (
+                    f"ai-council-auto-{automation_packet['streamKey'][:18]}-"
+                    f"{automation_packet['closedBarTime']}-{contract_digest}-v{required_votes}-{row['roleId']}"
+                    if automation_packet
+                    else (
+                        f"ai-council-{snapshot_id[:24]}-{contract_digest}-"
+                        f"v{required_votes}{round_retry_suffix}-{row['roleId']}"
+                    )
+                )
+                existing_child = find_mission_by_idempotency(child_key)
+                child = existing_child or create_mission({
+                    "title": row["titleTh"],
+                    "prompt": prompt,
+                    "agentId": row["agentId"],
+                    "requester": "manager",
+                    "toolId": row["toolId"],
+                    "targetId": prop_id,
+                    "risk": "medium",
+                    "reportType": "ai_trade_council_vote",
+                    "parentMissionId": parent["id"],
+                    "idempotencyKey": child_key,
+                    "modelTier": row["modelTier"],
+                    "timeout": row["timeoutSeconds"],
+                    "budget": {
+                        "timeoutSeconds": row["timeoutSeconds"],
+                        "outputLimitChars": row["outputLimitChars"],
+                        "maxRuns": AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY["maximumRuns"],
+                    },
+                    "analysisContext": {
+                        "kind": "ai_trade_council_vote",
+                        "providerRetryPolicy": copy.deepcopy(AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY),
+                        "snapshotId": snapshot_id,
+                        "snapshotArtifact": snapshot_artifact,
+                        "snapshotArtifactDigest": snapshot_artifact_digest,
+                        "agentId": row["agentId"],
+                        "roleId": row["roleId"],
+                        "referencePrice": reference_price,
+                        "analysisQuote": analysis_quote_context,
+                        "horizonBars": horizon_bars,
+                        "validUntilBarTime": valid_until_bar_time,
+                        "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
+                        "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
+                        "volatilityState": (council_quality_gate.get("technical") or {}).get("volatilityState"),
+                        "qualityPolicy": quality_policy,
+                        "roundStartedAt": council_quality_gate["roundStartedAt"],
+                        "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
+                        "snapshotObservedAt": chart.get("observedAt"),
+                        "propId": prop_id,
+                        **analysis_context_metadata,
+                        "readOnly": True,
+                        "contractDigest": contract_digest,
+                        **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
+                        **({"automation": automation_packet} if automation_packet else {}),
+                    },
+                }, status="queued", allow_model_override=True, allow_budget_override=True, allow_analysis_context=True)
+                if (
+                    child.get("parentMissionId") != parent["id"]
+                    or child.get("autoEligible") is not True
+                    or child.get("executionMode") != "auto_guarded"
+                ):
+                    raise RequestError(f"งานของ Agent {row['agentId']} ไม่พร้อมรันอัตโนมัติ", 503)
+                subtasks.append(child)
+        except Exception:
+            failed_at = utc_now()
+            cancelled_subtasks = 0
+            with PARENT_MISSION_REFRESH_LOCK:
+                with MISSIONS_LOCK:
+                    missions = load_missions()
+                    stored_parent = next(
+                        (
+                            item
+                            for item in missions
+                            if item.get("id") == parent.get("id")
+                        ),
+                        parent,
+                    )
+                    stored_parent["status"] = "blocked"
+                    stored_parent["phase"] = "council_queue_incomplete"
+                    stored_parent["errorCode"] = "council_queue_incomplete"
+                    stored_parent["result"] = "สร้างงานวิเคราะห์ไม่ครบ 3 Agent ระบบจึงหยุดไว้โดยไม่ส่งคำสั่งไป Terminal"
+                    stored_parent["completedAt"] = failed_at
+                    stored_parent["updatedAt"] = failed_at
+                    for mission in missions:
+                        mission_context = (
+                            mission.get("analysisContext")
+                            if isinstance(mission.get("analysisContext"), dict)
+                            else {}
+                        )
+                        if (
+                            mission.get("parentMissionId") != parent.get("id")
+                            or mission_context.get("kind") != "ai_trade_council_vote"
+                            or mission.get("status")
+                            not in {"queued", "waiting_approval"}
+                        ):
+                            continue
+                        mission["status"] = "blocked"
+                        mission["phase"] = "council_queue_incomplete"
+                        mission["errorCode"] = "council_parent_queue_incomplete"
+                        mission["result"] = (
+                            "Council round assembly failed before all three votes were queued. "
+                            "No tool was started."
+                        )
+                        mission["completedAt"] = failed_at
+                        mission["updatedAt"] = failed_at
+                        approval = (
+                            mission.get("approval")
+                            if isinstance(mission.get("approval"), dict)
+                            else {}
+                        )
+                        if approval.get("state") == "approved":
+                            approval["state"] = "invalidated"
+                        mission["approval"] = approval
+                        execution = (
+                            mission.get("execution")
+                            if isinstance(mission.get("execution"), dict)
+                            else {}
+                        )
+                        execution["dispatchState"] = "blocked"
+                        execution["completedAt"] = failed_at
+                        mission["execution"] = execution
+                        cancelled_subtasks += 1
+                    save_missions(missions)
+                    parent = stored_parent
+            append_audit({
+                "type": "ai_trade_council.queue_failed",
+                "missionId": parent.get("id"),
+                "snapshotId": snapshot_id,
+                "createdSubtaskCount": len(subtasks),
+                "cancelledSubtaskCount": cancelled_subtasks,
+                **analysis_context_metadata,
+                "terminalActions": False,
+            })
+            raise
+
+        parent["subtaskIds"] = [item["id"] for item in subtasks]
+        parent["status"] = "queued" if all(item.get("status") == "queued" for item in subtasks) else "running"
+        parent["phase"] = "council_specialists_queued"
+        parent["result"] = "ส่ง Snapshot เดียวกันให้ Agent วิเคราะห์ครบ 3 บทบาทแล้ว"
+        parent["completedAt"] = None
+        parent["updatedAt"] = utc_now()
+        parent["delegation"] = {
+            "mode": "ai_trade_council_read_only",
+            "state": "specialists_queued",
             "snapshotId": snapshot_id,
-            "snapshotArtifact": snapshot_artifact,
-            "snapshotArtifactDigest": snapshot_artifact_digest,
-            "propId": prop_id,
-            "referencePrice": reference_price,
-            "analysisQuote": analysis_quote_context,
-            "snapshotObservedAt": chart.get("observedAt"),
+            "contractDigest": contract_digest,
+            "qualityGateSchema": "ai-trade-council-quality-gate-v2",
             "horizonBars": horizon_bars,
             "validUntilBarTime": valid_until_bar_time,
             "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
             "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
-            "roundStartedAt": council_quality_gate["roundStartedAt"],
-            "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
-            "qualityGate": council_quality_gate,
             "requiredVotes": required_votes,
+            "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
             **analysis_context_metadata,
-            "readOnly": True,
-            "contractDigest": contract_digest,
-            **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
-            **({"automation": automation_packet} if automation_packet else {}),
-        },
-    }, status="running", allow_analysis_context=True)
-
-    subtasks = []
-    try:
-        for row, prompt in prepared_rows:
-            child_key = (
-                f"ai-council-auto-{automation_packet['streamKey'][:18]}-"
-                f"{automation_packet['closedBarTime']}-{contract_digest}-v{required_votes}-{row['roleId']}"
-                if automation_packet
-                else (
-                    f"ai-council-{snapshot_id[:24]}-{contract_digest}-"
-                    f"v{required_votes}{round_retry_suffix}-{row['roleId']}"
-                )
-            )
-            existing_child = find_mission_by_idempotency(child_key)
-            child = existing_child or create_mission({
-                "title": row["titleTh"],
-                "prompt": prompt,
-                "agentId": row["agentId"],
-                "requester": "manager",
-                "toolId": row["toolId"],
-                "targetId": prop_id,
-                "risk": "medium",
-                "reportType": "ai_trade_council_vote",
-                "parentMissionId": parent["id"],
-                "idempotencyKey": child_key,
-                "modelTier": row["modelTier"],
-                "timeout": row["timeoutSeconds"],
-                "budget": {
-                    "timeoutSeconds": row["timeoutSeconds"],
-                    "outputLimitChars": row["outputLimitChars"],
-                    "maxRuns": AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY["maximumRuns"],
-                },
-                "analysisContext": {
-                    "kind": "ai_trade_council_vote",
-                    "providerRetryPolicy": copy.deepcopy(AI_TRADE_COUNCIL_PROVIDER_RETRY_POLICY),
-                    "snapshotId": snapshot_id,
-                    "snapshotArtifact": snapshot_artifact,
-                    "snapshotArtifactDigest": snapshot_artifact_digest,
-                    "agentId": row["agentId"],
-                    "roleId": row["roleId"],
-                    "referencePrice": reference_price,
-                    "analysisQuote": analysis_quote_context,
-                    "horizonBars": horizon_bars,
-                    "validUntilBarTime": valid_until_bar_time,
-                    "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
-                    "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
-                    "volatilityState": (council_quality_gate.get("technical") or {}).get("volatilityState"),
-                    "qualityPolicy": quality_policy,
-                    "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
-                    "snapshotObservedAt": chart.get("observedAt"),
-                    "propId": prop_id,
-                    **analysis_context_metadata,
-                    "readOnly": True,
-                    "contractDigest": contract_digest,
-                    **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
-                    **({"automation": automation_packet} if automation_packet else {}),
-                },
-            }, status="queued", allow_model_override=True, allow_budget_override=True, allow_analysis_context=True)
-            if (
-                child.get("parentMissionId") != parent["id"]
-                or child.get("autoEligible") is not True
-                or child.get("executionMode") != "auto_guarded"
-            ):
-                raise RequestError(f"งานของ Agent {row['agentId']} ไม่พร้อมรันอัตโนมัติ", 503)
-            subtasks.append(child)
-    except Exception:
-        failed_at = utc_now()
-        cancelled_subtasks = 0
-        with PARENT_MISSION_REFRESH_LOCK:
-            with MISSIONS_LOCK:
-                missions = load_missions()
-                stored_parent = next(
-                    (
-                        item
-                        for item in missions
-                        if item.get("id") == parent.get("id")
-                    ),
-                    parent,
-                )
-                stored_parent["status"] = "blocked"
-                stored_parent["phase"] = "council_queue_incomplete"
-                stored_parent["errorCode"] = "council_queue_incomplete"
-                stored_parent["result"] = "สร้างงานวิเคราะห์ไม่ครบ 3 Agent ระบบจึงหยุดไว้โดยไม่ส่งคำสั่งไป Terminal"
-                stored_parent["completedAt"] = failed_at
-                stored_parent["updatedAt"] = failed_at
-                for mission in missions:
-                    mission_context = (
-                        mission.get("analysisContext")
-                        if isinstance(mission.get("analysisContext"), dict)
-                        else {}
-                    )
-                    if (
-                        mission.get("parentMissionId") != parent.get("id")
-                        or mission_context.get("kind") != "ai_trade_council_vote"
-                        or mission.get("status")
-                        not in {"queued", "waiting_approval"}
-                    ):
-                        continue
-                    mission["status"] = "blocked"
-                    mission["phase"] = "council_queue_incomplete"
-                    mission["errorCode"] = "council_parent_queue_incomplete"
-                    mission["result"] = (
-                        "Council round assembly failed before all three votes were queued. "
-                        "No tool was started."
-                    )
-                    mission["completedAt"] = failed_at
-                    mission["updatedAt"] = failed_at
-                    approval = (
-                        mission.get("approval")
-                        if isinstance(mission.get("approval"), dict)
-                        else {}
-                    )
-                    if approval.get("state") == "approved":
-                        approval["state"] = "invalidated"
-                    mission["approval"] = approval
-                    execution = (
-                        mission.get("execution")
-                        if isinstance(mission.get("execution"), dict)
-                        else {}
-                    )
-                    execution["dispatchState"] = "blocked"
-                    execution["completedAt"] = failed_at
-                    mission["execution"] = execution
-                    cancelled_subtasks += 1
-                save_missions(missions)
-                parent = stored_parent
-        append_audit({
-            "type": "ai_trade_council.queue_failed",
-            "missionId": parent.get("id"),
-            "snapshotId": snapshot_id,
-            "createdSubtaskCount": len(subtasks),
-            "cancelledSubtaskCount": cancelled_subtasks,
-            **analysis_context_metadata,
+            "subtaskCount": 3,
+            "subtaskStatusCounts": summarize_missions(subtasks).get("byStatus", {}),
+            "summaryTargetId": prop_id,
+            "riskGuardAgentId": "risk_guard",
+            "riskGuardVoting": False,
             "terminalActions": False,
-        })
-        raise
-
-    parent["subtaskIds"] = [item["id"] for item in subtasks]
-    parent["status"] = "queued" if all(item.get("status") == "queued" for item in subtasks) else "running"
-    parent["phase"] = "council_specialists_queued"
-    parent["result"] = "ส่ง Snapshot เดียวกันให้ Agent วิเคราะห์ครบ 3 บทบาทแล้ว"
-    parent["completedAt"] = None
-    parent["updatedAt"] = utc_now()
-    parent["delegation"] = {
-        "mode": "ai_trade_council_read_only",
-        "state": "specialists_queued",
-        "snapshotId": snapshot_id,
-        "contractDigest": contract_digest,
-        "qualityGateSchema": "ai-trade-council-quality-gate-v2",
-        "horizonBars": horizon_bars,
-        "validUntilBarTime": valid_until_bar_time,
-        "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
-        "decisionExpirySource": AI_TRADE_COUNCIL_DECISION_EXPIRY_SOURCE,
-        "requiredVotes": required_votes,
-        "roundDeadlineAt": council_quality_gate["roundDeadlineAt"],
-        **analysis_context_metadata,
-        "subtaskCount": 3,
-        "subtaskStatusCounts": summarize_missions(subtasks).get("byStatus", {}),
-        "summaryTargetId": prop_id,
-        "riskGuardAgentId": "risk_guard",
-        "riskGuardVoting": False,
-        "terminalActions": False,
-        "realToolExecuted": False,
-        "triggerMode": (
-            "auto_on_new_closed_bar"
-            if automation_packet
-            else "manual"
-        ),
-        **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
-        "delegatedAt": utc_now(),
-    }
-    replace_mission(parent)
+            "realToolExecuted": False,
+            "triggerMode": (
+                "auto_on_new_closed_bar"
+                if automation_packet
+                else "manual"
+            ),
+            **({"closedBarIdentity": closed_bar_packet} if closed_bar_packet else {}),
+            "delegatedAt": utc_now(),
+        }
+        replace_mission(parent)
     append_audit({
         "type": "ai_trade_council.queued",
         "missionId": parent["id"],
@@ -88542,6 +89376,29 @@ def evaluate_ai_trade_council_outcomes(
 
 
 
+def _ai_trade_council_current_admission_survives_tick_gap(state: dict, identity: dict) -> bool:
+    """Continue an already observed/admitted bar, never admit a missed bar."""
+    if (state.get("startupId") != SERVER_STARTED_AT
+        or state.get("streamKey") != identity.get("streamKey")
+        or state.get("lastObservedClosedBarTime") != identity.get("lastClosedBarTime")):
+        return False
+    now = datetime.now(timezone.utc)
+    for record in state.get("coverageRecords") or []:
+        if (record.get("status") != "pending"
+            or record.get("triggerPolicy") != "new_closed_bar_only_no_backfill"
+            or record.get("triggerStartupId") != SERVER_STARTED_AT
+            or record.get("executionPolicy") != "current_exact_snapshot"
+            or not _ai_trade_council_pending_matches_current_closed_bar(record, identity)):
+            continue
+        admitted = parse_iso(record.get("quotaAdmittedAt"))
+        detected = parse_iso(record.get("detectedAt"))
+        deadline = _ai_trade_council_automatic_deadline(record)
+        if (admitted is not None and detected is not None and deadline is not None
+            and detected <= admitted <= now < deadline):
+            return True
+    return False
+
+
 def ai_trade_council_automation_tick() -> dict:
     """Admit only a newly observed closed bar; skipped triggers never catch up."""
     if not AI_TRADE_COUNCIL_AUTOMATION_RUN_LOCK.acquire(blocking=False):
@@ -88647,7 +89504,10 @@ def ai_trade_council_automation_tick() -> dict:
             baseline_reason = "bar_time_regression_baseline"
         elif state.get("lastSchedulerTickAt") and (
             datetime.now(timezone.utc) - parse_iso(state["lastSchedulerTickAt"]).astimezone(timezone.utc)
-        ).total_seconds() > 60:
+        ).total_seconds() > 60 and not _ai_trade_council_current_admission_survives_tick_gap(state, identity):
+            # A slow preceding tick can spend >60s inside quota/capture before
+            # saving a valid admission. Keep only that exact current bar on its
+            # original deadline; an unobserved new bar still baselines here.
             baseline_reason = "new_bar_only_missed_trigger"
 
         if baseline_reason:
@@ -88836,7 +89696,10 @@ def ai_trade_council_automation_tick() -> dict:
                 "detectedAt": detected_at,
                 "triggerPolicy": "new_closed_bar_only_no_backfill",
                 "triggerStartupId": SERVER_STARTED_AT,
-                "triggerExpiresAt": (parse_iso(detected_at) + timedelta(seconds=60)).isoformat(),
+                "triggerExpiresAt": (
+                    parse_iso(detected_at)
+                    + timedelta(seconds=AI_TRADE_COUNCIL_AUTOMATIC_TOTAL_SECONDS)
+                ).isoformat(),
                 "quotaAdmittedAt": detected_at if current_record_status == "pending" else None,
                 "analysisStartPreflight": trigger_preflight,
                 "completedAt": (
@@ -89534,6 +90397,9 @@ def runtime_health() -> dict:
             "scheduleStoreReady": COLLABORATION_SCHEDULE_PATH.is_file(),
         },
         "dashboardWorkflowScheduler": dashboard_scheduler,
+        # Optional Sheet failures remain visible without changing the actual
+        # Council/dashboard/mission-worker readiness or watchdog predicate.
+        "researchSheetService": research_sheet_service_read_model(),
         "missionWorker": mission_worker,
         "time": utc_now(),
     }
@@ -89605,6 +90471,12 @@ def load_missions(*, shared_snapshot: bool = False) -> list[dict]:
     must never mutate it.
     """
 
+    batch = getattr(COUNCIL_MISSION_BATCH, "state", None)
+    if batch is not None:
+        # The batch owns an isolated copy under MISSIONS_LOCK. Copy only list
+        # membership here; exact lookup APIs still defensively copy records.
+        return list(batch["missions"])
+
     with MISSIONS_READ_CACHE_LOCK:
         signature = _mission_store_signature()
         cached_signature = MISSIONS_READ_CACHE.get("signature")
@@ -89636,7 +90508,60 @@ def load_missions(*, shared_snapshot: bool = False) -> list[dict]:
         return missions if shared_snapshot else copy.deepcopy(missions)
 
 
+@contextmanager
+def _council_mission_store_batch():
+    """Publish one complete Council cohort with one durable archive replacement.
+
+    Only round assembly uses this thread-local batch. Other readers/writers are
+    excluded by the existing store lock; the queue lock is already held by the
+    caller. Keep the normal parent -> store lock order and all authorization,
+    idempotency and audit calls in create_mission. No worker can see half a round.
+    """
+    with PARENT_MISSION_REFRESH_LOCK:
+        with MISSIONS_LOCK:
+            if getattr(COUNCIL_MISSION_BATCH, "state", None) is not None:
+                raise DataIntegrityError("Nested Council assembly is not supported.")
+            missions = load_missions()
+            original_ids = {row.get("id") for row in missions}
+            state = {"missions": missions, "dirty": False}
+            COUNCIL_MISSION_BATCH.state = state
+            try:
+                yield
+            except BaseException:
+                # Preserve failed assembly evidence, never publish runnable
+                # children after an unexpected error in parent finalization.
+                rows = state["missions"]
+                new_rows = [row for row in rows if row.get("id") not in original_ids]
+                new_ids = {row.get("id") for row in new_rows}
+                parent_ids = {row.get("parentMissionId") for row in new_rows}
+                now = utc_now()
+                for row in rows:
+                    if row.get("id") not in new_ids and row.get("id") not in parent_ids:
+                        continue
+                    context = row.get("analysisContext") if isinstance(row.get("analysisContext"), dict) else {}
+                    if (context.get("kind") not in {"ai_trade_council_parent", "ai_trade_council_vote"}
+                            or row.get("status") not in {"queued", "running", "waiting_approval"}):
+                        continue
+                    row.update(status="blocked", phase="council_queue_incomplete",
+                               errorCode="council_queue_incomplete", completedAt=now,
+                               updatedAt=now, result="Council cohort assembly failed before dispatch.")
+                    execution = row.get("execution")
+                    if isinstance(execution, dict):
+                        execution.update(dispatchState="blocked", completedAt=now,
+                                         processStarted=False, nextAttemptAt=None)
+                    state["dirty"] = True
+                raise
+            finally:
+                del COUNCIL_MISSION_BATCH.state
+                if state["dirty"]:
+                    save_missions(state["missions"])
+
+
 def save_missions(missions: list[dict]) -> None:
+    batch = getattr(COUNCIL_MISSION_BATCH, "state", None)
+    if batch is not None:
+        batch.update(missions=missions, dirty=True)
+        return
     with MISSIONS_LOCK:
         # Missions are an audit/history source for Mission Archivist. Do not
         # silently discard older records when the active queue grows.
@@ -98252,6 +99177,7 @@ def create_mission(
     _trusted_deep_research_prompt: str | None = None,
     _trusted_manager_analysis: dict | None = None,
     _trusted_optimization_publication_staging: dict | None = None,
+    _trusted_sentiment_news: dict | None = None,
 ) -> dict:
     raw_prompt = str(payload.get("prompt") or payload.get("detail") or payload.get("title") or "Review mission packet.").strip()
     if contains_potential_secret(raw_prompt):
@@ -98566,6 +99492,8 @@ def create_mission(
                 raise DataIntegrityError(
                     "Meeting implementation Mission idempotency record lost its private prompt invariant."
                 )
+            if _trusted_sentiment_news is not None and existing.get("sentimentNewsContext") != _trusted_sentiment_news:
+                raise DataIntegrityError("Daily news idempotency marker changed.")
             return existing
         raise RequestError("Idempotency key is already used by a different mission scope.", 409)
 
@@ -98595,6 +99523,16 @@ def create_mission(
         "updatedAt": now,
         "completedAt": None,
     }
+    if _trusted_sentiment_news is not None:
+        mission["sentimentNewsContext"] = copy.deepcopy(_trusted_sentiment_news)
+        if (not sentiment_news_daily.context(mission) or status != "queued"
+                or safe_workflow_context or analysis_context or parent_mission_id
+                or target_id != "left_signal_cube" or report_type != "sentiment_news_daily_report"
+                or model_tier != "specialist_fast" or risk == "high"):
+            raise DataIntegrityError("Daily news escaped its private read-only constructor.")
+        _sentiment_news_service().assignment(mission)
+        mission["budget"].update({"timeoutSeconds": sentiment_news_daily.TIMEOUT_SECONDS,
+                                 "outputLimitChars": sentiment_news_ai.MAX_OUTPUT_CHARS, "maxRuns": 1})
     if _trusted_manager_analysis is not None:
         if (requester != "manager" or tool_id != "codex_cli_task"
             or _trusted_manager_analysis.get("ownerAgentId") != agent_id
@@ -101144,10 +102082,72 @@ def _release_manager_dispatch_reservation(mission_id: str, worker_id: str) -> No
 
 def claim_auto_mission(mission_id: str, worker_id: str) -> dict | None:
     with AI_TRADE_COUNCIL_QUEUE_LOCK:
-        if mission_id in MANAGER_READ_ONLY_COHORT.snapshot()["activeMissionIds"]:
-            with PARENT_MISSION_REFRESH_LOCK:
-                return _claim_auto_mission_unlocked(mission_id, worker_id)
-        return _claim_auto_mission_unlocked(mission_id, worker_id)
+        # Claim and the small in-memory parent progress update are one write.
+        # Exclude a concurrent full aggregation, without running synthesis here.
+        with PARENT_MISSION_REFRESH_LOCK:
+            return _claim_auto_mission_unlocked(mission_id, worker_id)
+
+
+def _council_preparation_deadline(mission: dict, timeout_seconds: int) -> datetime | None:
+    """Local preparation has its own fixed budget inside the automatic round."""
+    if not _council_automatic_vote(mission):
+        return None
+    context = mission.get("analysisContext") or {}
+    deadline = parse_iso(context.get("roundDeadlineAt"))
+    if deadline is None:
+        return datetime.now(timezone.utc)
+    # Keep the complete role timeout, 30s runner transport/shutdown allowance,
+    # and 5s finalization reserve. Heartbeats never move this boundary.
+    return deadline - timedelta(seconds=timeout_seconds + 35)
+
+
+def _begin_council_runner_lease(mission_id: str, lease_id: str, timeout_seconds: int) -> dict | None:
+    """Transition once, after preparation, without extending the shared round."""
+    with MISSIONS_LOCK:
+        missions = load_missions()
+        for mission in missions:
+            if mission.get("id") != mission_id:
+                continue
+            execution = mission.get("execution") or {}
+            now = datetime.now(timezone.utc)
+            preparation_deadline = parse_iso(execution.get("preparationDeadlineAt"))
+            deadline = parse_iso((mission.get("analysisContext") or {}).get("roundDeadlineAt"))
+            if (MISSION_WORKER_STOP.is_set() or not _council_automatic_vote(mission)
+                or mission.get("status") != "running"
+                or execution.get("dispatchState") != "running"
+                or execution.get("leaseId") != lease_id
+                or execution.get("leasePhase") != "preparing"
+                or execution.get("processStarted") is True
+                or preparation_deadline is None or now >= preparation_deadline
+                or deadline is None or now + timedelta(seconds=timeout_seconds + 35) >= deadline):
+                return None
+            started_at = now.isoformat()
+            execution.update({
+                "leasePhase": "executing",
+                "runnerStartedAt": started_at,
+                "timeoutAt": min(now + timedelta(seconds=timeout_seconds + 30),
+                                 deadline - timedelta(seconds=5)).isoformat(),
+                "heartbeatAt": started_at,
+            })
+            mission["execution"] = execution
+            mission["heartbeatAt"] = started_at
+            mission["updatedAt"] = started_at
+            save_missions(missions)
+            return mission
+    return None
+
+
+def _auto_mission_watchdog_deadline(mission: dict, grace_seconds: int) -> datetime | None:
+    execution = mission.get("execution") or {}
+    timeout_at = parse_iso(execution.get("timeoutAt"))
+    if timeout_at is None:
+        return None
+    if _council_automatic_vote(mission) and execution.get("leasePhase") in {"preparing", "executing"}:
+        # Council execution already includes transport/shutdown time. Adding the
+        # general worker grace here could outlive the fixed automatic round.
+        deadline = parse_iso((mission.get("analysisContext") or {}).get("roundDeadlineAt"))
+        return min(timeout_at, deadline - timedelta(seconds=5)) if deadline else timeout_at
+    return timeout_at + timedelta(seconds=grace_seconds)
 
 
 def _ea_factory_mission_dispatch_denied(mission: dict) -> bool:
@@ -101211,6 +102211,7 @@ def _claim_auto_mission_unlocked(
     invalid: tuple[str, str] | None = None
     metatrader_lock_deferred: dict | None = None
     manager_parallel_claim = False
+    council_parallel_claim = False
     with MISSIONS_LOCK:
         missions = load_missions()
         for mission in missions:
@@ -101252,6 +102253,7 @@ def _claim_auto_mission_unlocked(
                 mission_id in MANAGER_READ_ONLY_COHORT.snapshot()["activeMissionIds"]
                 and _manager_parallel_read_only_candidate(mission, missions)
             )
+            council_parallel_claim = _is_ai_trade_council_vote_mission(mission)
             now = utc_now()
             lease_id = safe_id(None, "lease")
             budget = mission.get("budget") if isinstance(mission.get("budget"), dict) else {}
@@ -101295,6 +102297,15 @@ def _claim_auto_mission_unlocked(
                 "nextAttemptAt": None,
                 "lastDeferredReason": None,
             })
+            preparation_deadline = _council_preparation_deadline(mission, timeout_seconds)
+            if preparation_deadline is not None:
+                execution.update({
+                    "leasePhase": "preparing",
+                    "preparationStartedAt": now,
+                    "preparationDeadlineAt": preparation_deadline.isoformat(),
+                    "runnerStartedAt": None,
+                    "timeoutAt": preparation_deadline.isoformat(),
+                })
             mission["execution"] = execution
             if manager_parallel_claim:
                 execution["concurrencyGroup"] = "manager_read_only_parallel_3"
@@ -101302,7 +102313,7 @@ def _claim_auto_mission_unlocked(
             parent_id = safe_reference(mission.get("parentMissionId"))
             break
         if claimed:
-            if manager_parallel_claim:
+            if manager_parallel_claim or council_parallel_claim:
                 _update_claimed_manager_parent_in_memory(parent_id, missions)
             save_missions(missions)
     if invalid:
@@ -101334,7 +102345,7 @@ def _claim_auto_mission_unlocked(
             (claimed.get("execution") or {}).get("authorizationPolicyVersion")
         ),
     })
-    if parent_id and not manager_parallel_claim:
+    if parent_id and not (manager_parallel_claim or council_parallel_claim):
         refresh_parent_mission(parent_id)
     return claimed
 
@@ -101342,8 +102353,9 @@ def _claim_auto_mission_unlocked(
 def _update_claimed_manager_parent_in_memory(parent_id: str, missions: list[dict]) -> None:
     """Publish active child counts in the same durable claim transaction.
 
-    Both Mission and parent locks are held. Final synthesis stays in the normal
-    Report-verified completion path; claiming creates no additional Report.
+    Both Mission and parent locks are held for Manager and Council claims. Final
+    synthesis stays in the normal Report-verified completion path; claiming
+    creates no additional Report, consensus, or trade dispatch.
     """
     parent = next(row for row in missions if row.get("id") == parent_id)
     children = [row for row in missions if row.get("parentMissionId") == parent_id]
@@ -101400,7 +102412,7 @@ def reconcile_timed_out_running_missions() -> int:
     candidates: list[tuple[str, str]] = []
     for mission in load_missions():
         execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
-        timeout_at = parse_iso(execution.get("timeoutAt"))
+        timeout_at = _auto_mission_watchdog_deadline(mission, config["timeoutWatchdogGraceSeconds"])
         if (
             mission.get("status") != "running"
             or mission.get("executionMode") != "auto_guarded"
@@ -101408,7 +102420,7 @@ def reconcile_timed_out_running_missions() -> int:
             or execution.get("dispatchState") != "running"
             or not execution.get("leaseId")
             or not timeout_at
-            or now < timeout_at + timedelta(seconds=config["timeoutWatchdogGraceSeconds"])
+            or now < timeout_at
         ):
             continue
         candidates.append((str(mission.get("id") or ""), str(execution.get("leaseId") or "")))
@@ -101419,43 +102431,37 @@ def reconcile_timed_out_running_missions() -> int:
             continue
         tree_terminated: bool | None = None
         process_was_started = False
-        with MISSION_WORKER_PROCESS_LOCK:
-            tracked = MISSION_WORKER_PROCESSES.get(mission_id)
-            active_process = (
-                tracked.get("process")
-                if isinstance(tracked, dict)
-                else None
-            )
-            active_job_holder = (
-                tracked.get("jobHolder")
-                if isinstance(tracked, dict)
-                else None
-            )
-        if isinstance(active_process, subprocess.Popen):
-            process_was_started = True
-            if active_process.poll() is None:
-                tree_terminated = _terminate_command_process_tree(
-                    active_process,
-                    active_job_holder if isinstance(active_job_holder, dict) else None,
-                )
-
+        active_process = None
+        active_job_holder = None
         failed = None
         parent_id = None
         with MISSIONS_LOCK:
             missions = load_missions()
             for mission in missions:
                 execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
-                timeout_at = parse_iso(execution.get("timeoutAt"))
+                timeout_at = _auto_mission_watchdog_deadline(mission, config["timeoutWatchdogGraceSeconds"])
                 if (
                     mission.get("id") != mission_id
                     or mission.get("status") != "running"
                     or execution.get("leaseId") != lease_id
                     or execution.get("dispatchState") != "running"
                     or not timeout_at
-                    or datetime.now(timezone.utc)
-                    < timeout_at + timedelta(seconds=config["timeoutWatchdogGraceSeconds"])
+                    or datetime.now(timezone.utc) < timeout_at
                 ):
                     continue
+                # A candidate may have transitioned from preparation to its
+                # execution lease since the scan. Recheck before touching its
+                # process, under the same lock used by the launch boundary.
+                with MISSION_WORKER_PROCESS_LOCK:
+                    tracked = MISSION_WORKER_PROCESSES.get(mission_id)
+                    if (_council_automatic_vote(mission)
+                        and execution.get("leasePhase") in {"preparing", "executing"}
+                        and (not isinstance(tracked, dict) or tracked.get("leaseId") != lease_id)):
+                        tracked = None
+                    active_process = tracked.get("process") if isinstance(tracked, dict) else None
+                    active_job_holder = tracked.get("jobHolder") if isinstance(tracked, dict) else None
+                if isinstance(active_process, subprocess.Popen):
+                    process_was_started = True
                 failed_at = utc_now()
                 mission["status"] = "failed"
                 mission["phase"] = "auto_worker_timeout_watchdog"
@@ -101485,6 +102491,28 @@ def reconcile_timed_out_running_missions() -> int:
                 save_missions(missions)
         if not failed:
             continue
+
+        # The exact lease is now durably terminal, so it cannot launch/restart.
+        # Terminate only the captured process outside the store lock; Windows
+        # fallback shutdown can take seconds and must not stall peer workers.
+        if isinstance(active_process, subprocess.Popen):
+            tree_terminated = _terminate_command_process_tree(
+                active_process,
+                active_job_holder if isinstance(active_job_holder, dict) else None,
+            )
+            with MISSIONS_LOCK:
+                missions = load_missions()
+                for mission in missions:
+                    execution = mission.get("execution") or {}
+                    if (mission.get("id") == mission_id
+                        and mission.get("status") == "failed"
+                        and mission.get("errorCode") == "auto_worker_timeout"
+                        and execution.get("leaseId") == lease_id):
+                        execution["processTreeTerminated"] = bool(tree_terminated)
+                        mission["execution"] = execution
+                        failed = mission
+                        save_missions(missions)
+                        break
 
         try:
             report = create_report({
@@ -101782,6 +102810,21 @@ def _portal_evidence_open_failure_probe(
 
 
 def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: dict) -> dict | None:
+    news_mission = find_mission(mission_id) or {}
+    if sentiment_news_daily.context(news_mission):
+        if result.get("ok") is True:
+            try:
+                if runner.get("ok") is not True or runner.get("processStarted") is not True:
+                    raise ValueError("Daily news requires a completed real process receipt")
+                assignment = _sentiment_news_service().assignment(news_mission)
+                sentiment_news_ai.validate_result(result.get("newsAnalysis"), assignment)
+            except (ValueError, TypeError, OSError):
+                result = {"ok": False, "workStatus": "failed", "status": "news_analysis_invalid",
+                          "finalMessage": "Daily news output failed full event and source validation."}
+        finished = _finish_auto_mission(mission_id, lease_id, runner, result)
+        if finished is not None:
+            _sentiment_news_service().complete(news_mission, runner, result, finished)
+        return finished
     if (mission_id in MANAGER_READ_ONLY_COHORT.snapshot()["activeMissionIds"]
         or (find_mission(mission_id) or {}).get("managerAnalysisContext")):
         # Publish each child's terminal state and Report while excluding parent
@@ -104021,6 +105064,15 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
     agent_id = str(mission.get("owner") or "manager")
     tool_id = str(mission.get("toolId") or "")
     config = mission_worker_config()
+    is_daily_news = sentiment_news_daily.context(mission) is not None
+    if is_daily_news:
+        reason = _sentiment_news_service().preflight(mission)
+        if reason in {"council_busy", "council_window"}:
+            _defer_auto_mission_with_round_deadline(mission, reason, 30)
+            return
+        if reason:
+            block_auto_mission(mission_id, reason)
+            return
     new_bar_error = _council_new_bar_start_error(mission)
     if new_bar_error:
         _expire_ai_trade_council_vote_mission(
@@ -104216,6 +105268,8 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
         return
     corrective_open_hourly_stamps: list[float] = []
     active_registered = False
+    runner = None
+    claimed_lease_id = None
     try:
         if MISSION_WORKER_STOP.is_set():
             return
@@ -104224,6 +105278,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             return
         execution = claimed.get("execution") if isinstance(claimed.get("execution"), dict) else {}
         lease_id = str(execution.get("leaseId") or "")
+        claimed_lease_id = lease_id
         if MISSION_WORKER_STOP.is_set():
             finish_auto_mission(
                 mission_id, lease_id,
@@ -104436,6 +105491,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                                 {"ok": False, "workStatus": "blocked", "status": "manager_assignment_invalid", "blockedCapability": "manager_assignment_invalid"})
             return
         worker_result_profile = (
+            sentiment_news_ai.RESULT_PROFILE if is_daily_news else
             manager_analysis.RESULT_PROFILE if manager_context else
             fx_trend.RESULT_PROFILE
             if claimed_workflow_action_id == fx_trend.ACTION_ID
@@ -104488,6 +105544,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             is_council_vote
             or is_manager_parallel
             or bool(manager_context)
+            or is_daily_news
             or is_public_web_read_only
             or ea_factory_read_only
             or worker_result_profile == fx_trend.RESULT_PROFILE
@@ -104944,7 +106001,9 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                 if worker_result_profile == "trading_system_research"
                 else max(40000, output_limit + 10000)
             )
-            worker_prompt = fx_trend_worker_prompt if fx_trend_worker_prompt is not None else manager_analysis.render_prompt(manager_context) if manager_context else radar_worker_prompt
+            worker_prompt = (sentiment_news_ai.render_prompt(_sentiment_news_service().assignment(claimed))
+                             if is_daily_news else fx_trend_worker_prompt if fx_trend_worker_prompt is not None
+                             else manager_analysis.render_prompt(manager_context) if manager_context else radar_worker_prompt)
             if isinstance(ea_factory_source_review_transport, dict):
                 worker_prompt += str(
                     ea_factory_source_review_transport.get("promptBlock") or ""
@@ -104956,10 +106015,22 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                     expected_lease_id=lease_id,
                 )
                 return
+            automatic_council_run = is_council_vote and _council_automatic_vote(claimed)
+            if automatic_council_run:
+                started_claim = _begin_council_runner_lease(mission_id, lease_id, timeout_seconds)
+                if started_claim is None:
+                    _expire_ai_trade_council_vote_mission(
+                        mission_id, "council_round_deadline_insufficient",
+                        expected_status="running", expected_lease_id=lease_id,
+                    )
+                    return
+                claimed = started_claim
             runner = ({"ok": False, "exitCode": "cancelled", "processStarted": False,
                        "output": json.dumps({"ok": False, "status": "bridge_shutdown_cancelled",
                                              "message": "Bridge shutdown cancelled this Mission before process start."})}
-                      if MISSION_WORKER_STOP.is_set() else run_safe_command(
+                      if MISSION_WORKER_STOP.is_set() else (
+                (lambda command, **kwargs: _sentiment_news_service().run(claimed, command, **kwargs))
+                if is_daily_news else run_safe_command)(
                 runner_command,
                 timeout=timeout_seconds + 30,
                 output_limit=runner_transport_limit,
@@ -104968,6 +106039,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                 cancel_event=MISSION_WORKER_STOP,
                 tracking_key=mission_id,
                 **({"factory_start_lease": lease_id} if isinstance(ea_factory_worker_sandbox, dict) else {}),
+                **({"council_start_lease": lease_id} if automatic_council_run else {}),
                 structured_json_output=True,
             ))
         finally:
@@ -104998,14 +106070,22 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             }
         finish_auto_mission(mission_id, lease_id, runner, result)
     except Exception:
-        current = find_mission(mission_id)
+        current = find_mission(mission_id) if claimed_lease_id else None
         execution = current.get("execution") if isinstance((current or {}).get("execution"), dict) else {}
-        lease_id = str(execution.get("leaseId") or "")
-        if lease_id:
+        if claimed_lease_id and execution.get("leaseId") == claimed_lease_id:
+            # A persistence/validation exception can occur after the guarded
+            # runner returned. Preserve its durable spawn evidence when the
+            # fallback records failure; never relabel an actual run as unstarted
+            # or finalize a newer worker's lease after this invocation lost it.
+            runner_evidence = runner if isinstance(runner, dict) else {}
             finish_auto_mission(
                 mission_id,
-                lease_id,
-                {"processStarted": False, "exitCode": "internal_worker_error"},
+                claimed_lease_id,
+                {
+                    "processStarted": bool(execution.get("processStarted") or runner_evidence.get("processStarted")),
+                    "processTreeTerminated": bool(execution.get("processTreeTerminated") or runner_evidence.get("processTreeTerminated")),
+                    "exitCode": "internal_worker_error",
+                },
                 {
                     "ok": False,
                     "status": "internal_worker_error",
@@ -105048,6 +106128,10 @@ def mission_worker_loop(worker_id: str) -> None:
                 MISSION_WORKER_WAKE.wait(config["idlePollSeconds"])
                 MISSION_WORKER_WAKE.clear()
                 continue
+            try:
+                _sentiment_news_service().tick()
+            except (ValueError, TypeError, OSError, DataIntegrityError):
+                append_audit({"type": "sentiment_news.daily_admission_blocked", "reason": "invalid_local_input"})
             mission = find_next_auto_mission(council_only=False, manager_parallel_only=False)
             if mission:
                 process_auto_mission(worker_id, mission)
@@ -111776,12 +112860,11 @@ def _council_new_bar_start_error(mission: dict) -> str | None:
     ):
         return "council_new_bar_historical_snapshot_skipped"
     admitted_at = parse_iso(str(automation.get("quotaAdmittedAt") or ""))
-    expires_at = parse_iso(str(automation.get("triggerExpiresAt") or ""))
+    expires_at = _ai_trade_council_automatic_deadline(automation)
     now = datetime.now(timezone.utc)
     if (
         admitted_at is None or expires_at is None
         or admitted_at > now or expires_at <= admitted_at
-        or (expires_at - admitted_at).total_seconds() > 60
     ):
         return "council_new_bar_admission_invalid"
     if now >= expires_at:
@@ -113629,6 +114712,7 @@ def main() -> int:
     httpd: BridgeHTTPServer | None = None
     actual_port = int(args.port)
     try:
+        initialize_research_sheet_process_isolation()
         ensure_memory_dir()
         ensure_operator_mode_store()
         ensure_collaboration_schedule_store()
@@ -113703,6 +114787,7 @@ def main() -> int:
         )
         start_dashboard_workflow_scheduler()
         start_ai_trade_council_automation_scheduler()
+        start_research_sheet_service()
         RADAR_IMAGE_ADAPTER_RUNTIME_ENABLED = True
         queued_radar_publisher_images = queue_latest_radar_publisher_image_enrichment()
         append_audit({
@@ -113754,6 +114839,7 @@ def main() -> int:
         pass
     finally:
         RADAR_IMAGE_ADAPTER_RUNTIME_ENABLED = False
+        stop_research_sheet_service()
         close_full_agent_gateway()
         if httpd is not None:
             httpd.server_close()

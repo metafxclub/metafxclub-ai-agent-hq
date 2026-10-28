@@ -51,6 +51,7 @@
       "validUntilBarTimeDomain": "mt4_broker_clock",
       "decisionExpirySource": "round_deadline_at_utc",
       "roundDeadlineSeconds": 240,
+      "automaticTotalBudgetSeconds": 300,
       "maximumSnapshotSpreadPoints": 1000,
       "maximumNewsAgeSeconds": 86400,
       "maximumFutureEvidenceSkewSeconds": 300,

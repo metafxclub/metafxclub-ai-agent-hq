@@ -64,6 +64,30 @@ try {
     $ciSentinel = Join-Path $ciInstalled 'data\runtime\smoke-preserved-user-data.txt'
     [IO.File]::WriteAllText($ciSentinel, 'CI fixture preserved across rollback and upgrade', $ciUtf8)
     $ciSentinelHash = (Get-FileHash -LiteralPath $ciSentinel -Algorithm SHA256).Hash
+    # The updater must not interrupt a running fixture, even when it is healthy.
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File $ciLifecycle -Action Start -Port $ciPort -GracefulOnly
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot start the owned active-upgrade fixture.' }
+    $ciActiveHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$ciPort/api/health" -TimeoutSec 15
+    if ($ciActiveHealth.ok -ne $true -or [string]$ciActiveHealth.status -cne 'ready') { throw 'Active-upgrade fixture is not ready.' }
+    $ciProtectedFiles = @('VERSION', 'backend\local-runner\bridge_server.py', 'data\runtime\operator-mode.json', 'data\runtime\bridge-endpoint.json', 'data\runtime\smoke-preserved-user-data.txt')
+    $ciProtectedHashes = @{}
+    foreach ($ciRelative in $ciProtectedFiles) {
+        $ciProtectedHashes[$ciRelative] = (Get-FileHash -LiteralPath (Join-Path $ciInstalled $ciRelative) -Algorithm SHA256).Hash
+    }
+    $ciActiveDeniedExit = Invoke-FixtureInstaller -ExtraArguments @('-PackageUpgradeSmoke')
+    if ($ciActiveDeniedExit -eq 0) { throw 'Running fixture upgrade was not rejected.' }
+    $ciStillActiveHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$ciPort/api/health" -TimeoutSec 15
+    if ($ciStillActiveHealth.ok -ne $true -or $ciStillActiveHealth.startedAt -cne $ciActiveHealth.startedAt) { throw 'Rejected update interrupted the running fixture.' }
+    foreach ($ciRelative in $ciProtectedFiles) {
+        if ((Get-FileHash -LiteralPath (Join-Path $ciInstalled $ciRelative) -Algorithm SHA256).Hash -cne $ciProtectedHashes[$ciRelative]) {
+            throw 'Rejected update changed a protected fixture file.'
+        }
+    }
+    # Only this isolated fixture owner deliberately enters maintenance.
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File $ciLifecycle -Action Stop -Port $ciPort -GracefulOnly
+    if ($LASTEXITCODE -ne 0) { throw 'Owned fixture could not enter graceful offline maintenance.' }
     $ciFailedExit = Invoke-FixtureInstaller -ExtraArguments @('-PackageUpgradeSmoke','-PackageSmokeFailAfterPublish')
     if ($ciFailedExit -eq 0) { throw 'Forced post-publish failure unexpectedly succeeded.' }
     if ((Get-Content -LiteralPath $ciVersion -Raw).Trim() -cne $ciOldVersion) { throw 'Rollback did not restore previous VERSION.' }
@@ -76,7 +100,7 @@ try {
     if ((Get-FileHash -LiteralPath $ciSentinel -Algorithm SHA256).Hash -cne $ciSentinelHash) { throw 'Upgrade changed preserved user data.' }
     $ciHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$ciPort/api/health" -TimeoutSec 15
     if ($ciHealth.ok -ne $true -or [string]$ciHealth.status -cne 'ready') { throw 'Installed Bridge health is not ready.' }
-    Write-Output 'CI fresh install, real health, forced rollback and upgrade passed; OAuth is an inert fixture and no EA was attached.'
+    Write-Output 'CI fresh install, real health, active-upgrade refusal, offline rollback and upgrade passed; OAuth is an inert fixture and no EA was attached.'
 }
 finally {
     # The lifecycle script verifies the installed path, Python identity and PID.
@@ -84,7 +108,7 @@ finally {
     try {
         if ($ciPort -gt 0 -and (Test-Path -LiteralPath $ciLifecycle -PathType Leaf)) {
             & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-                -File $ciLifecycle -Action Stop -Port $ciPort
+                -File $ciLifecycle -Action Stop -Port $ciPort -GracefulOnly
             if ($LASTEXITCODE -ne 0) { throw 'Owned CI Bridge cleanup could not be confirmed.' }
         }
     }

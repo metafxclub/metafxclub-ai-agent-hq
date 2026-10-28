@@ -95,7 +95,7 @@ jobs:
         shell: pwsh
         working-directory: frontend/sentiment-universe-src
         run: |
-          node --test tests/market-data.test.mjs tests/news-explainers.test.mjs tests/sentiment-data.test.mjs tests/hq-embed.test.mjs
+          node --test tests/market-data.test.mjs tests/news-explainers.test.mjs tests/news-ai.test.mjs tests/sentiment-data.test.mjs tests/hq-embed.test.mjs
           if ($LASTEXITCODE -ne 0) { throw "Sentiment frontend regression failed" }
 
   publish:
@@ -308,6 +308,7 @@ jobs:
                 "backend\local-runner\sentiment_universe\live_backend\mt5_setup.py",
                 "backend\local-runner\sentiment_universe\live_backend\myfxbook.py",
                 "backend\local-runner\sentiment_universe\live_backend\news.py",
+                "backend\local-runner\sentiment_universe\live_backend\news_ai_overlay.py",
                 "backend\local-runner\sentiment_universe\live_backend\public_snapshot.py",
                 "backend\local-runner\sentiment_universe\live_backend\secure_store.py",
                 "backend\local-runner\sentiment_universe\live_backend\server.py",
@@ -322,6 +323,7 @@ jobs:
                 "backend\local-runner\sentiment_universe\tests\test_live_mt5_setup.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_myfxbook.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_news.py",
+                "backend\local-runner\sentiment_universe\tests\test_news_ai_overlay.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_server.py",
                 "frontend\public\sentiment-universe\index.html",
                 "frontend\public\sentiment-universe\sentiment-universe.js",
@@ -365,6 +367,9 @@ jobs:
               "backend\local-runner\hq_backend\research\radar_image_adapter.py",
               "backend\local-runner\hq_backend\research\radar_prompt.py",
               "backend\local-runner\hq_backend\research\radar_publication.py",
+              "backend\local-runner\hq_backend\research\sheet_executor.py",
+              "backend\local-runner\hq_backend\research\sentiment_news_ai.py",
+              "backend\local-runner\hq_backend\research\sentiment_news_daily.py",
               "contracts\research\radar-website-source-policy-v1.json",
               "contracts\research\radar-website-tool-compatibility-v1.json",
               "contracts\reports\report-contract.json",
@@ -386,6 +391,7 @@ jobs:
               "VERSION",
               "requirements-runner.txt",
               "installer\install.ps1",
+              "installer\upgrade_guard.py",
               "installer\bootstrap\pip-26.2.1-py3-none-any.whl",
               "installer\bootstrap\README.md",
               "2-SETUP-GOOGLE-HQ.bat",
@@ -631,8 +637,8 @@ jobs:
               Stop-DegradedFixture -FixtureProcess $foreignProcess
               $foreignProcess = $null
 
-              # Positive case: reproduce a preserved v0.9.2 install whose exact
-              # owned Bridge is listening but Health is degraded.
+              # An owned legacy listener must also be rejected without being
+              # stopped. The fixture owner explicitly enters maintenance next.
               $env:LOCALAPPDATA = Join-Path $smokeRoot "LocalAppData"
               for ($legacyAttempt = 1; $legacyAttempt -le 5; $legacyAttempt++) {
                 $smokePort = Get-SmokePort
@@ -663,8 +669,32 @@ jobs:
               }
               Assert-DegradedFixture -Port $smokePort
 
-              # Force one failure after publish. Last-good must be restored and
-              # its previously degraded exact listener must be running again.
+              $activeUpgradeProtectedFiles = @("VERSION", "backend\local-runner\bridge_server.py", "data\runtime\operator-mode.json", "data\runtime\bridge-endpoint.json")
+              $activeUpgradeHashes = @{}
+              foreach ($relative in $activeUpgradeProtectedFiles) {
+                $activeUpgradeHashes[$relative] = (Get-FileHash -LiteralPath (Join-Path $installedRoot $relative) -Algorithm SHA256).Hash
+              }
+              & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $packageRoot "installer\install.ps1") `
+                -Port $smokePort -EndpointConfirmed -PackageSmoke -PackageUpgradeSmoke `
+                -SkipShortcuts -SkipAutostart -SkipGoogleSetup
+              if ($LASTEXITCODE -eq 0 -or $legacyProcess.HasExited) {
+                throw "Active legacy upgrade was accepted or stopped its running Bridge."
+              }
+              foreach ($relative in $activeUpgradeProtectedFiles) {
+                if ((Get-FileHash -LiteralPath (Join-Path $installedRoot $relative) -Algorithm SHA256).Hash -cne $activeUpgradeHashes[$relative]) {
+                  throw "Rejected active upgrade changed a protected fixture file."
+                }
+              }
+              Assert-DegradedFixture -Port $smokePort
+              & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                -File $installedLifecycle -Action Stop -Port $smokePort -GracefulOnly
+              if ($LASTEXITCODE -ne 0 -or -not $legacyProcess.WaitForExit(15000)) {
+                throw "Fixture owner could not enter graceful offline maintenance."
+              }
+
+              # Force one failure after publish from an intentionally offline
+              # baseline. Last-good must be restored without reviving it.
               & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
                 -File (Join-Path $packageRoot "installer\install.ps1") `
                 -Port $smokePort -EndpointConfirmed -PackageSmoke -PackageUpgradeSmoke `
@@ -675,10 +705,12 @@ jobs:
               if ((Get-Content -LiteralPath (Join-Path $installedRoot "VERSION") -Raw).Trim() -cne "0.9.2") {
                 throw "Last-good VERSION was not restored after the forced failure."
               }
-              Assert-DegradedFixture -Port $smokePort
+              if (Get-NetTCPConnection -LocalPort $smokePort -State Listen -ErrorAction SilentlyContinue) {
+                throw "Offline rollback unexpectedly started a Bridge listener."
+              }
 
-              # Run the real in-place upgrade. It must stop only the exact old
-              # Bridge, publish the candidate, migrate state, and reach ready.
+              # Run the in-place upgrade only after explicit offline maintenance.
+              # It publishes the candidate, migrates state, and reaches ready.
               & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
                 -File (Join-Path $packageRoot "installer\install.ps1") `
                 -Port $smokePort -EndpointConfirmed -PackageSmoke -PackageUpgradeSmoke `
@@ -688,6 +720,7 @@ jobs:
               }
 
               foreach ($requiredInstalledFile in @(
+                "installer\upgrade_guard.py",
                 "backend\local-runner\sentiment_universe\live_backend\__init__.py",
                 "backend\local-runner\sentiment_universe\live_backend\connect.html",
                 "backend\local-runner\sentiment_universe\live_backend\connect.js",
@@ -696,6 +729,7 @@ jobs:
                 "backend\local-runner\sentiment_universe\live_backend\mt5_setup.py",
                 "backend\local-runner\sentiment_universe\live_backend\myfxbook.py",
                 "backend\local-runner\sentiment_universe\live_backend\news.py",
+                "backend\local-runner\sentiment_universe\live_backend\news_ai_overlay.py",
                 "backend\local-runner\sentiment_universe\live_backend\public_snapshot.py",
                 "backend\local-runner\sentiment_universe\live_backend\secure_store.py",
                 "backend\local-runner\sentiment_universe\live_backend\server.py",
@@ -710,6 +744,7 @@ jobs:
                 "backend\local-runner\sentiment_universe\tests\test_live_mt5_setup.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_myfxbook.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_news.py",
+                "backend\local-runner\sentiment_universe\tests\test_news_ai_overlay.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_server.py",
                 "frontend\public\sentiment-universe\index.html",
                 "frontend\public\sentiment-universe\sentiment-universe.js",
@@ -753,6 +788,9 @@ jobs:
                 "backend\local-runner\hq_backend\research\radar_image_adapter.py",
                 "backend\local-runner\hq_backend\research\radar_prompt.py",
                 "backend\local-runner\hq_backend\research\radar_publication.py",
+                "backend\local-runner\hq_backend\research\sheet_executor.py",
+                "backend\local-runner\hq_backend\research\sentiment_news_ai.py",
+                "backend\local-runner\hq_backend\research\sentiment_news_daily.py",
                 "contracts\research\radar-website-source-policy-v1.json",
                 "contracts\research\radar-website-tool-compatibility-v1.json",
                 "contracts\reports\report-contract.json",
@@ -836,7 +874,7 @@ jobs:
               finally {
                 if ($healthProbeStarted) {
                   & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
-                    -File $lifecyclePath -Action Stop -Port $smokePort
+                    -File $lifecyclePath -Action Stop -Port $smokePort -GracefulOnly
                   if ($LASTEXITCODE -ne 0) {
                     throw "Legacy operator-mode upgrade smoke could not stop its verified Bridge."
                   }
@@ -891,7 +929,7 @@ jobs:
               try {
                 if ($installedLifecycle -and (Test-Path -LiteralPath $installedLifecycle -PathType Leaf)) {
                   & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
-                    -File $installedLifecycle -Action Stop -Port $smokePort | Out-Null
+                    -File $installedLifecycle -Action Stop -Port $smokePort -GracefulOnly | Out-Null
                   if ($LASTEXITCODE -ne 0) {
                     $cleanupFailures.Add("installed-lifecycle")
                   }
@@ -940,6 +978,8 @@ jobs:
           $verifiedClone = Join-Path $verifiedRoot "source"
           $verifiedLocalAppData = Join-Path $verifiedRoot "LocalAppData"
           $verifiedOriginalLocalAppData = $env:LOCALAPPDATA
+          $verifiedLifecycle = $null
+          $verifiedPort = 0
           $verifiedLegacyOAuthEnvironmentNames = @(
             "METAFX_GOOGLE_OAUTH_CLIENT_ID",
             "METAFX_GOOGLE_OAUTH_CLIENT_SECRET",
@@ -1011,10 +1051,12 @@ jobs:
             }
 
             $verifiedInstalledRoot = Join-Path $verifiedLocalAppData "Metafxclub\AI-Agent-HQ"
+            $verifiedLifecycle = Join-Path $verifiedInstalledRoot "scripts\start-local-bridge.ps1"
             if (Test-Path -LiteralPath (Join-Path $verifiedInstalledRoot "data\runtime\ci-ignored-source-sentinel.txt")) {
               throw "Verified Git staging copied an ignored worktree file into Runtime."
             }
             foreach ($verifiedRuntimeFile in @(
+              "installer\upgrade_guard.py",
                 "backend\local-runner\sentiment_universe\live_backend\__init__.py",
                 "backend\local-runner\sentiment_universe\live_backend\connect.html",
                 "backend\local-runner\sentiment_universe\live_backend\connect.js",
@@ -1023,6 +1065,7 @@ jobs:
                 "backend\local-runner\sentiment_universe\live_backend\mt5_setup.py",
                 "backend\local-runner\sentiment_universe\live_backend\myfxbook.py",
                 "backend\local-runner\sentiment_universe\live_backend\news.py",
+                "backend\local-runner\sentiment_universe\live_backend\news_ai_overlay.py",
                 "backend\local-runner\sentiment_universe\live_backend\public_snapshot.py",
                 "backend\local-runner\sentiment_universe\live_backend\secure_store.py",
                 "backend\local-runner\sentiment_universe\live_backend\server.py",
@@ -1037,6 +1080,7 @@ jobs:
                 "backend\local-runner\sentiment_universe\tests\test_live_mt5_setup.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_myfxbook.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_news.py",
+                "backend\local-runner\sentiment_universe\tests\test_news_ai_overlay.py",
                 "backend\local-runner\sentiment_universe\tests\test_live_server.py",
                 "frontend\public\sentiment-universe\index.html",
                 "frontend\public\sentiment-universe\sentiment-universe.js",
@@ -1080,6 +1124,9 @@ jobs:
               "backend\local-runner\hq_backend\research\radar_image_adapter.py",
               "backend\local-runner\hq_backend\research\radar_prompt.py",
               "backend\local-runner\hq_backend\research\radar_publication.py",
+              "backend\local-runner\hq_backend\research\sheet_executor.py",
+              "backend\local-runner\hq_backend\research\sentiment_news_ai.py",
+              "backend\local-runner\hq_backend\research\sentiment_news_daily.py",
               "contracts\research\radar-website-source-policy-v1.json",
               "contracts\research\radar-website-tool-compatibility-v1.json",
               "contracts\reports\report-contract.json",
@@ -1204,6 +1251,12 @@ jobs:
               [EnvironmentVariableTarget]::User
             )
 
+            # The fixture owner, never the updater, requests the maintenance stop.
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+              -File $verifiedLifecycle -Action Stop -Port $verifiedPort -GracefulOnly
+            if ($LASTEXITCODE -ne 0) {
+              throw "Verified Git fixture could not enter offline maintenance."
+            }
             & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
               -File (Join-Path $packageRoot "installer\install.ps1") `
               -Port $verifiedPort -EndpointConfirmed -SkipShortcuts -SkipAutostart `
@@ -1314,14 +1367,23 @@ jobs:
             }
           }
           finally {
-            foreach ($name in $verifiedLegacyOAuthEnvironmentNames) {
-              [Environment]::SetEnvironmentVariable(
-                $name,
-                $verifiedOriginalLegacyOAuthUserEnvironment[$name],
-                [EnvironmentVariableTarget]::User
-              )
+            try {
+              if ($verifiedLifecycle -and $verifiedPort -gt 0 -and (Test-Path -LiteralPath $verifiedLifecycle -PathType Leaf)) {
+                & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                  -File $verifiedLifecycle -Action Stop -Port $verifiedPort -GracefulOnly
+                if ($LASTEXITCODE -ne 0) { throw "Verified Git fixture graceful cleanup was not confirmed." }
+              }
             }
-            $env:LOCALAPPDATA = $verifiedOriginalLocalAppData
+            finally {
+              foreach ($name in $verifiedLegacyOAuthEnvironmentNames) {
+                [Environment]::SetEnvironmentVariable(
+                  $name,
+                  $verifiedOriginalLegacyOAuthUserEnvironment[$name],
+                  [EnvironmentVariableTarget]::User
+                )
+              }
+              $env:LOCALAPPDATA = $verifiedOriginalLocalAppData
+            }
           }
 
           $tagCreatedByThisRun = $false
@@ -1360,12 +1422,21 @@ jobs:
           ชุด Release มี Agent thread/history/artifact runtime แบบ fail-closed และ Source Gateway สำหรับ MT4/MT5; สิทธิ์ Tool/Computer/Live ต้องผ่าน Gate ที่ Runtime ยืนยันจริงก่อนเท่านั้น
           ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Auth, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา
           '@
+              $updatePromptUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/blob/$tag/docs/prompts/update-github-preserve-settings-th.md"
+              $notes += "`n`nสำหรับผู้ที่ติดตั้งอยู่แล้ว: [Prompt อัปเดตโดยเก็บการตั้งค่าเดิม]($updatePromptUrl)`n"
+              $versionNotesPath = Join-Path $env:GITHUB_WORKSPACE "docs/releases/$tag-th.md"
+              if (-not (Test-Path -LiteralPath $versionNotesPath -PathType Leaf)) {
+                throw "Version-specific release notes are missing for $tag."
+              }
+              $notes += "`n" + (Get-Content -LiteralPath $versionNotesPath -Raw -Encoding UTF8)
+              $releaseNotesPath = Join-Path $env:RUNNER_TEMP "metafxclub-release-notes-$tag-$packageNonce.md"
+              [IO.File]::WriteAllText($releaseNotesPath, $notes, (New-Object Text.UTF8Encoding($false)))
 
               gh release create $tag $archive $checksum `
                 --repo $env:GITHUB_REPOSITORY `
                 --target $env:GITHUB_SHA `
                 --title "Metafxclub AI Agent HQ $tag" `
-                --notes $notes
+                --notes-file $releaseNotesPath
               if ($LASTEXITCODE -ne 0) {
                 # The API may have accepted the Release and assets even when
                 # the CLI lost its final response. Probe before cleanup so a

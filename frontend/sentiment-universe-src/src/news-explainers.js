@@ -1,3 +1,5 @@
+import {getEventAi} from './market-data.js';
+
 // Educational summaries checked against the primary sources linked below.
 // These explain definitions; they do not fetch news, fill missing actual values,
 // or turn the fictional calendar into a live forecast. Reviewed 2026-10-24.
@@ -171,7 +173,9 @@ function categoryFor(event) {
 }
 
 export function getNewsExplainer(event) {
+  const ai=getEventAi(event);
+  if(ai)return {title:event.title,lines:[...ai.explanationTh],origin:'ai',generatedAt:ai.generatedAt,sourceRefs:ai.sourceRefs,sourceName:ai.sourceRefs[0].name,sourceUrl:ai.sourceRefs[0].url};
   const explainer = EXPLAINERS[categoryFor(event)];
   // Return a fresh list so one expanded panel cannot mutate another event.
-  return { ...explainer, lines: [...explainer.lines] };
+  return { ...explainer, lines: [...explainer.lines],origin:'dictionary',sourceRefs:[{name:explainer.sourceName,url:explainer.sourceUrl}] };
 }
