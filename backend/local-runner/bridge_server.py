@@ -161,6 +161,9 @@ from hq_backend.ea.ea_factory_optimization import (  # noqa: E402 - durable guar
     OptimizationDomainError,
 )
 from hq_backend.research import fx_news_direct, fx_trend, sentiment_news_ai, sentiment_news_daily  # noqa: E402 - pure research models
+from hq_backend.operations import council_observability  # noqa: E402 - passive local evidence only
+from hq_backend.operations.preflight import build_preflight as build_council_preflight  # noqa: E402
+from hq_backend.operations.diagnostics import build_diagnostics as build_council_diagnostics  # noqa: E402
 from hq_backend.google import google_sheet_hub  # noqa: E402 - backend-only authenticated Sheets adapter
 from hq_backend.trading.mt4_market_watch import (  # noqa: E402 - selected MT4 Market Watch read model
     MAX_MARKET_WATCH_SYMBOLS,
@@ -203,7 +206,7 @@ from hq_backend.research.radar_image_adapter import (  # noqa: E402 - public HTT
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.27"
+BRIDGE_RUNTIME_VERSION = "0.9.28"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -556,6 +559,8 @@ CODEX_RATE_LIMIT_CACHE: dict[str, object] = {
     "fetchedMonotonic": 0.0,
     "invalidated": False,
 }
+# Sanitized observation only; never used to change an admission/quota decision.
+CODEX_RATE_LIMIT_LAST_PROBE: dict[str, object] = {}
 CODEX_STATUS_CACHE_TTL_SECONDS = 30
 CODEX_STATUS_CACHE_STALE_MAX_SECONDS = 5 * 60
 CODEX_STATUS_CACHE: dict[str, object] = {
@@ -76712,6 +76717,20 @@ def codex_rate_limits(force: bool = False) -> dict:
             raw_payload = {"ok": False, "status": "missing"}
         fresh = codex_rate_limits_read_model(raw_payload)
         duration_ms = round((time.perf_counter() - started) * 1000)
+        # Preserve safe probe metadata for operations evidence without changing
+        # the existing cache fallback or quota gate. Never store runner output.
+        probe_exit = runner.get("exitCode")
+        probe_error = ("quota_runner_failed" if not runner.get("ok")
+                       else "quota_response_unavailable" if not fresh.get("ok") else None)
+        last_probe = globals().setdefault("CODEX_RATE_LIMIT_LAST_PROBE", {})
+        last_probe.clear()
+        last_probe.update({
+            "ok": fresh.get("ok") is True, "quota": dict(fresh),
+            "evidence": {"source": "codex_quota_probe", "ok": fresh.get("ok") is True,
+                         "status": fresh.get("status"), "checkedAt": fresh.get("checkedAt"),
+                         "durationMs": duration_ms, "errorCode": probe_error,
+                         "exitCode": probe_exit if isinstance(probe_exit, int) else safe_reference(probe_exit)},
+        })
 
         if fresh.get("ok"):
             CODEX_RATE_LIMIT_CACHE.update({
@@ -83941,6 +83960,218 @@ def create_ai_trade_council_deep_analysis_package(payload: object) -> dict:
     }
 
 
+COUNCIL_OPERATIONS_LOCK = threading.RLock()
+COUNCIL_OPERATIONS_CONTEXTS: dict[str, dict] = {}
+
+
+def _council_operations_context() -> dict:
+    key = str(RUNTIME_DIR.resolve())
+    with COUNCIL_OPERATIONS_LOCK:
+        if key not in COUNCIL_OPERATIONS_CONTEXTS:
+            COUNCIL_OPERATIONS_CONTEXTS[key] = {
+                "journal": council_observability.CouncilJournal(RUNTIME_DIR / "council-operations.sqlite3"),
+                "pending": {}, "fingerprints": {}, "facts": {}, "lost": 0,
+            }
+        return COUNCIL_OPERATIONS_CONTEXTS[key]
+
+
+def _council_operations_enqueue(records: list[dict], round_summary: dict | None = None) -> None:
+    """Memory only, safe inside existing locks. Disk is flushed after the tick."""
+    try:
+        context = _council_operations_context()
+        with COUNCIL_OPERATIONS_LOCK:
+            for row in records:
+                if not isinstance(row, dict):
+                    continue
+                key = (row.get("streamKey"), row.get("closedBarTime"))
+                fingerprint = (row.get("status"), row.get("reasonCode"), row.get("missionId"),
+                               row.get("completedAt"), str(round_summary) if round_summary else None)
+                if context["fingerprints"].get(key) == fingerprint:
+                    continue
+                existing = context["pending"].get(key)
+                summary = round_summary or (existing[1] if existing else None)
+                context["pending"][key] = (dict(row), summary, fingerprint)
+                context["fingerprints"][key] = fingerprint
+                if len(context["pending"]) > 4096:
+                    context["pending"].pop(next(iter(context["pending"])))
+                    context["lost"] += 1
+            if len(context["fingerprints"]) > 8192:
+                context["fingerprints"] = dict(list(context["fingerprints"].items())[-4096:])
+    except Exception:
+        # Observability must not replace the scheduler's actual result/error.
+        pass
+
+
+def _council_operations_flush() -> None:
+    """Existing tick calls this outside trading/Mission/RUN locks; no new worker."""
+    context = _council_operations_context()
+    with COUNCIL_OPERATIONS_LOCK:
+        pending = list(context["pending"].items())[:256]
+    # One bounded transaction, including terminal summaries. A locked SQLite
+    # database costs one 50ms timeout, never 256 consecutive retries.
+    archived = context["journal"].archive([value[0] for _, value in pending],
+        round_summaries={key: value[1] for key, value in pending if value[1] is not None})
+    if not archived:
+        return
+    successful = {key for key, _ in pending}
+    with COUNCIL_OPERATIONS_LOCK:
+        for key, value in pending:
+            if key in successful and context["pending"].get(key) == value:
+                context["pending"].pop(key, None)
+        lost = context["lost"]
+    if lost and context["journal"].gap(now=utc_now(), reason="archive_history_unavailable",
+            key=(SERVER_STARTED_AT, lost), available_bars=lost):
+        with COUNCIL_OPERATIONS_LOCK:
+            context["lost"] = max(0, context["lost"] - lost)
+    with COUNCIL_OPERATIONS_LOCK:
+        gap = context.get("gap")
+    if gap and context["journal"].gap(**gap):
+        with COUNCIL_OPERATIONS_LOCK:
+            if context.get("gap") == gap:
+                context.pop("gap", None)
+
+
+def _council_operations_readiness(now: str) -> dict:
+    """Cached facts plus plain JSON reads only: no ensure/provision/probe methods."""
+    context = _council_operations_context()
+    with COUNCIL_OPERATIONS_LOCK:
+        facts = copy.deepcopy(context["facts"])
+    raw = read_json(_ai_trade_council_automation_store_path(), {})
+    raw = raw if isinstance(raw, dict) else {}
+    config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+    settings = read_json(RUNTIME_DIR / "dashboard-workflow-settings.json", {})
+    operator = read_json(RUNTIME_DIR / "operator-mode.json", {})
+    quota = {"ok": False, "status": "not_checked", "checkedAt": None}
+    probe = {}
+    # The existing provider refresh holds this lock while its subprocess runs.
+    # A passive observer must never wait behind that external operation.
+    if CODEX_RATE_LIMIT_CACHE_LOCK.acquire(blocking=False):
+        try:
+            cached = CODEX_RATE_LIMIT_CACHE.get("payload")
+            fetched = CODEX_RATE_LIMIT_CACHE.get("fetchedMonotonic")
+            if isinstance(cached, dict):
+                quota = {**copy.deepcopy(cached), "cacheAgeSeconds": max(0.0, time.monotonic() - fetched) if fetched else None}
+            probe = copy.deepcopy(CODEX_RATE_LIMIT_LAST_PROBE)
+        finally:
+            CODEX_RATE_LIMIT_CACHE_LOCK.release()
+    # A failed latest refresh remains visible even if the gate served an older
+    # cached value. This is advisory evidence, never an execution gate change.
+    if probe.get("ok") is False:
+        quota = {**probe.get("quota", {}), "cacheAgeSeconds": quota.get("cacheAgeSeconds")}
+    gate = _collaboration_quota_gate(config, refresh=False, quota=quota,
+                                    settings=settings if isinstance(settings, dict) else {})
+    runner = {}
+    if CODEX_STATUS_CACHE_LOCK.acquire(blocking=False):
+        try:
+            cached_runner = CODEX_STATUS_CACHE.get("payload")
+            fetched = CODEX_STATUS_CACHE.get("fetchedMonotonic")
+            if isinstance(cached_runner, dict):
+                runner = {"status": cached_runner.get("status"),
+                          "observedAt": cached_runner.get("checkedAt") or cached_runner.get("observedAt"),
+                          "cacheAgeSeconds": max(0.0, time.monotonic() - fetched) if fetched else None,
+                          "maximumAgeSeconds": CODEX_STATUS_CACHE_STALE_MAX_SECONDS}
+        finally:
+            CODEX_STATUS_CACHE_LOCK.release()
+    active_round = None
+    if MISSIONS_READ_CACHE_LOCK.acquire(blocking=False):
+        try:
+            cached_missions = MISSIONS_READ_CACHE.get("missions")
+            if isinstance(cached_missions, list) and MISSIONS_READ_CACHE.get("path") == str(MISSIONS_PATH):
+                active_round = any(isinstance(row, dict) and row.get("status") in {"queued", "running", "waiting_approval"}
+                    and isinstance(row.get("analysisContext"), dict)
+                    and row["analysisContext"].get("kind") in {"ai_trade_council_parent", "ai_trade_council_vote"}
+                    for row in cached_missions)
+        finally:
+            MISSIONS_READ_CACHE_LOCK.release()
+    return build_council_preflight(now=now, enabled=config.get("enabled"),
+        terminal_locks_ready=facts.get("terminalLocksReady"), snapshot=facts.get("snapshot"),
+        quota_gate=gate, runner=runner, operator_mode=operator.get("mode") if isinstance(operator, dict) else None,
+        active_round=active_round)
+
+
+def _council_operations_observe(*, snapshot: dict | None = None, identity: dict | None = None,
+                                terminal_ready: bool | None = None, error_code: str | None = None) -> None:
+    """Passive tap at the end of the existing tick; every error stays isolated."""
+    try:
+        now = utc_now()
+        context = _council_operations_context()
+        raw = read_json(_ai_trade_council_automation_store_path(), {})
+        state = raw.get("state", {}) if isinstance(raw, dict) else {}
+        chart = (snapshot or {}).get("chartSnapshot") or {}
+        preflight = state.get("analysisStartPreflight") or {}
+        with COUNCIL_OPERATIONS_LOCK:
+            if terminal_ready is not None:
+                context["facts"]["terminalLocksReady"] = terminal_ready
+            if snapshot is not None:
+                context["facts"]["snapshot"] = {
+                    "status": "ready" if identity else "unavailable", "identityReady": bool(identity),
+                    "reasonCode": "snapshot_ready" if identity else state.get("reason", "snapshot_unavailable"),
+                    "observedAt": chart.get("observedAt"),
+                    "maximumAgeSeconds": preflight.get("maximumSnapshotAgeSeconds"),
+                }
+        readiness = _council_operations_readiness(now)
+        blocking = next((item for item in readiness.get("checks", []) if item.get("status") in {"blocked", "paused", "waiting"}), None)
+        if blocking is None:
+            blocking = next((item for item in readiness.get("checks", []) if item.get("status") == "unknown"), None)
+        reason = error_code or (blocking or {}).get("reasonCode") or state.get("reason") or "ready"
+        blocked = bool(error_code or blocking or state.get("status") in {"waiting_gate", "waiting_snapshot", "waiting_terminal_locks", "disabled"})
+        evidence = {"source": "council_tick", "reasonCode": reason}
+        if str(reason).startswith("quota_"):
+            if CODEX_RATE_LIMIT_CACHE_LOCK.acquire(blocking=False):
+                try:
+                    evidence.update(CODEX_RATE_LIMIT_LAST_PROBE.get("evidence") or {})
+                finally:
+                    CODEX_RATE_LIMIT_CACHE_LOCK.release()
+        context["journal"].observe(now=now, startup_id=SERVER_STARTED_AT, reason=reason,
+            symbol=state.get("symbol"), timeframe=state.get("timeframe"), evidence=evidence, blocked=blocked)
+        _council_operations_enqueue(state.get("coverageRecords") or [])
+        _council_operations_flush()
+    except Exception:
+        # Never mask the Council exception, dispatch result, or health heartbeat.
+        try:
+            _council_operations_context()["journal"].last_error = "observability_observation_failed"
+        except Exception:
+            pass
+
+
+def _council_operations_gap(*, after_bar=None, before_bar=None, symbol=None, timeframe=None, available_bars=0) -> None:
+    # Queue gap evidence; caller may still hold the Council RUN lock.
+    try:
+        context = _council_operations_context()
+        with COUNCIL_OPERATIONS_LOCK:
+            context["gap"] = {"now": utc_now(), "after_bar": after_bar, "before_bar": before_bar,
+                              "symbol": symbol, "timeframe": timeframe, "available_bars": available_bars}
+    except Exception:
+        pass
+
+
+def ai_trade_council_operations_read_model(*, limit: int = 100, cursor: str | None = None) -> dict:
+    now = utc_now()
+    context = _council_operations_context()
+    result = context["journal"].read(now=now, limit=limit, cursor=cursor)
+    with COUNCIL_OPERATIONS_LOCK:
+        result["pendingArchiveRecords"] = len(context["pending"])
+        result["archiveLossRecords"] = context["lost"]
+    try:
+        result["readiness"] = _council_operations_readiness(now)
+    except Exception:
+        result["readiness"] = build_council_preflight(now=now)
+        result["readinessErrorCode"] = "cached_state_unavailable"
+    return result
+
+
+def ai_trade_council_diagnostics_read_model() -> dict:
+    operations = ai_trade_council_operations_read_model()
+    # This surface must not call bridge_status/ensure/gateway/provider methods.
+    return build_council_diagnostics(now=utc_now(), version=BRIDGE_RUNTIME_VERSION,
+        health={"status": "unknown", "startedAt": SERVER_STARTED_AT}, operations=operations,
+        council={"source": "cached_existing_runtime"},
+        rounds=[{**event, "classification": event.get("attemptStatus"),
+                 "completeRoleCount": (event.get("evidence") or {}).get("completedVotes"),
+                 "completedAt": event.get("endedAt")}
+                for event in operations.get("events", []) if event.get("type") == "bar"])
+
+
 def _ai_trade_council_automation_store_path() -> Path:
     return RUNTIME_DIR / AI_TRADE_COUNCIL_AUTOMATION_STORE_FILENAME
 
@@ -85040,6 +85271,12 @@ def _ai_trade_council_coverage_upsert(
         if (item["streamKey"], item["closedBarTime"]) != key
     ]
     records.append(normalized)
+    # Memory tap BEFORE hot-history retention; no disk/provider work while the
+    # existing scheduler holds its locks. Archive failure cannot block trading.
+    try:
+        _council_operations_enqueue(records)
+    except Exception:
+        pass
     state["coverageRecords"] = _ai_trade_council_coverage_records(records)
     stored = next(
         (
@@ -89409,11 +89646,10 @@ def ai_trade_council_automation_tick() -> dict:
         }
     pending = None
     current_fields = {}
+    current_context = None
     try:
-        if not isinstance(
-            _active_global_metatrader_context(require_all_platforms=True),
-            dict,
-        ):
+        current_context = _active_global_metatrader_context(require_all_platforms=True)
+        if not isinstance(current_context, dict):
             _update_ai_trade_council_automation_state(
                 status="waiting_terminal_locks",
                 reason="global_metatrader_locks_incomplete",
@@ -89542,6 +89778,14 @@ def ai_trade_council_automation_tick() -> dict:
             if state.get("streamKey") == identity["streamKey"]:
                 old_cursor = previous_bar_time
             if isinstance(old_cursor, int) and old_cursor < closed_bar_time:
+                baseline_times = [bar.get("time") for bar in (snapshot.get("chartSnapshot") or {}).get("bars") or []
+                                  if isinstance(bar, dict) and isinstance(bar.get("time"), int)]
+                if not baseline_times or min(baseline_times) > old_cursor:
+                    try:
+                        _council_operations_gap(after_bar=old_cursor, before_bar=min(baseline_times) if baseline_times else closed_bar_time,
+                            symbol=identity["symbol"], timeframe=identity["timeframe"], available_bars=len(baseline_times))
+                    except Exception:
+                        pass
                 for bar in (snapshot.get("chartSnapshot") or {}).get("bars") or []:
                     timestamp = _automation_optional_count(bar.get("time")) if isinstance(bar, dict) else None
                     if timestamp is not None and old_cursor < timestamp <= closed_bar_time:
@@ -89658,6 +89902,11 @@ def ai_trade_council_automation_tick() -> dict:
                     "beforeClosedBarTime": actual_times[0],
                     "terminalActions": False,
                 })
+                try:
+                    _council_operations_gap(after_bar=previous_bar_time, before_bar=actual_times[0],
+                        symbol=identity["symbol"], timeframe=identity["timeframe"], available_bars=len(actual_times))
+                except Exception:
+                    pass
             # Evaluate quota at the new-bar event, never for the first time
             # later in the candle. A denied event is consumed immediately.
             trigger_preflight = {}
@@ -90035,6 +90284,11 @@ def ai_trade_council_automation_tick() -> dict:
                 "automation": ai_trade_council_automation_read_model()}
     finally:
         AI_TRADE_COUNCIL_AUTOMATION_RUN_LOCK.release()
+        try:
+            _council_operations_observe(snapshot=locals().get("snapshot"), identity=locals().get("identity"),
+                                        terminal_ready=isinstance(current_context, dict))
+        except Exception:
+            pass
 
 
 def ai_trade_council_automation_scheduler_loop() -> None:
@@ -90042,12 +90296,14 @@ def ai_trade_council_automation_scheduler_loop() -> None:
         try:
             ai_trade_council_automation_tick()
         except DataIntegrityError:
+            _council_operations_observe(error_code="data_integrity_error")
             append_audit({
                 "type": "ai_trade_council.automation_failed",
                 "reason": "data_integrity_error",
                 "terminalActions": False,
             })
         except Exception as error:
+            _council_operations_observe(error_code="scheduler_loop_error")
             append_audit({
                 "type": "ai_trade_council.automation_failed",
                 "reason": "scheduler_loop_error",
@@ -98799,6 +99055,11 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                     "executionPolicy": automation.get("executionPolicy"),
                     "completedAt": parent.get("completedAt") or utc_now(),
                 }
+                try:
+                    _council_operations_enqueue([completed_record],
+                        council_observability.summarize_round(parent, children))
+                except Exception:
+                    pass
                 # A round may finish after the EA was moved to another chart.
                 # Always finalize its own immutable coverage row, but never
                 # let an old stream overwrite the active stream's scalar
@@ -113958,6 +114219,19 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                 "updatedAt": utc_now(),
             })
             return
+        if path == "/api/ai-trade-council/operations":
+            operations_cursor = str(query.get("cursor", [""])[0] or "").strip()
+            if operations_cursor:
+                try:
+                    council_observability.decode_cursor(operations_cursor)
+                except ValueError:
+                    raise RequestError("Invalid operations cursor.", 422)
+            operations_limit = clamp_int(query.get("limit", [100])[0], 100, 1, 200)
+            self.send_json(ai_trade_council_operations_read_model(limit=operations_limit, cursor=operations_cursor or None))
+            return
+        if path == "/api/ai-trade-council/diagnostics":
+            self.send_json(ai_trade_council_diagnostics_read_model())
+            return
         if path == "/api/ai-trade-council/history":
             history_kind = str(query.get("kind", ["analysis"])[0]).strip().lower()
             if history_kind not in {"analysis", "orders"}:
@@ -114848,6 +115122,12 @@ def main() -> int:
             stop_dashboard_workflow_scheduler()
             stop_mission_worker()
             append_audit({"type": "bridge.server_stop", "host": args.host, "port": actual_port})
+            try:
+                if not (AI_TRADE_COUNCIL_AUTOMATION_THREAD and AI_TRADE_COUNCIL_AUTOMATION_THREAD.is_alive()):
+                    _council_operations_flush()
+                    _council_operations_context()["journal"].stopped(now=utc_now(), startup_id=SERVER_STARTED_AT)
+            except Exception:
+                pass
         remove_bridge_control_file()
         release_bridge_process_guard()
     return 0

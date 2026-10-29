@@ -95,6 +95,8 @@ const CODEX_RATE_LIMIT_ENDPOINT = "/api/codex/rate-limits";
 const CODEX_RATE_RESERVE_POLICY_ENDPOINT = "/api/automation/quota-policy";
 const OPERATOR_MODE_ENDPOINT = "/api/operator-mode";
 const AI_TRADE_COUNCIL_HISTORY_ENDPOINT = "/api/ai-trade-council/history";
+const AI_TRADE_COUNCIL_OPERATIONS_ENDPOINT = "/api/ai-trade-council/operations";
+const AI_TRADE_COUNCIL_DIAGNOSTICS_ENDPOINT = "/api/ai-trade-council/diagnostics";
 const AI_TRADE_COUNCIL_DEEP_ANALYSIS_ENDPOINT = "/api/ai-trade-council/deep-analysis";
 const AI_TRADE_COUNCIL_DEEP_PACKAGE_ENDPOINT = "/api/ai-trade-council/deep-analysis/package";
 const AGENT_COLLABORATION_ENDPOINT = "/api/collaboration/schedule";
@@ -1940,6 +1942,17 @@ const state = {
     timer: null,
     nextPollAt: 0,
     failures: 0,
+  },
+  aiTradeCouncilOperations: {
+    data: null,
+    events: [],
+    inFlight: false,
+    lastAttemptAt: 0,
+    nextCursor: "",
+    hasMore: false,
+    errorMessage: "",
+    exportInFlight: false,
+    exportMessage: "",
   },
   aiTradeCouncilHistoryPages: {
     orders: {
@@ -5947,7 +5960,7 @@ function applySessionSnapshot(snapshot) {
       )
         ? String(snapshot.modal.signalDeepTechnicalRange || "300")
         : "300",
-      signalHistoryTab: ["orders", "analysis"].includes(snapshot.modal.signalHistoryTab)
+      signalHistoryTab: ["orders", "analysis", "operations"].includes(snapshot.modal.signalHistoryTab)
         ? snapshot.modal.signalHistoryTab
         : "orders",
       signalHistoryScope: ["all", "active"].includes(snapshot.modal.signalHistoryScope)
@@ -10320,6 +10333,11 @@ function renderOpenAiTradeCouncilRuntimeStatus() {
     || state.modal.id !== AI_TRADE_COUNCIL_PROP_ID
   ) return;
   const activeTab = state.modal.signalTab;
+  if (activeTab === "history" && state.modal.signalHistoryTab === "operations") {
+    // Reuse the existing Council heartbeat lifecycle; never start a second timer.
+    void loadSignalOperations();
+    return;
+  }
   const runtimeSensitiveTab = activeTab === "daily_summary"
     || activeTab === "decision_pipeline"
     || (activeTab === "live_analysis" && state.modal.signalLiveTab === "chart_overview");
@@ -10600,6 +10618,7 @@ function renderDashboardKpis(subject, report, missions) {
 const SIGNAL_DEEP_ANALYSIS_TABS = ["price_action", "technical_deep", "news_context"];
 const SIGNAL_CONSENSUS_TABS = ["daily_summary", "live_analysis", "decision_pipeline", "history"];
 const SIGNAL_HISTORY_TABS = ["orders", "analysis"];
+const SIGNAL_HISTORY_VIEW_TABS = ["orders", "analysis", "operations"];
 const SIGNAL_HISTORY_PAGE_SIZE = 40;
 const SIGNAL_LIVE_ANALYSIS_TABS = ["chart_overview", ...SIGNAL_DEEP_ANALYSIS_TABS];
 const SIGNAL_DEEP_TAB_DEFINITIONS = Object.freeze([
@@ -17741,6 +17760,309 @@ function createSignalHistoryRow(entry) {
   return row;
 }
 
+function signalOperationsText(value, fallback = "") {
+  return safeDashboardDisplayText(typeof value === "string" ? value.slice(0, 1800) : "", fallback);
+}
+
+function signalOperationsTime(value) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return "ไม่ทราบเวลา";
+  return new Intl.DateTimeFormat("th-TH", {
+    timeZone: "Asia/Bangkok", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).format(new Date(value));
+}
+
+function signalOperationsReason(item = {}) {
+  const code = signalOperationsText(item.reasonCode);
+  const message = signalOperationsText(item.messageTh);
+  const labels = {
+    quota_limit_reached: "โควตา Codex ถึงขีดจำกัดตามผลตรวจล่าสุด",
+    quota_below_reserve: "โควตาคงเหลือต่ำกว่าเกณฑ์สำรอง",
+    quota_unavailable: "ยังอ่านโควตาไม่ได้ • ไม่ได้ยืนยันว่าโควตาหมด",
+    quota_incomplete: "ข้อมูลโควตายังไม่ครบ",
+    quota_stale: "ข้อมูลโควตาเก่าเกินไป • ต้องตรวจยืนยันใหม่",
+    quota_provider_hard_stop: "ผู้ให้บริการระงับการใช้งานตามผลตรวจล่าสุด",
+    codex_runner_not_ready: "Codex Runner ยังไม่พร้อม",
+    codex_runner_unavailable: "ยังติดต่อ Codex Runner ไม่ได้",
+    mission_running: "รอบก่อนหน้ายังทำงาน",
+    council_round_already_active: "รอบก่อนหน้ายังทำงาน",
+    full_access_required: "โหมดปัจจุบันยังไม่อนุญาตเริ่มสภาอัตโนมัติ",
+    observation_gap_unknown: "ขาดหลักฐานการตรวจในช่วงนี้ • ยังยืนยันสาเหตุไม่ได้",
+  };
+  if (message && !message.startsWith("บันทึกสถานะจากสภา AI;")) return code ? `${message} · ${code}` : message;
+  if (labels[code]) return `${labels[code]} · ${code}`;
+  const known = signalHistorySkipReasonLabel(code);
+  return known && known !== code ? known : `ยังไม่มีคำอธิบายสาเหตุที่ยืนยันได้${code ? ` · ${code}` : ""}`;
+}
+
+function signalOperationsMergeEvents(current = [], incoming = []) {
+  const byId = new Map();
+  [...current, ...incoming].forEach((item) => {
+    if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id) return;
+    const previous = byId.get(item.id);
+    const stamp = (value) => Date.parse(value.lastSeenAt || value.endedAt || value.startedAt || "") || 0;
+    if (!previous || stamp(item) >= stamp(previous)) byId.set(item.id, item);
+  });
+  return [...byId.values()].sort((a, b) => (
+    (Date.parse(b.startedAt || b.lastSeenAt || "") || 0) - (Date.parse(a.startedAt || a.lastSeenAt || "") || 0)
+  ));
+}
+
+function signalOperationsIsOpen() {
+  return state.modal.open && state.modal.id === AI_TRADE_COUNCIL_PROP_ID
+    && state.modal.signalTab === "history" && state.modal.signalHistoryTab === "operations";
+}
+
+async function loadSignalOperations({ more = false, force = false } = {}) {
+  const page = state.aiTradeCouncilOperations;
+  if (!force && !more && (!signalOperationsIsOpen() || document.visibilityState === "hidden")) return false;
+  if (page.inFlight || (!force && !more && Date.now() - page.lastAttemptAt < 10000)) return false;
+  if (more && (!page.hasMore || !page.nextCursor)) return false;
+  const cursor = more ? page.nextCursor : "";
+  page.inFlight = true;
+  page.lastAttemptAt = Date.now();
+  page.errorMessage = "";
+  if (signalOperationsIsOpen()) renderSignalOperationsPanel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {});
+  try {
+    const params = new URLSearchParams({ limit: "100" });
+    if (cursor) params.set("cursor", cursor);
+    const payload = await fetchJson(`${AI_TRADE_COUNCIL_OPERATIONS_ENDPOINT}?${params}`, { timeoutMs: 15000 });
+    if (!payload || payload.available !== true || payload.schemaVersion !== "council-operations-v1" || !Array.isArray(payload.events)
+      || payload.events.length > 100 || !payload.events.every((event) => typeof event?.id === "string" && event.id)) {
+      throw new Error("invalid_operations_page");
+    }
+    const nextCursor = signalOperationsText(payload.nextCursor);
+    if (payload.hasMore === true && (!nextCursor || nextCursor === cursor)) throw new Error("invalid_operations_cursor");
+    const hadMorePages = page.loadedMore === true;
+    page.events = signalOperationsMergeEvents(page.events, payload.events);
+    // A page of older events must not replace the newer readiness/incident snapshot.
+    if (!more || !page.data) page.data = payload;
+    if (more || !hadMorePages) {
+      page.hasMore = payload.hasMore === true;
+      page.nextCursor = nextCursor;
+    }
+    if (more) page.loadedMore = true;
+    return true;
+  } catch {
+    page.errorMessage = more
+      ? "โหลดเหตุการณ์ก่อนหน้าไม่สำเร็จ • รายการเดิมยังอยู่ กดตรวจล่าสุดเพื่อตั้งต้นหน้าประวัติใหม่"
+      : "ตรวจสถานะจาก Backend ไม่สำเร็จ • ข้อมูลที่แสดงอาจเก่า และยังสรุปไม่ได้ว่า HQ ปิดอยู่";
+    return false;
+  } finally {
+    page.inFlight = false;
+    if (signalOperationsIsOpen()) renderSignalOperationsPanel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {});
+  }
+}
+
+async function downloadSignalOperationsDiagnostics() {
+  const page = state.aiTradeCouncilOperations;
+  if (page.exportInFlight) return false;
+  page.exportInFlight = true;
+  page.exportMessage = "กำลังเตรียมรายงานที่ตัดข้อมูลลับแล้ว…";
+  if (signalOperationsIsOpen()) renderSignalOperationsPanel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {});
+  let objectUrl = null;
+  let anchor = null;
+  try {
+    const payload = await fetchJson(AI_TRADE_COUNCIL_DIAGNOSTICS_ENDPOINT, { timeoutMs: 15000 });
+    if (payload?.schemaVersion !== "council-diagnostics-v1" || payload.redacted !== true) {
+      throw new Error("unverified_diagnostics_redaction");
+    }
+    objectUrl = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" }));
+    anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = `metafxclub-council-diagnostics-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    page.exportMessage = "ดาวน์โหลดรายงานแล้ว • ไม่มีการส่งข้อมูลไปภายนอก";
+    return true;
+  } catch {
+    page.exportMessage = "ดาวน์โหลดไม่สำเร็จ หรือ Backend ยังไม่ยืนยันการตัดข้อมูลลับ • ยังไม่ได้สร้างไฟล์";
+    return false;
+  } finally {
+    anchor?.remove();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    page.exportInFlight = false;
+    if (signalOperationsIsOpen()) renderSignalOperationsPanel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {});
+  }
+}
+
+function signalOperationsNode(tag, className, text = "") {
+  const node = document.createElement(tag);
+  node.className = className;
+  node.textContent = text;
+  return node;
+}
+
+function createSignalOperationsEvent(item, { incident = false } = {}) {
+  const row = signalOperationsNode("article", "signal-operations-event");
+  const statusLabels = { active: "ยังมีปัญหา", recovered: "กลับมาปกติแล้ว", superseded: "เปลี่ยนไปติดเงื่อนไขอื่น", resolved: "คลี่คลายแล้ว", skipped: "ข้ามรอบ", running: "กำลังวิเคราะห์", failed: "ล้มเหลว", partial: "จบบางส่วน", completed: "สิ้นสุด", observed: "บันทึกเหตุการณ์", recorded: "บันทึกแล้ว", unknown: "ยังยืนยันไม่ได้" };
+  const typeLabels = { incident: "สถานะที่ต้องติดตาม", gap: "ช่วงที่ขาดข้อมูล", lifecycle: "การเริ่ม / หยุด HQ", bar: "รอบวิเคราะห์" };
+  const attemptLabels = { complete_all: "Agent ให้ผลครบ 3/3", partial: "ได้ผลบางส่วน", failed: "วิเคราะห์ล้มเหลว", not_started: "ยังไม่ได้เริ่ม AI", queued: "รับรอบแล้ว รอหลักฐานเริ่ม AI", waiting: "รับรอบแล้ว รอหลักฐานเริ่ม AI", running: "กำลังวิเคราะห์", unknown: "ยังยืนยันผลไม่ได้" };
+  const certaintyLabels = { confirmed: "ยืนยันจากหลักฐาน", observed: "ตรวจพบโดยระบบ", inferred: "ข้อสันนิษฐานจากหลักฐาน", unknown: "ยังยืนยันสาเหตุไม่ได้" };
+  row.dataset.severity = ["info", "warning", "error", "critical"].includes(item.severity) ? item.severity : "info";
+  row.dataset.eventId = item.id;
+  const heading = signalOperationsNode("div", "signal-operations-event-heading");
+  const title = signalOperationsNode("strong", "", typeLabels[item.type] || "เหตุการณ์ของระบบ");
+  const badge = signalOperationsNode("span", "signal-operations-badge", attemptLabels[item.attemptStatus] || statusLabels[item.status] || "สถานะที่ Backend บันทึก");
+  if (["recovered", "resolved"].includes(item.status)) badge.dataset.tone = "ready";
+  heading.append(title, badge);
+  const market = [signalOperationsText(item.symbol), signalOperationsText(item.timeframe)].filter(Boolean).join(" · ");
+  const period = `${signalOperationsTime(item.startedAt)}${item.endedAt ? ` ถึง ${signalOperationsTime(item.endedAt)}` : ""} น. ไทย`;
+  row.append(heading, signalOperationsNode("small", "", [period, market].filter(Boolean).join(" · ")),
+    signalOperationsNode("p", "signal-operations-event-reason", signalOperationsReason(item)));
+  const evidence = item.evidence && typeof item.evidence === "object" ? item.evidence : {};
+  const sourceCode = signalOperationsText(evidence.source || evidence.origin || item.source, "Backend / บันทึกการทำงาน");
+  const sourceLabels = { observed_bar_coverage: "บันทึกรอบแท่งและผล Agent", bridge_shutdown_receipt: "บันทึกการปิด Bridge ตามขั้นตอน", heartbeat_gap: "ช่วงห่างจากการตรวจระบบ", first_observation: "การเริ่มเก็บประวัติ", scheduler_observation: "ตัวตรวจสภา AI" };
+  const source = sourceLabels[sourceCode] ? `${sourceLabels[sourceCode]} (${sourceCode})` : sourceCode;
+  const certainty = certaintyLabels[item.certainty] || "ยังยืนยันระดับหลักฐานไม่ได้";
+  const count = Number.isSafeInteger(item.occurrences) && item.occurrences > 1 ? ` · ตรวจพบ ${item.occurrences} ครั้ง (รวมเหตุเดียวกัน)` : "";
+  row.append(signalOperationsNode("small", "signal-operations-evidence", `${certainty} · ที่มา: ${source}${count}`));
+  if (item.type === "bar" && Number.isInteger(evidence.processesStarted) && Number.isInteger(evidence.completedVotes)) {
+    row.append(signalOperationsNode("small", "", `เริ่ม AI ${evidence.processesStarted}/3 · ผลที่ยืนยันได้ ${evidence.completedVotes}/3`));
+  }
+  if (incident && item.lastSeenAt) row.append(signalOperationsNode("small", "", `พบล่าสุด ${signalOperationsTime(item.lastSeenAt)} น. ไทย`));
+  return row;
+}
+
+function renderSignalOperationsPanel(report = {}) {
+  const container = els.signalConsensusHistoryContent;
+  if (!container) return;
+  const page = state.aiTradeCouncilOperations;
+  const data = page.data || {};
+  const focused = container.contains?.(document.activeElement) ? document.activeElement?.dataset?.operationsFocus : null;
+  container.replaceChildren();
+  const tabs = signalOperationsNode("div", "signal-history-subtabs");
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "เลือกประเภทประวัติ AI Trade");
+  const tabNames = { orders: "ประวัติการเปิดออเดอร์", analysis: "ประวัติการวิเคราะห์", operations: "สถานะและเหตุการณ์" };
+  SIGNAL_HISTORY_VIEW_TABS.forEach((name) => {
+    const button = signalOperationsNode("button", "", tabNames[name]);
+    button.type = "button";
+    button.id = `signal${name === "orders" ? "OrderHistory" : name === "analysis" ? "AnalysisHistory" : "Operations"}Tab`;
+    button.dataset.signalHistoryTab = name;
+    button.dataset.operationsFocus = `tab-${name}`;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(name === "operations"));
+    button.setAttribute("aria-controls", name === "operations" ? "signalOperationsPanel" : name === "orders" ? "signalOrderHistoryPanel" : "signalAnalysisHistoryPanel");
+    button.tabIndex = name === "operations" ? 0 : -1;
+    const activate = (target, focus = false) => {
+      state.modal.signalHistoryTab = target;
+      renderSignalHistoryPanel(report);
+      saveSessionSnapshot();
+      if (focus) [...container.querySelectorAll("[data-signal-history-tab]")].find((node) => node.dataset.signalHistoryTab === target)?.focus();
+    };
+    button.addEventListener("click", () => activate(name));
+    button.addEventListener("keydown", (event) => {
+      const index = SIGNAL_HISTORY_VIEW_TABS.indexOf(name);
+      const next = event.key === "ArrowRight" ? (index + 1) % 3 : event.key === "ArrowLeft" ? (index + 2) % 3 : event.key === "Home" ? 0 : event.key === "End" ? 2 : -1;
+      if (next < 0) return;
+      event.preventDefault();
+      activate(SIGNAL_HISTORY_VIEW_TABS[next], true);
+    });
+    tabs.append(button);
+  });
+  container.append(tabs);
+  const panel = signalOperationsNode("section", "signal-operations-panel");
+  panel.id = "signalOperationsPanel";
+  panel.setAttribute("role", "tabpanel");
+  panel.setAttribute("aria-labelledby", "signalOperationsTab");
+  const heading = signalOperationsNode("div", "signal-operations-heading");
+  const intro = signalOperationsNode("div", "");
+  intro.append(signalOperationsNode("h3", "", "สถานะสภา AI ตามช่วงเวลา"),
+    signalOperationsNode("p", "", "แสดงเหตุผลและหลักฐานที่ระบบบันทึก • ช่องว่างข้อมูลไม่ใช่หลักฐานว่าแอปปิด และไม่ใช่มติ NO TRADE"));
+  const actions = signalOperationsNode("div", "signal-operations-actions");
+  const refresh = signalOperationsNode("button", "", page.inFlight ? "กำลังตรวจ…" : "ตรวจล่าสุด");
+  refresh.type = "button";
+  refresh.disabled = page.inFlight;
+  refresh.dataset.operationsFocus = "refresh";
+  refresh.addEventListener("click", () => {
+    page.loadedMore = false;
+    void loadSignalOperations({ force: true });
+  });
+  const download = signalOperationsNode("button", "", page.exportInFlight ? "กำลังเตรียมไฟล์…" : "ดาวน์โหลดรายงานตรวจสอบ");
+  download.type = "button";
+  download.disabled = page.exportInFlight;
+  download.dataset.operationsFocus = "download";
+  download.addEventListener("click", () => { void downloadSignalOperationsDiagnostics(); });
+  actions.append(refresh, download);
+  heading.append(intro, actions);
+  panel.append(heading);
+  const observedAge = Date.now() - Date.parse(data.observedAt || "");
+  const heartbeat = data.heartbeat && typeof data.heartbeat === "object" ? data.heartbeat : {};
+  const stale = !Number.isFinite(observedAge) || observedAge > 120000 || observedAge < -30000
+    || Boolean(page.errorMessage) || ["stale", "unknown", "stopped", "unavailable"].includes(heartbeat.status);
+  const status = signalOperationsNode("div", "signal-history-read-state", page.errorMessage
+    || (page.inFlight && !page.data ? "กำลังโหลดสถานะและเหตุการณ์จาก Backend…" : "")
+    || (page.data ? `${stale ? "ข้อมูลอาจเก่าหรือผู้บันทึกยังไม่พร้อม • " : ""}ตรวจล่าสุด ${signalOperationsTime(data.observedAt)} น. ไทย · พบระบบล่าสุด ${signalOperationsTime(data.lastSeenAt || heartbeat.lastSeenAt)} น. ไทย` : "ยังไม่มีข้อมูลเหตุการณ์ที่โหลดสำเร็จ"));
+  status.dataset.tone = page.errorMessage || stale ? "stale" : "ready";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  panel.append(status);
+  if (data.unobservedInterval && typeof data.unobservedInterval === "object") {
+    panel.append(createSignalOperationsEvent({ ...data.unobservedInterval, id: "current-unobserved-interval", type: "gap",
+      status: "unknown", severity: "warning", certainty: "unknown", evidence: { source: "heartbeat_gap" } }));
+  }
+  if (page.exportMessage) {
+    const message = signalOperationsNode("p", "signal-operations-export-status", page.exportMessage);
+    message.setAttribute("role", "status");
+    panel.append(message);
+  }
+  const readiness = data.readiness && data.readiness.advisory === true && data.readiness.canAuthorizeAnalysis === false ? data.readiness : {};
+  const readyLabels = { ready: "พร้อมตามข้อมูลที่ตรวจ", attention: "มีสิ่งที่ต้องตรวจ", unknown: "ยังยืนยันไม่ได้", paused: "พักการวิเคราะห์อัตโนมัติ" };
+  const preflight = signalOperationsNode("section", "signal-operations-readiness");
+  preflight.append(signalOperationsNode("h4", "", `ก่อนแท่งถัดไป · ${stale ? "ต้องตรวจข้อมูลใหม่" : readyLabels[readiness.status] || "ยังยืนยันไม่ได้"}`),
+    signalOperationsNode("p", "", `ตรวจเมื่อ ${signalOperationsTime(readiness.checkedAt)} น. ไทย${readiness.nextBarAt ? ` · รอบถัดไปโดยประมาณ ${signalOperationsTime(readiness.nextBarAt)} น. ไทย` : " · ยังไม่ยืนยันเวลาแท่งถัดไป"}`),
+    signalOperationsNode("small", "", "เป็นข้อมูลประกอบก่อนถึงรอบเท่านั้น • ระบบต้องตรวจเงื่อนไขจริงอีกครั้งเมื่อขึ้นแท่งใหม่"));
+  const checks = signalOperationsNode("div", "signal-operations-checks");
+  const checkLabels = { ready: "พร้อม", blocked: "ติดเงื่อนไข", unknown: "ไม่ทราบ", paused: "พักอยู่", waiting: "รอ" };
+  (Array.isArray(readiness.checks) ? readiness.checks : []).slice(0, 30).forEach((check) => {
+    const card = signalOperationsNode("article", "signal-operations-check");
+    card.dataset.tone = check.status === "ready" && !stale ? "ready" : "attention";
+    card.append(signalOperationsNode("strong", "", signalOperationsText(check.label || check.id, "เงื่อนไขก่อนเริ่ม")),
+      signalOperationsNode("span", "signal-operations-badge", stale ? "ต้องตรวจใหม่" : checkLabels[check.status] || "ไม่ทราบ"),
+      signalOperationsNode("p", "", signalOperationsReason(check)));
+    if (check.observedAt) card.append(signalOperationsNode("small", "", `ข้อมูลเมื่อ ${signalOperationsTime(check.observedAt)} น. ไทย`));
+    checks.append(card);
+  });
+  preflight.append(checks);
+  panel.append(preflight);
+  const incidents = data.incidents && typeof data.incidents === "object" ? data.incidents : {};
+  [ ["active", "เหตุที่ยังต้องตรวจ"], ["recovered", "เหตุที่สิ้นสุดการติดตาม"] ].forEach(([key, label]) => {
+    const section = signalOperationsNode("section", "signal-operations-incidents");
+    const items = signalOperationsMergeEvents([], Array.isArray(incidents[key]) ? incidents[key] : []);
+    section.append(signalOperationsNode("h4", "", `${label} · ${items.length}`));
+    if (!items.length) section.append(signalOperationsNode("p", "signal-operations-muted", page.data ? "ไม่มีรายการในข้อมูลที่โหลดไว้" : "ยังไม่มีข้อมูล"));
+    items.forEach((item) => section.append(createSignalOperationsEvent(item, { incident: true })));
+    panel.append(section);
+  });
+  const timeline = signalOperationsNode("section", "signal-operations-timeline");
+  timeline.append(signalOperationsNode("h4", "", `ลำดับเหตุการณ์ · โหลดแล้ว ${page.events.length} รายการ`),
+    signalOperationsNode("p", "signal-operations-muted", "ใหม่ไปเก่า • หนึ่งเหตุการณ์อาจครอบคลุมหลายช่วงเวลา ระบบไม่สร้างแท่งหรือผลวิเคราะห์ที่ไม่มีหลักฐาน"));
+  const list = signalOperationsNode("div", "signal-operations-events");
+  list.setAttribute("role", "list");
+  page.events.forEach((item) => {
+    const row = createSignalOperationsEvent(item);
+    row.setAttribute("role", "listitem");
+    list.append(row);
+  });
+  if (!page.events.length) list.append(signalOperationsNode("p", "signal-empty-state", page.data ? "ยังไม่มีเหตุการณ์ที่บันทึกในช่วงข้อมูลนี้ • ไม่ได้ยืนยันว่าทุกรอบทำงานสำเร็จ" : "รอข้อมูลจาก Backend"));
+  timeline.append(list);
+  if (page.hasMore) {
+    const more = signalOperationsNode("button", "signal-operations-more", page.inFlight ? "กำลังโหลด…" : "โหลดเหตุการณ์ก่อนหน้า");
+    more.type = "button";
+    more.disabled = page.inFlight;
+    more.dataset.operationsFocus = "more";
+    more.addEventListener("click", () => { void loadSignalOperations({ more: true }); });
+    timeline.append(more);
+  }
+  panel.append(timeline);
+  const limitations = [...(Array.isArray(data.limitations) ? data.limitations : []), ...(Array.isArray(readiness.limitations) ? readiness.limitations : [])];
+  const notes = signalOperationsNode("ul", "signal-operations-limitations");
+  [...new Set(limitations.filter((item) => typeof item === "string"))].slice(0, 12).forEach((item) => notes.append(signalOperationsNode("li", "", signalOperationsText(item))));
+  panel.append(notes);
+  container.append(panel);
+  if (focused) [...container.querySelectorAll("[data-operations-focus]")].find((node) => node.dataset.operationsFocus === focused)?.focus();
+}
+
 function signalHistoryBaseReadModel(report = {}, kind = "analysis") {
   const council = signalCouncilModel(report);
   if (kind === "orders") {
@@ -19469,6 +19791,11 @@ function renderSignalHistoryPanelLegacy(report = {}, { focusSearch = false } = {
 function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
   const container = els.signalConsensusHistoryContent;
   if (!container) return;
+  if (state.modal.signalHistoryTab === "operations") {
+    renderSignalOperationsPanel(report);
+    void loadSignalOperations();
+    return;
+  }
   const council = signalCouncilModel(report);
   const scopeRequest = signalHistoryRequestScope(report);
   const scopeContext = scopeRequest.capability?.context || signalActiveStreamContext(report);
@@ -19603,6 +19930,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
     <div class="signal-history-subtabs" role="tablist" aria-label="เลือกประเภทประวัติ AI Trade">
       <button id="signalOrderHistoryTab" type="button" role="tab" data-signal-history-tab="orders" aria-controls="signalOrderHistoryPanel" aria-selected="${activeHistoryTab === "orders"}" tabindex="${activeHistoryTab === "orders" ? "0" : "-1"}">ประวัติการเปิดออเดอร์</button>
       <button id="signalAnalysisHistoryTab" type="button" role="tab" data-signal-history-tab="analysis" aria-controls="signalAnalysisHistoryPanel" aria-selected="${activeHistoryTab === "analysis"}" tabindex="${activeHistoryTab === "analysis" ? "0" : "-1"}">ประวัติการวิเคราะห์</button>
+      <button id="signalOperationsTab" type="button" role="tab" data-signal-history-tab="operations" aria-controls="signalOperationsPanel" aria-selected="false" tabindex="-1">สถานะและเหตุการณ์</button>
     </div>
     <section id="signalOrderHistoryPanel" class="signal-history-subpanel" data-signal-history-panel="orders" role="tabpanel" aria-labelledby="signalOrderHistoryTab" tabindex="0" ${activeHistoryTab === "orders" ? "" : "hidden"}>
       <div class="signal-history-heading">
@@ -19682,7 +20010,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
 
   const historyTabs = [...container.querySelectorAll("[data-signal-history-tab]")];
   const activateHistoryTab = (nextTab, { focus = false } = {}) => {
-    if (!SIGNAL_HISTORY_TABS.includes(nextTab)) return;
+    if (!SIGNAL_HISTORY_VIEW_TABS.includes(nextTab)) return;
     state.modal.signalHistoryTab = nextTab;
     renderSignalHistoryPanel(report);
     saveSessionSnapshot();
