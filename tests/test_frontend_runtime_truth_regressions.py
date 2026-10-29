@@ -898,7 +898,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("filtered = allOrders.slice();", panel)
         self.assertNotIn("signalAgentViews(", panel)
 
-    def test_history_has_exactly_two_nested_views_and_per_bar_agent_truth(self) -> None:
+    def test_history_preserves_two_data_views_and_adds_readonly_operations_view(self) -> None:
         panel = function_block(
             self.main,
             "function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {})",
@@ -912,7 +912,10 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         row = function_block(self.main, "function createSignalAnalysisHistoryRow(round)")
 
         self.assertIn('const SIGNAL_HISTORY_TABS = ["orders", "analysis"]', self.main)
-        self.assertEqual(panel.count('data-signal-history-tab="'), 2)
+        self.assertEqual(panel.count('data-signal-history-tab="'), 3)
+        self.assertIn('const SIGNAL_HISTORY_VIEW_TABS = ["orders", "analysis", "operations"]', self.main)
+        self.assertIn('data-signal-history-tab="operations"', panel)
+        self.assertIn('renderSignalOperationsPanel(report)', panel)
         self.assertIn("ประวัติการเปิดออเดอร์", panel)
         self.assertIn("ประวัติการวิเคราะห์", panel)
         self.assertIn("data-signal-analysis-round-list", panel)
